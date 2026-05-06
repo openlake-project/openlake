@@ -1,0 +1,30 @@
+[package]
+name                   = "phenomenal_storage"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[dependencies]
+phenomenal_io = { path = "../phenomenal_io" }
+
+compio       = { workspace = true }
+futures-util = { workspace = true }
+bytes        = { workspace = true }
+serde        = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+blake3       = { workspace = true }
+async-trait  = { workspace = true }
+siphasher    = { workspace = true }
+uuid         = { version = "1", features = ["v4"] }
+regex        = { workspace = true }
+# Reed-Solomon EC. `reed-solomon-simd` accepts `T: AsRef<[u8]>` for
+# shard inputs, so we feed slices of pool buffers / `Bytes` directly
+# without converting to `Vec<u8>` first. Recovery + restored shards
+# come back as `&[u8]` borrowed from the encoder/decoder, also without
+# Vec allocation. Auto-vectored via SSSE3/AVX2/NEON detected at load.
+reed-solomon-simd = "3"
+
+[dev-dependencies]
+tempfile     = { workspace = true }

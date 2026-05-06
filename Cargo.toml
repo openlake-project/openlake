@@ -1,0 +1,144 @@
+[workspace]
+members  = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.88"
+license      = "Apache-2.0"
+
+[workspace.dependencies]
+# Completion-based async runtime. We use the umbrella `compio = "0.18"`
+# crate so all sub crates pull as a unit (matches iggy's setup, lets us
+# share `cyper-axum`'s expected version line). The historic concern in
+# this codebase was the umbrella `compio = "0.6"` kqueue driver having
+# open-fd attachment bugs; that was twelve releases ago, and the 0.18
+# series ships the same `compio-runtime 0.11` / `compio-fs 0.11` /
+# `compio-io 0.9` / `compio-buf 0.8` / `compio-driver 0.11` /
+# `compio-macros 0.1.2` we were pinning manually, so the API surface we
+# depend on is byte-identical. The only sub-crate that moves is
+# `compio-tls` from our direct 0.9 pin to 0.4 (pulled transitively via
+# the umbrella). API surface (`TlsAcceptor`, `TlsConnector`,
+# `TlsStream`) is the same.
+#
+# Features mirror iggy except we omit `quic` and `ws` (not used).
+# `aws_lc_rs` is selected for rustls's crypto provider via our direct
+# `rustls` dep below; compio's `rustls` feature only enables the
+# `compio-tls/rustls` adapter without forcing a backend.
+compio = { version = "0.18", default-features = false, features = [
+    "runtime",
+    "macros",
+    "io-uring",
+    "fs",
+    "net",
+    "time",
+    "rustls",
+] }
+
+# HTTP wire layer + routing. Cyper bridges hyper's `hyper::rt::Read`/
+# `hyper::rt::Write` traits to compio's I/O surface so we get hyper's
+# full HTTP/1.1 implementation running on our compio runtime + io_uring.
+# Cyper-axum is the matching axum::serve replacement (axum runs on top
+# of any tower::Service-driven hyper).
+#
+# Tokio gets linked transitively (via hyper, hyper-util, h2, axum) but
+# is dormant: cyper supplies its own `CompioExecutor` + `CompioTimer`
+# adapters, so hyper never starts a tokio runtime, never spawns tokio
+# threads, never calls `tokio::time::sleep`. Verified: only
+# `tokio::sync::watch` runs (used by hyper-util for graceful shutdown
+# signalling — pure userspace channel, no runtime needed). Iggy ships
+# this configuration in production.
+#
+# `send_wrapper` lets us use compio's `!Send` futures inside tower's
+# Send-bound `Service::Future` slot. Each runtime is single-threaded
+# so the SendWrapper's panic-on-cross-thread guard never fires.
+cyper        = { version = "0.8.3", default-features = false, features = ["rustls"] }
+cyper-axum   = { version = "0.8.0" }
+axum         = { version = "0.8", features = ["macros"] }
+send_wrapper = "0.6"
+tower        = { version = "0.5", features = ["util"] }
+tower-http   = { version = "0.6", default-features = false, features = ["trace"] }
+# `BodyExt::frame` extension trait used by the PUT body adapter to
+# pull `Frame<Bytes>` from `axum::body::Body` one chunk at a time.
+http-body-util = "0.1"
+
+# Thread-per-core plumbing: `nix` for `sched_setaffinity`, `socket2`
+# for `SO_REUSEPORT` on the accept sockets, `hwlocality` for topology
+# queries (physical cores vs hyperthread siblings).
+nix         = { version = "0.29", features = ["sched"] }
+socket2     = "0.6"
+hwlocality  = "1.0.0-alpha.12"
+
+futures-util       = "0.3"
+
+# Pure-userspace HTTP / S3 protocol helpers. Intentionally library-provided
+# rather than hand-rolled: aws-sigv4 for SigV4 verification, http for typed
+# Request/Response structs, quick-xml for S3 XML error bodies. Runtime /
+# I/O / kernel paths remain compio-native.
+http                  = "1"
+aws-sigv4             = { version = "1", features = ["http1", "sign-http"] }
+aws-credential-types  = "1"
+aws-smithy-runtime-api = { version = "1", features = ["client"] }
+quick-xml             = { version = "0.37", features = ["serialize"] }
+
+# SigV4 streaming / content-SHA verification primitives. aws-sigv4 pulls
+# sha2 0.11 transitively; we pin the same major so only one copy is built.
+sha2               = "0.11"
+hex                = "0.4"
+time               = { version = "0.3", features = ["macros", "parsing", "formatting"] }
+
+# TLS plane. The compio-tls adapter comes via `compio = "0.18"` above
+# (transitively, version 0.4). Rustls is the TLS engine, pinned to the
+# aws-lc-rs crypto provider to match what AWS SDKs and rustfs use in
+# production. Only `aws_lc_rs` enabled — we don't want native-tls's
+# OpenSSL dependency or the duplicate `ring` provider in the build
+# graph. compio-tls's exposed `TlsAcceptor`/`TlsConnector` types are
+# accessed as `compio::tls::*` after the migration.
+rustls             = { version = "0.23", default-features = false, features = ["std", "tls12", "logging", "aws_lc_rs"] }
+rustls-pemfile     = "2"
+rcgen              = "0.13"
+
+bytes              = { version = "1", features = ["serde"] }
+serde              = { version = "1", features = ["derive"] }
+bincode            = { version = "2", features = ["serde"] }
+thiserror          = "2"
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+blake3             = "1"
+async-trait        = "0.1"
+clap               = { version = "4", features = ["derive"] }
+tempfile           = "3"
+httparse           = "1"
+toml               = "0.8"
+
+# Buffer pool. 4-KiB-aligned heap allocations via `aligned-vec` (page-
+# aligned, future-proof for O_DIRECT / io_uring registered buffers /
+# hugepages); lock-free MPMC bucket queues via `crossbeam-queue::ArrayQueue`;
+# global singleton via `once_cell`. Same architecture iggy ships in
+# production (`core/common/src/alloc/`).
+aligned-vec        = "0.6"
+crossbeam-queue    = "0.3"
+once_cell          = "1"
+regex              = "1"
+crc32c             = "0.6"
+
+# SipHash-2-4 keyed PRF. Used by `cluster::set_index_for` to hash
+# `(bucket, key)` strings into a set index. Same crate rustfs uses
+# (`crates/utils/src/hash.rs::sip_hash`); same algorithm minio's
+# `sipHashMod` uses. ~5-10× faster than blake3 for short inputs and
+# keyed against a cluster-wide secret so set placement isn't
+# trivially predictable.
+siphasher          = "1"
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+panic         = "abort"
+debug         = 1
+
+[profile.bench]
+lto           = "thin"
+codegen-units = 1
+debug         = 1

@@ -1,0 +1,31 @@
+[package]
+name                   = "phenomenal_io"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[dependencies]
+compio       = { workspace = true }
+
+bytes        = { workspace = true }
+serde        = { workspace = true }
+bincode      = { workspace = true }
+async-trait  = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+libc         = "0.2"
+uuid         = { version = "1", features = ["v4"] }
+rmp-serde    = "1"
+xxhash-rust  = { version = "0.8", features = ["xxh64"] }
+crc32c       = { workspace = true }
+rustls       = { workspace = true }
+socket2      = "0.6"
+
+# Buffer pool deps — see workspace Cargo.toml.
+aligned-vec     = { workspace = true }
+crossbeam-queue = { workspace = true }
+once_cell       = { workspace = true }
+
+[dev-dependencies]
+tempfile      = { workspace = true }

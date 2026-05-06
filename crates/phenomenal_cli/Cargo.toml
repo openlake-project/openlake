@@ -1,0 +1,21 @@
+[package]
+name                   = "phenomenal_cli"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[[bin]]
+name = "phenomenal"
+path = "src/main.rs"
+
+[dependencies]
+phenomenal_io      = { path = "../phenomenal_io" }
+phenomenal_storage = { path = "../phenomenal_storage" }
+
+compio             = { workspace = true }
+futures-util       = { workspace = true }
+bytes              = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+tracing-subscriber = { workspace = true }

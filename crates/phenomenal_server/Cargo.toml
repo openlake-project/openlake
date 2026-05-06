@@ -1,0 +1,62 @@
+[package]
+name                   = "phenomenal_server"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[[bin]]
+name = "phenomenald"
+path = "src/main.rs"
+
+[dependencies]
+phenomenal_io      = { path = "../phenomenal_io" }
+phenomenal_storage = { path = "../phenomenal_storage" }
+
+compio             = { workspace = true }
+cyper              = { workspace = true }
+cyper-axum         = { workspace = true }
+axum               = { workspace = true }
+send_wrapper       = { workspace = true }
+tower              = { workspace = true }
+tower-http         = { workspace = true }
+http-body-util     = { workspace = true }
+nix                = { workspace = true }
+socket2            = { workspace = true }
+bytes              = { workspace = true }
+serde              = { workspace = true }
+toml               = { workspace = true }
+httparse           = { workspace = true }
+http               = { workspace = true }
+aws-sigv4                 = { workspace = true }
+aws-credential-types      = { workspace = true }
+aws-smithy-runtime-api    = { workspace = true }
+quick-xml          = { workspace = true }
+sha2               = { workspace = true }
+hex                = { workspace = true }
+time               = { workspace = true }
+thiserror          = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap               = { workspace = true }
+async-trait        = { workspace = true }
+futures-util       = { workspace = true }
+
+# TLS plane. compio's `rustls` feature pulls compio-tls 0.4
+# transitively (accessed via `compio::tls`). rustls is the engine,
+# pinned to aws-lc-rs as the crypto provider via our workspace dep.
+# rustls-pemfile is the cert/key loader.
+rustls             = { workspace = true }
+rustls-pemfile     = { workspace = true }
+
+[dev-dependencies]
+rcgen              = { workspace = true }
+tempfile           = { workspace = true }
+
+# Linux-only: hwloc for physical-core enumeration. On macOS / other
+# dev platforms we fall back to `available_parallelism` which can't
+# filter hyperthread siblings — acceptable because production is
+# Linux bare-metal where this dep is present.
+[target.'cfg(target_os = "linux")'.dependencies]
+hwlocality = { workspace = true }
