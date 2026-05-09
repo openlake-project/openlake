@@ -1,4 +1,4 @@
-# phenomenal
+# OpenLake
 
 S3-compatible distributed object storage in Rust. Thread-per-core, io_uring,
 Reed-Solomon erasure coding, on-disk layout compatible with the MinIO `xl.meta`
