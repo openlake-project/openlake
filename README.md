@@ -123,16 +123,6 @@ aws --endpoint-url http://localhost:9000 s3 ls s3://demo/
 
 `phenomenal` (the CLI crate) is a **local** tool: it drives a `LocalFsBackend` directly for diagnostics and microbenchmarks (`phenomenal bench --n 100000 --size 4096`), not an S3 client.
 
-## S3 compatibility
-
-**Implemented:** SigV4 auth · `CreateBucket` / `DeleteBucket` / `HeadBucket` · `PutObject` / `GetObject` / `HeadObject` / `DeleteObject` · `DeleteObjects` (batch) · `ListObjects` (v1) and `ListObjectsV2` · multipart upload (`CreateMultipartUpload` / `UploadPart` / `CompleteMultipartUpload`) · object versioning (per PUT version IDs, `PutBucketVersioning`, `ListObjectVersions`).
-
-**Not yet:** `ListBuckets` (`GET /`) · S3 Object Lock (`CreateBucket` rejects `x-amz-bucket-object-lock-enabled: true`) · bucket policies and ACLs · lifecycle rules · server side replication · server side encryption · object tagging.
-
-## Project status
-
-Early development. Single node and small cluster S3 paths are functional and carry a test suite in the repo; the project is **not production ready**. The on disk format and the cluster RPC protocol may still change between releases. Don't put data you care about on it yet.
-
 ## Contributing
 
 Issues and pull requests are welcome. Before sending a PR:
