@@ -95,6 +95,16 @@ pub struct ClusterConfig {
     /// write time and read time is detected rather than silently
     /// applied.
     pub default_parity_count: usize,
+    /// Cluster deployment UUID. Established at first init by the seed
+    /// node, persisted to every drive's `format.json`, and read back
+    /// on every subsequent boot. Embedded in upload IDs so a Complete
+    /// or Abort routed to the wrong cluster fails fast.
+    ///
+    /// Tests construct `ClusterConfig` with `Uuid::nil()`; the bootstrap
+    /// (`crate::format::bootstrap_format`) populates a real UUID at
+    /// server startup.
+    #[serde(default)]
+    pub deployment_id: uuid::Uuid,
 }
 
 impl ClusterConfig {
@@ -110,7 +120,12 @@ impl ClusterConfig {
         // behavior. Multi-set callers must build `ClusterConfig`
         // directly with their operator-chosen parity.
         let default_parity_count = replication.saturating_sub(1).max(1);
-        Self { nodes, set_drive_count: replication, default_parity_count }
+        Self {
+            nodes,
+            set_drive_count: replication,
+            default_parity_count,
+            deployment_id:   uuid::Uuid::nil(),
+        }
     }
 
     /// Total disks in the cluster across all nodes.
@@ -203,6 +218,7 @@ mod tests {
                 .collect(),
             set_drive_count: set_size,
             default_parity_count: (set_size / 4).max(1),
+            deployment_id: uuid::Uuid::nil(),
         }
     }
 
@@ -217,6 +233,7 @@ mod tests {
                 .collect(),
             set_drive_count: set_size,
             default_parity_count: (set_size / 4).max(1),
+            deployment_id: uuid::Uuid::nil(),
         }
     }
 

@@ -1,169 +1,205 @@
-//! `StorageBackend` implementation that ships every call to a peer node
-//! over TCP RPC. The peer's RPC server maps requests 1:1 onto its own
-//! `LocalFsBackend`, so the wire boundary is invisible to callers.
+//! `StorageBackend` implementation that ships every call to a peer
+//! node over a single, multiplexed HTTP/2 connection.
 //!
-//! Two transport profiles share the same TCP listener:
-//!   * Control plane (small bincode envelopes both directions) reuses
-//!     a small pool of cached connections.
-//!   * Data plane (`CreateFileStream`, `ReadFileStream`) dials a fresh
-//!     connection per call, holds it open for the duration of the byte
-//!     stream, and closes it when the stream is fully drained. Bytes
-//!     flow through the socket without per-chunk framing.
+//! The wire is `cyper::Client` for the request side and
+//! `cyper::Response` for the reply side. h2 multiplexing (one TCP
+//! connection per peer pair, many concurrent streams) eliminates the
+//! per-RPC dial that the legacy custom-binary protocol paid: an
+//! EC[D+P] read used to mean `D+P` fresh TCP+TLS handshakes per
+//! object; here it is `D+P` h2 streams on already-warm connections.
+//!
+//! Three URL shapes carry the entire `StorageBackend` + `LockPeer`
+//! surface:
+//!
+//!   * `POST /v1/rpc` — unary. Body is bincode-encoded `Request`;
+//!     reply body is bincode-encoded `Response`. Used by 20 of the
+//!     22 trait methods plus the two lock RPCs.
+//!   * `PUT /v1/rpc/stream-write` — `create_file_writer`. The
+//!     bincode-encoded `Request::CreateFileStream` rides as a single
+//!     URL-safe-base64 header (`x-phenomenal-rpc`); the body is the
+//!     object bytes streamed via `cyper::Body::stream(...)` from an
+//!     `mpsc::channel` that the returned `RemoteWriteSink` pushes
+//!     into. This is the push→pull bridge: cyper's body half pulls
+//!     from the channel as the engine half pushes via
+//!     `ByteSink::write_all`.
+//!   * `POST /v1/rpc/stream-read` — `read_file_stream`. Body carries
+//!     the bincode-encoded `Request::ReadFileStream`; on success the
+//!     response body IS the object bytes (length cross-checked
+//!     against the `x-phenomenal-length` response header).
+//!
+//! No connection pooling, no `dial()`, no length-prefix framing —
+//! cyper's hyper-util-backed pool keeps one h2 connection per peer
+//! and multiplexes every concurrent call through it.
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use compio::buf::{BufResult, IntoInner, IoBuf, IoBufMut};
-use compio::io::{AsyncRead, AsyncWrite};
-use compio::net::TcpStream;
-use compio::tls::{TlsConnector, TlsStream};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use bytes::Bytes;
+use compio::runtime::JoinHandle;
+use futures::SinkExt;
+use futures_util::{Stream, StreamExt};
+use http::HeaderName;
+use rustls::ClientConfig;
 
-use crate::alloc::PooledBuffer;
 use crate::backend::{LockPeer, StorageBackend};
 use crate::error::{IoError, IoResult};
 use crate::rpc::{self, DiskIdx, Request, Response};
 use crate::stream::{ByteSink, ByteStream};
 use crate::types::{
-    DeleteOptions, DiskInfo, FileInfo, RenameDataResp, RenameOptions,
+    DeleteOptions, DiskInfo, FileInfo, FormatJson, RenameDataResp, RenameOptions,
     UpdateMetadataOpts, VolInfo,
 };
 
-/// Soft cap on the cached control-plane connections per peer. Past this
-/// the pool drops the oldest connection on release rather than growing
-/// without bound. Picked to bound FD usage at `peers × CONTROL_POOL_MAX`
-/// while still amortising connect cost across bursty workloads.
-const CONTROL_POOL_MAX: usize = 16;
+// -----------------------------------------------------------------------------
+// Wire conventions.
+//
+// All three routes live on the same h2 origin per peer; the path
+// disambiguates unary from streaming. Header names are fixed strings
+// so they const-build to `HeaderName` (no per-call hashing).
+// -----------------------------------------------------------------------------
 
-/// One peer connection, plaintext or TLS-wrapped.
-pub enum PeerStream {
-    Tcp(TcpStream),
-    Tls(TlsStream<TcpStream>),
+/// URL path for unary RPCs. Bincode-encoded `Request` in the request
+/// body, bincode-encoded `Response` in the reply body.
+const URL_RPC:    &str = "v1/rpc";
+/// URL path for `create_file_writer`. The `Request::CreateFileStream`
+/// envelope rides in `HDR_RPC`; the request body is the streamed
+/// object bytes.
+const URL_WRITE:  &str = "v1/rpc/stream-write";
+/// URL path for `read_file_stream`. The `Request::ReadFileStream`
+/// envelope rides in the request body; the response body is the
+/// streamed object bytes.
+const URL_READ:   &str = "v1/rpc/stream-read";
+
+/// Header carrying the URL-safe-base64 bincode-encoded `Request`
+/// envelope on the streaming-write route. We use a header rather than
+/// a query parameter because the path/volume strings can be long and
+/// we want every byte of the body for object content.
+const HDR_RPC: HeaderName = HeaderName::from_static("x-phenomenal-rpc");
+
+/// Channel depth feeding the `cyper::Body::stream(...)` adapter for
+/// streaming PUTs. Eight buffered chunks keeps the h2 send window
+/// fully fed without unbounded memory: at `STREAM_CHUNK_BYTES`
+/// (~64 KiB) per chunk the adapter holds at most ~512 KiB in flight,
+/// matching the h2 default initial window.
+const PUT_CHANNEL_DEPTH: usize = 8;
+
+/// Convert any error type that implements `Display` into an `IoError`
+/// suitable for the `StorageBackend` surface. Used for cyper, http,
+/// and stream-channel failures uniformly so callers see one error
+/// shape.
+fn map_http<E: std::fmt::Display>(e: E) -> IoError {
+    IoError::Io(std::io::Error::other(e.to_string()))
 }
 
-impl AsyncRead for PeerStream {
-    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
-        match self {
-            PeerStream::Tcp(s) => s.read(buf).await,
-            PeerStream::Tls(s) => s.read(buf).await,
-        }
+fn unexpected(r: Response) -> IoError {
+    IoError::Decode(format!("unexpected response variant: {r:?}"))
+}
+
+/// Boxed h2 response body stream. `LocalBoxStream`-shaped — the body
+/// is bound to the runtime that issued the request so we pin-box it
+/// rather than constraining the trait to `Send`.
+type ResponseStream = Pin<Box<dyn Stream<Item = cyper::Result<Bytes>>>>;
+
+// -----------------------------------------------------------------------------
+// Per-peer cyper client.
+//
+// One `PeerClient` per `(self, peer)` pair per runtime. Cloning a
+// `cyper::Client` bumps an `Arc` refcount on hyper-util's pooled
+// inner client, so the actual h2 connection (one per peer per
+// runtime) is created lazily on first request and reused for every
+// subsequent request. h2 multiplexing then handles concurrency over
+// that single connection.
+// -----------------------------------------------------------------------------
+
+pub struct PeerClient {
+    /// `https://host:port` — cyper's URL parser concatenates the path
+    /// suffix at call time. Stored as `String` because `http::Uri`
+    /// doesn't support trivially appending path segments.
+    base:   String,
+    client: cyper::Client,
+}
+
+impl PeerClient {
+    /// Build a peer client for `addr` configured with the cluster's
+    /// rustls `ClientConfig` (ALPN list = `[b"h2"]`, root CA pinned).
+    /// The client is lazy: no socket is opened until the first
+    /// request.
+    pub fn new(addr: SocketAddr, tls: Arc<ClientConfig>) -> Self {
+        let client = cyper::Client::builder()
+            .use_rustls(tls)
+            .build();
+        Self { base: format!("https://{addr}"), client }
+    }
+
+    fn url(&self, suffix: &str) -> String {
+        format!("{}/{}", self.base, suffix)
     }
 }
 
-impl AsyncWrite for PeerStream {
-    async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
-        match self {
-            PeerStream::Tcp(s) => s.write(buf).await,
-            PeerStream::Tls(s) => s.write(buf).await,
-        }
-    }
-
-    async fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            PeerStream::Tcp(s) => s.flush().await,
-            PeerStream::Tls(s) => s.flush().await,
-        }
-    }
-
-    async fn shutdown(&mut self) -> std::io::Result<()> {
-        match self {
-            PeerStream::Tcp(s) => s.shutdown().await,
-            PeerStream::Tls(s) => s.shutdown().await,
-        }
-    }
-}
-
-/// One peer node's connection-pool state. Shared across every
-/// `RemoteBackend` instance that targets a disk on this peer (i.e.
-/// one `PeerConn` per peer node, with N `RemoteBackend`s referencing
-/// it for that node's N disks).
-///
-/// The synchronous `Mutex` is only held around `pop`/`push` — never
-/// across an `await` — so it does not stall the runtime. Concurrent
-/// control-plane calls past `CONTROL_POOL_MAX` dial fresh sockets,
-/// and the kernel's TCP multiplexing handles the fan-in.
-pub struct PeerConn {
-    addr:        SocketAddr,
-    tls:         Option<Rc<TlsConnector>>,
-    server_name: String,
-    pool:        Mutex<Vec<PeerStream>>,
-}
-
-impl PeerConn {
-    pub fn new(addr: SocketAddr) -> Self {
-        Self {
-            addr,
-            tls:         None,
-            server_name: addr.ip().to_string(),
-            pool:        Mutex::new(Vec::new()),
-        }
-    }
-
-    pub fn with_tls(addr: SocketAddr, server_name: String, connector: Rc<TlsConnector>) -> Self {
-        Self {
-            addr,
-            tls:         Some(connector),
-            server_name,
-            pool:        Mutex::new(Vec::new()),
-        }
-    }
-}
+// -----------------------------------------------------------------------------
+// `RemoteBackend`: one instance per `(peer_node, disk_idx)` pair.
+// -----------------------------------------------------------------------------
 
 /// `StorageBackend` impl that ships disk-targeted RPCs to a peer
 /// node. Each instance is bound to a specific `(peer_node, disk_idx)`
-/// pair: the peer node is determined by the shared `Rc<PeerConn>`,
+/// pair: the peer node is determined by the shared `Rc<PeerClient>`,
 /// and `disk_idx` selects which of the peer's disks every RPC
 /// applies to.
 ///
 /// Multiple `RemoteBackend`s for the same peer node share one
-/// `PeerConn` (and therefore one TCP/TLS connection pool), so
+/// `PeerClient` (and therefore one h2 connection on first use), so
 /// connection cost is `O(peers)` not `O(peers × disks)`.
 pub struct RemoteBackend {
-    peer:     Rc<PeerConn>,
+    peer:     Rc<PeerClient>,
     disk_idx: DiskIdx,
 }
 
 impl RemoteBackend {
-    /// Construct a backend targeting `disk_idx` on the peer reachable
-    /// via `peer`. Cheap — just an `Rc` clone.
-    pub fn new(peer: Rc<PeerConn>, disk_idx: DiskIdx) -> Self {
+    pub fn new(peer: Rc<PeerClient>, disk_idx: DiskIdx) -> Self {
         Self { peer, disk_idx }
     }
 
-    /// The disk index this backend is bound to.
     pub fn disk_idx(&self) -> DiskIdx { self.disk_idx }
 
-    // -----------------------------------------------------------------
-    // Control plane (envelope-shaped RPCs)
-    // -----------------------------------------------------------------
-
-    async fn call(&self, req: Request) -> IoResult<Response> {
-        for attempt in 0..2 {
-            match self.call_once(&req).await {
-                Ok(resp)                                              => return Ok(resp),
-                Err(e) if attempt == 0 && matches!(e, IoError::Io(_)) => continue,
-                Err(e)                                                => return Err(e),
+    /// Send one unary RPC and decode the reply.
+    ///
+    /// 2xx with a valid bincode `Response` body is the success path.
+    /// Non-2xx responses still attempt to decode `Response::Err`
+    /// from the body so a richer error reaches the caller; only
+    /// undecodable bodies fall back to a generic
+    /// `rpc http <status>` error.
+    async fn unary(&self, req: Request) -> IoResult<Response> {
+        let body = rpc::encode(&req)?;
+        let resp = self
+            .peer.client
+            .post(self.peer.url(URL_RPC))
+            .map_err(map_http)?
+            .body(body)
+            .send().await
+            .map_err(map_http)?;
+        let status = resp.status();
+        let bytes  = resp.bytes().await.map_err(map_http)?;
+        if !status.is_success() {
+            if let Ok(Response::Err(e)) = rpc::decode::<Response>(&bytes) {
+                return Err(e.into());
             }
+            return Err(IoError::Io(std::io::Error::other(
+                format!("rpc http status: {status}")
+            )));
         }
-        unreachable!()
+        rpc::decode::<Response>(&bytes)
     }
 
-    async fn call_once(&self, req: &Request) -> IoResult<Response> {
-        let mut conn = self.acquire_control().await?;
-        let body = rpc::encode(req)?;
-        if let Err(e) = rpc::write_frame(&mut conn, &body).await {
-            return Err(IoError::Io(e));
-        }
-        let resp_bytes = rpc::read_frame(&mut conn).await.map_err(IoError::Io)?;
-        let resp: Response = rpc::decode(&resp_bytes)?;
-        self.release_control(conn);
-        Ok(resp)
-    }
-
-    /// Lock-plane: acquire.
+    /// Lock-plane: acquire. Both lock RPCs ride the same unary route
+    /// as every other call — the lock plane gets no special wire
+    /// treatment.
     pub async fn lock_acquire(&self, resource: &str, uid: &str, ttl_ms: u32) -> IoResult<bool> {
-        match self.call(Request::LockAcquire {
+        match self.unary(Request::LockAcquire {
             resource: resource.into(), uid: uid.into(), ttl_ms,
         }).await? {
             Response::LockGranted => Ok(true),
@@ -175,7 +211,7 @@ impl RemoteBackend {
 
     /// Lock-plane: release.
     pub async fn lock_release(&self, resource: &str, uid: &str) -> IoResult<()> {
-        match self.call(Request::LockRelease {
+        match self.unary(Request::LockRelease {
             resource: resource.into(), uid: uid.into(),
         }).await? {
             Response::Ok     => Ok(()),
@@ -183,86 +219,15 @@ impl RemoteBackend {
             other            => Err(unexpected(other)),
         }
     }
-
-    // -----------------------------------------------------------------
-    // Connection management — delegated to the shared `PeerConn`.
-    // -----------------------------------------------------------------
-
-    async fn acquire_control(&self) -> IoResult<PeerStream> {
-        self.peer.acquire_control().await
-    }
-
-    fn release_control(&self, conn: PeerStream) {
-        self.peer.release_control(conn)
-    }
-
-    async fn dial(&self) -> IoResult<PeerStream> {
-        self.peer.dial().await
-    }
 }
 
-impl PeerConn {
-    /// Pop a cached control connection if one is available; otherwise
-    /// dial a fresh one.
-    async fn acquire_control(&self) -> IoResult<PeerStream> {
-        if let Some(c) = self.pool.lock().unwrap().pop() {
-            return Ok(c);
-        }
-        self.dial().await
-    }
-
-    /// Return a control connection to the pool, dropping it if the
-    /// pool is already at `CONTROL_POOL_MAX` capacity.
-    fn release_control(&self, conn: PeerStream) {
-        let mut pool = self.pool.lock().unwrap();
-        if pool.len() < CONTROL_POOL_MAX {
-            pool.push(conn);
-        }
-        // else drop — bounded FD usage.
-    }
-
-    /// Dial a fresh TCP/TLS connection. Used both for control-plane
-    /// pool fills and for data-plane streams (which never touch the
-    /// pool — they're held open for the duration of one streaming
-    /// PUT/GET, then closed).
-    async fn dial(&self) -> IoResult<PeerStream> {
-        // Build a raw socket so we can set TCP buffer sizes and Nagle
-        // off BEFORE the SYN handshake. TCP window-scaling (RFC 1323)
-        // is negotiated in SYN — the scale factor cannot change after
-        // the connection is established. Without these, every inter-
-        // node shard fetch is window-limited to ~1.5 Gbps regardless
-        // of NIC speed. `TCP_BUFFER_BYTES` is the central tuning
-        // value (see `phenomenal_io::tuning`).
-        use crate::tuning::TCP_BUFFER_BYTES;
-        let socket = socket2::Socket::new(
-            socket2::Domain::for_address(self.addr),
-            socket2::Type::STREAM,
-            Some(socket2::Protocol::TCP),
-        ).map_err(IoError::Io)?;
-        socket.set_recv_buffer_size(TCP_BUFFER_BYTES).map_err(IoError::Io)?; // 4 MiB
-        socket.set_send_buffer_size(TCP_BUFFER_BYTES).map_err(IoError::Io)?; // 4 MiB
-        socket.set_tcp_nodelay(true).map_err(IoError::Io)?;
-        socket.connect(&self.addr.into()).map_err(IoError::Io)?;
-        socket.set_nonblocking(true).map_err(IoError::Io)?;
-        let std_stream: std::net::TcpStream = socket.into();
-        let tcp = TcpStream::from_std(std_stream).map_err(IoError::Io)?;
-        match &self.tls {
-            None      => Ok(PeerStream::Tcp(tcp)),
-            Some(c)   => {
-                let stream = c.connect(&self.server_name, tcp).await.map_err(IoError::Io)?;
-                Ok(PeerStream::Tls(stream))
-            }
-        }
-    }
-}
-
-fn unexpected(r: Response) -> IoError {
-    IoError::Decode(format!("unexpected response variant: {r:?}"))
-}
-
+// `call_unit!` / `call_typed!` are thin wrappers that the 22-method
+// `StorageBackend` impl below uses to keep each method body to a
+// single line. They expand to the same match-on-Response shape every
+// caller writes by hand otherwise.
 macro_rules! call_unit {
     ($self:expr, $req:expr) => {
-        match $self.call($req).await? {
+        match $self.unary($req).await? {
             Response::Ok     => Ok(()),
             Response::Err(e) => Err(e.into()),
             other            => Err(unexpected(other)),
@@ -271,7 +236,7 @@ macro_rules! call_unit {
 }
 macro_rules! call_typed {
     ($self:expr, $req:expr, $variant:ident) => {
-        match $self.call($req).await? {
+        match $self.unary($req).await? {
             Response::$variant(v) => Ok(v),
             Response::Err(e)      => Err(e.into()),
             other                 => Err(unexpected(other)),
@@ -279,24 +244,63 @@ macro_rules! call_typed {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Streaming read: a `ByteStream` that owns the TCP/TLS connection for the
-// duration of the read. The connection is closed when the stream is
-// dropped — data-plane connections are not pooled because they are held
-// for the full body transfer.
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Streaming GET: response body becomes a `ByteStream`.
+// -----------------------------------------------------------------------------
 
 pub struct RemoteReadStream {
-    conn:      PeerStream,
+    inner:     ResponseStream,
+    /// Bytes still expected from the peer body. Reaching zero is the
+    /// normal EOF path; reaching `None` from `inner` before zero
+    /// surfaces as `UnexpectedEof`.
     remaining: u64,
 }
 
-/// `ByteSink` over an open data-plane connection. The header has
-/// already been sent by the time this sink is constructed; each
-/// `write_all` lands as one or more `compio` socket writes. `finish`
-/// flushes (TLS) and reads the status response.
+#[async_trait(?Send)]
+impl ByteStream for RemoteReadStream {
+    async fn read(&mut self) -> IoResult<Bytes> {
+        if self.remaining == 0 {
+            return Ok(Bytes::new());
+        }
+        match self.inner.next().await {
+            Some(Ok(buf)) => {
+                if buf.is_empty() {
+                    // Empty data frame — pull again so caller
+                    // contract ("empty Bytes means EOF") holds.
+                    return Box::pin(self.read()).await;
+                }
+                let n = buf.len() as u64;
+                if n > self.remaining {
+                    return Err(IoError::Io(std::io::Error::other(
+                        format!("remote read overran by {} bytes", n - self.remaining)
+                    )));
+                }
+                self.remaining -= n;
+                Ok(buf)
+            }
+            Some(Err(e)) => Err(map_http(e)),
+            None => Err(IoError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("remote stream truncated, {} bytes missing", self.remaining),
+            ))),
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Streaming PUT: writes to a `ByteSink` push into an mpsc that
+// becomes the cyper request body. The request future is spawned at
+// construction time so the body pull and the engine's push run
+// concurrently on the same compio runtime.
+// -----------------------------------------------------------------------------
+
 pub struct RemoteWriteSink {
-    conn:     PeerStream,
+    /// Sender side of the body channel. Dropped on `finish()` so
+    /// cyper's body stream sees clean EOF.
+    tx:       Option<futures::channel::mpsc::Sender<cyper::Result<Bytes>>>,
+    /// Pending request future. Resolved by `finish()` once the body
+    /// has been fully fed.
+    handle:   Option<JoinHandle<cyper::Result<cyper::Response>>>,
     expected: u64,
     written:  u64,
     finished: bool,
@@ -304,23 +308,27 @@ pub struct RemoteWriteSink {
 
 #[async_trait(?Send)]
 impl ByteSink for RemoteWriteSink {
-    async fn write_all(&mut self, buf: bytes::Bytes) -> IoResult<()> {
+    async fn write_all(&mut self, buf: Bytes) -> IoResult<()> {
         if self.finished {
             return Err(IoError::Io(std::io::Error::other("write after finish")));
         }
         if buf.is_empty() {
             return Ok(());
         }
-        let len = buf.len();
-        rpc::write_all_bytes(&mut self.conn, buf).await.map_err(IoError::Io)?;
-        self.written += len as u64;
+        let len = buf.len() as u64;
+        let tx = self.tx.as_mut()
+            .ok_or_else(|| IoError::Io(std::io::Error::other("sink already closed")))?;
+        // Channel back-pressure naturally throttles the engine when
+        // the network is slower than the writer: mpsc::send awaits
+        // until there's slot space (bounded by PUT_CHANNEL_DEPTH).
+        tx.send(Ok(buf)).await
+            .map_err(|_| IoError::Io(std::io::Error::other("peer body channel closed")))?;
+        self.written += len;
         Ok(())
     }
 
     async fn finish(&mut self) -> IoResult<()> {
-        if self.finished {
-            return Ok(());
-        }
+        if self.finished { return Ok(()); }
         self.finished = true;
         if self.written != self.expected {
             return Err(IoError::Io(std::io::Error::new(
@@ -328,10 +336,27 @@ impl ByteSink for RemoteWriteSink {
                 format!("create_file_writer: wrote {}/{}", self.written, self.expected),
             )));
         }
-        self.conn.flush().await.map_err(IoError::Io)?;
-        let resp_bytes = rpc::read_frame(&mut self.conn).await.map_err(IoError::Io)?;
-        let resp: Response = rpc::decode(&resp_bytes)?;
-        match resp {
+        // EOF the body channel — cyper's body stream resolves to
+        // `None` next, completing the h2 DATA frames with END_STREAM.
+        self.tx.take();
+
+        let handle = self.handle.take()
+            .ok_or_else(|| IoError::Io(std::io::Error::other("missing request future")))?;
+        // `JoinHandle::await` yields `Result<T, Box<dyn Any + Send>>`
+        // where the outer error is a runtime panic. Map both layers.
+        let resp = handle.await
+            .map_err(|_| IoError::Io(std::io::Error::other("rpc body task panicked")))?
+            .map_err(map_http)?;
+
+        let status = resp.status();
+        let bytes  = resp.bytes().await.map_err(map_http)?;
+        if !status.is_success() {
+            return Err(match rpc::decode::<Response>(&bytes) {
+                Ok(Response::Err(e)) => e.into(),
+                _ => IoError::Io(std::io::Error::other(format!("create_file http {status}"))),
+            });
+        }
+        match rpc::decode::<Response>(&bytes)? {
             Response::Ok     => Ok(()),
             Response::Err(e) => Err(e.into()),
             other            => Err(unexpected(other)),
@@ -339,33 +364,17 @@ impl ByteSink for RemoteWriteSink {
     }
 }
 
-#[async_trait(?Send)]
-impl ByteStream for RemoteReadStream {
-    async fn read(&mut self) -> IoResult<bytes::Bytes> {
-        let want = self.remaining.min(crate::tuning::STREAM_CHUNK_BYTES as u64) as usize;
-        if want == 0 {
-            return Ok(bytes::Bytes::new());
-        }
-        let buf = PooledBuffer::with_capacity(want);
-        let slice = buf.slice(0..want);
-        let BufResult(res, slice_back) = self.conn.read(slice).await;
-        let mut buf = slice_back.into_inner();
-        let n = res.map_err(IoError::Io)?;
-        if n == 0 {
-            return Err(IoError::Io(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "remote stream truncated",
-            )));
-        }
-        self.remaining -= n as u64;
-        buf.truncate(n);
-        Ok(buf.freeze())
-    }
-}
+// -----------------------------------------------------------------------------
+// `StorageBackend` impl. 20 unary methods plus the two streaming
+// methods. Every body is one to three lines — the macros + helpers
+// above carry the work.
+// -----------------------------------------------------------------------------
 
 #[async_trait(?Send)]
 impl StorageBackend for RemoteBackend {
-    fn label(&self) -> String { format!("remote:{}/d{}", self.peer.addr, self.disk_idx) }
+    fn label(&self) -> String {
+        format!("remote:{}/d{}", self.peer.base, self.disk_idx)
+    }
 
     async fn disk_info(&self) -> IoResult<DiskInfo> {
         call_typed!(self, Request::DiskInfo { disk_idx: self.disk_idx }, Disk)
@@ -395,49 +404,67 @@ impl StorageBackend for RemoteBackend {
         )
     }
 
-    /// Streaming read. Dials a fresh data-plane connection, sends the
-    /// `ReadFileStream` header, reads the response header to learn the
-    /// length, then returns a `ByteStream` that owns the connection for
-    /// the rest of the read.
     async fn read_file_stream(
         &self, volume: &str, path: &str, offset: u64, length: u64,
     ) -> IoResult<Box<dyn ByteStream>> {
-        let mut conn = self.dial().await?;
         let req = Request::ReadFileStream {
             disk_idx: self.disk_idx,
             volume: volume.into(), path: path.into(), offset, length,
         };
-        rpc::write_frame(&mut conn, &rpc::encode(&req)?).await.map_err(IoError::Io)?;
-        let resp_bytes = rpc::read_frame(&mut conn).await.map_err(IoError::Io)?;
-        let resp: Response = rpc::decode(&resp_bytes)?;
-        let length = match resp {
-            Response::StreamHeader { length } => length,
-            Response::Err(e)                  => return Err(e.into()),
-            other                             => return Err(unexpected(other)),
-        };
-        Ok(Box::new(RemoteReadStream {
-            conn,
-            remaining: length,
-        }))
+        let body = rpc::encode(&req)?;
+        let resp = self
+            .peer.client
+            .post(self.peer.url(URL_READ))
+            .map_err(map_http)?
+            .body(body)
+            .send().await
+            .map_err(map_http)?;
+        let status = resp.status();
+        if !status.is_success() {
+            // Error path: response body carries an encoded `Response::Err`.
+            let bytes = resp.bytes().await.map_err(map_http)?;
+            if let Ok(Response::Err(e)) = rpc::decode::<Response>(&bytes) {
+                return Err(e.into());
+            }
+            return Err(IoError::Io(std::io::Error::other(
+                format!("read_file_stream http {status}")
+            )));
+        }
+        let inner: ResponseStream = Box::pin(resp.bytes_stream());
+        Ok(Box::new(RemoteReadStream { inner, remaining: length }))
     }
 
-    /// Streaming write. Dials a fresh data-plane connection, sends the
-    /// `CreateFileStream` header, and returns a `ByteSink` that pushes
-    /// raw body bytes onto the connection. The caller pushes exactly
-    /// `size` bytes via `write_all`, then `finish()` flushes and reads
-    /// the status response. The connection is dropped (closed) after
-    /// the call.
     async fn create_file_writer(
         &self, volume: &str, path: &str, size: u64,
     ) -> IoResult<Box<dyn ByteSink>> {
-        let mut conn = self.dial().await?;
-        let req = Request::CreateFileStream {
+        let env = Request::CreateFileStream {
             disk_idx: self.disk_idx,
             volume: volume.into(), path: path.into(), size,
         };
-        rpc::write_frame(&mut conn, &rpc::encode(&req)?).await.map_err(IoError::Io)?;
+        let env_b64 = URL_SAFE_NO_PAD.encode(rpc::encode(&env)?);
+
+        let (tx, rx) = futures::channel::mpsc::channel::<cyper::Result<Bytes>>(PUT_CHANNEL_DEPTH);
+        let body = cyper::Body::stream(rx);
+
+        // Drive the request future on the same runtime so the body
+        // pull (cyper) and body push (sink writes) interleave
+        // cooperatively. Spawning is mandatory: if we held the
+        // future and only awaited it inside `finish()`, the body
+        // channel would deadlock waiting for a reader.
+        let url    = self.peer.url(URL_WRITE);
+        let client = self.peer.client.clone();
+        let handle = compio::runtime::spawn(async move {
+            client
+                .put(&url)?
+                .header(HDR_RPC, env_b64.as_str())?
+                .header(http::header::CONTENT_LENGTH, size)?
+                .body(body)
+                .send().await
+        });
+
         Ok(Box::new(RemoteWriteSink {
-            conn,
+            tx:       Some(tx),
+            handle:   Some(handle),
             expected: size,
             written:  0,
             finished: false,
@@ -529,6 +556,50 @@ impl StorageBackend for RemoteBackend {
         call_unit!(self, Request::VerifyFile {
             disk_idx: self.disk_idx,
             volume: volume.into(), path: path.into(), fi: fi.clone(),
+        })
+    }
+
+    async fn read_format(&self) -> IoResult<Option<FormatJson>> {
+        match self.unary(Request::ReadFormat { disk_idx: self.disk_idx }).await? {
+            Response::FormatOpt(opt) => Ok(opt),
+            Response::Err(e)         => Err(e.into()),
+            other                    => Err(unexpected(other)),
+        }
+    }
+
+    async fn write_format(&self, fmt: &FormatJson) -> IoResult<()> {
+        call_unit!(self, Request::WriteFormat {
+            disk_idx: self.disk_idx,
+            fmt: fmt.clone(),
+        })
+    }
+
+    async fn write_file(&self, volume: &str, path: &str, bytes: Vec<u8>) -> IoResult<()> {
+        call_unit!(self, Request::WriteFile {
+            disk_idx: self.disk_idx,
+            volume:   volume.into(),
+            path:     path.into(),
+            bytes,
+        })
+    }
+
+    async fn read_file(&self, volume: &str, path: &str) -> IoResult<Option<Vec<u8>>> {
+        match self.unary(Request::ReadFile {
+            disk_idx: self.disk_idx,
+            volume:   volume.into(),
+            path:     path.into(),
+        }).await? {
+            Response::FileBytes(opt) => Ok(opt),
+            Response::Err(e)         => Err(e.into()),
+            other                    => Err(unexpected(other)),
+        }
+    }
+
+    async fn make_dir_all(&self, volume: &str, path: &str) -> IoResult<()> {
+        call_unit!(self, Request::MakeDirAll {
+            disk_idx: self.disk_idx,
+            volume:   volume.into(),
+            path:     path.into(),
         })
     }
 }

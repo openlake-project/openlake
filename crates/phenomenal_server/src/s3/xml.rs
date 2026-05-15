@@ -119,3 +119,66 @@ pub struct ListBucketObject {
     #[serde(rename = "StorageClass")] pub storage_class: String,
 }
 
+/// Body of `POST /{bucket}/{key}?uploads`, returned by
+/// `CreateMultipartUpload`. Echoes the bucket and key the client
+/// targeted and surfaces the server-allocated `UploadId` that
+/// subsequent `UploadPart` and `CompleteMultipartUpload` requests
+/// must carry.
+#[derive(Serialize)]
+#[serde(rename = "InitiateMultipartUploadResult")]
+pub struct InitiateMultipartUploadResult {
+    #[serde(rename = "@xmlns")] pub xmlns:     &'static str,
+    #[serde(rename = "Bucket")] pub bucket:    String,
+    #[serde(rename = "Key")]    pub key:       String,
+    #[serde(rename = "UploadId")] pub upload_id: String,
+}
+
+impl InitiateMultipartUploadResult {
+    pub fn new(bucket: String, key: String, upload_id: String) -> Self {
+        Self { xmlns: S3_NS, bucket, key, upload_id }
+    }
+}
+
+
+
+// ---------------------------------------------------------------------------
+// CompleteMultipartUpload — request body + response shape
+// ---------------------------------------------------------------------------
+
+/// `<CompleteMultipartUpload>` request body for `POST /{bucket}/{key}?uploadId=X`.
+/// Each `<Part>` carries the part number the client uploaded plus the
+/// etag the server returned at UploadPart time. Server validates the
+/// list against the on-disk `part.N.meta` sidecars before assembling.
+#[derive(Deserialize, Debug)]
+#[serde(rename = "CompleteMultipartUpload")]
+pub struct CompleteMultipartUploadRequest {
+    #[serde(rename = "Part", default)]
+    pub parts: Vec<CompleteMultipartUploadPart>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename = "Part")]
+pub struct CompleteMultipartUploadPart {
+    #[serde(rename = "PartNumber")] pub part_number: u32,
+    #[serde(rename = "ETag")]       pub etag:        String,
+}
+
+/// `<CompleteMultipartUploadResult>` response. `Location` is the
+/// canonical URL of the assembled object; `ETag` is the multipart
+/// composite etag (`<hash>-<part_count>`).
+#[derive(Serialize)]
+#[serde(rename = "CompleteMultipartUploadResult")]
+pub struct CompleteMultipartUploadResult {
+    #[serde(rename = "@xmlns")]   pub xmlns:    &'static str,
+    #[serde(rename = "Location")] pub location: String,
+    #[serde(rename = "Bucket")]   pub bucket:   String,
+    #[serde(rename = "Key")]      pub key:      String,
+    #[serde(rename = "ETag")]     pub etag:     String,
+}
+
+impl CompleteMultipartUploadResult {
+    pub fn new(bucket: String, key: String, etag: String) -> Self {
+        let location = format!("/{bucket}/{key}");
+        Self { xmlns: S3_NS, location, bucket, key, etag }
+    }
+}

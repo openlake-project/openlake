@@ -38,15 +38,18 @@ mod tls_material;
 
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
 
-use compio::tls::{TlsAcceptor, TlsConnector};
-use phenomenal_io::{LocalFsBackend, LockPeer, PeerConn, RemoteBackend, StorageBackend};
-use phenomenal_storage::{ClusterConfig, DiskAddr, DsyncClient, Engine};
+use compio::tls::TlsAcceptor;
+use phenomenal_io::{LocalFsBackend, LockPeer, PeerClient, RemoteBackend, StorageBackend};
+use rustls::ClientConfig;
+use phenomenal_storage::{bootstrap_format, ClusterConfig, DiskAddr, DsyncClient, Engine};
+use uuid::Uuid;
 
 use crate::lock_server::{LocalLockPeer, LockServer};
 use crate::tls_material::TlsMaterial;
@@ -103,19 +106,22 @@ fn main() -> anyhow::Result<()> {
     // logs instead of being swallowed by `JoinHandle`.
     let (done_tx, done_rx) = std::sync::mpsc::channel::<(usize, anyhow::Result<()>)>();
 
+    let bootstrap_id: Arc<OnceLock<Uuid>> = Arc::new(OnceLock::new());
+
     let mut handles = Vec::with_capacity(num_runtimes);
     for (runtime_id, cpu) in cpus.into_iter().enumerate() {
-        let cfg         = cfg.clone();
-        let done_tx     = done_tx.clone();
-        let lock_server = lock_server.clone();
-        let tls         = tls.clone();
-        let handle      = thread::Builder::new()
+        let cfg          = cfg.clone();
+        let done_tx      = done_tx.clone();
+        let lock_server  = lock_server.clone();
+        let tls          = tls.clone();
+        let bootstrap_id = bootstrap_id.clone();
+        let handle       = thread::Builder::new()
             .name(format!("runtime-{runtime_id}"))
             .spawn(move || {
                 let result = (|| -> anyhow::Result<()> {
                     bind_cpu(cpu)?;
                     let rt = create_runtime()?;
-                    rt.block_on(run_runtime(runtime_id, cfg, lock_server, tls))
+                    rt.block_on(run_runtime(runtime_id, cfg, lock_server, tls, bootstrap_id))
                 })();
                 if let Err(e) = &result {
                     tracing::error!(runtime_id, cpu, "runtime exited with error: {e:#}");
@@ -244,19 +250,25 @@ fn create_runtime() -> anyhow::Result<compio::runtime::Runtime> {
 /// Returns only when both accept loops exit (normally: never, until
 /// shutdown).
 async fn run_runtime(
-    runtime_id:  usize,
-    cfg:         Arc<config::Config>,
-    lock_server: Arc<LockServer>,
-    tls:         TlsMaterial,
+    runtime_id:   usize,
+    cfg:          Arc<config::Config>,
+    lock_server:  Arc<LockServer>,
+    tls:          TlsMaterial,
+    bootstrap_id: Arc<OnceLock<Uuid>>,
 ) -> anyhow::Result<()> {
-    // Extract the three optional handles from the shared TLS material.
-    // Wrap each in `Rc` for runtime-local sharing — `TlsAcceptor` /
-    // `TlsConnector` are themselves cheap (`Arc<*Config>` inside) but
-    // `Rc` keeps the shared pointer in single-threaded territory after
-    // this point, so per-connection refcount bumps are non-atomic.
-    let s3_acceptor:   Option<Rc<TlsAcceptor>>  = tls.s3_acceptor()  .map(Rc::new);
-    let rpc_acceptor:  Option<Rc<TlsAcceptor>>  = tls.rpc_acceptor() .map(Rc::new);
-    let rpc_connector: Option<Rc<TlsConnector>> = tls.rpc_connector().map(Rc::new);
+    // Extract the three TLS handles from the shared material.
+    //
+    // S3 acceptor / RPC acceptor go through `Rc` for runtime-local
+    // sharing: `TlsAcceptor` is a cheap `Arc<ServerConfig>` wrapper
+    // but `Rc` keeps per-connection refcount bumps non-atomic on the
+    // single-thread runtime.
+    //
+    // RPC connector is a bare `Arc<ClientConfig>` because cyper takes
+    // it directly via `ClientBuilder::use_rustls(Arc<ClientConfig>)`.
+    // No further wrapping is needed — clone the `Arc` per peer.
+    let s3_acceptor:   Option<Rc<TlsAcceptor>>     = tls.s3_acceptor()  .map(Rc::new);
+    let rpc_acceptor:  Option<Rc<TlsAcceptor>>     = tls.rpc_acceptor() .map(Rc::new);
+    let rpc_connector: Option<Arc<ClientConfig>>   = tls.rpc_connector();
 
     // Each runtime opens its own handle to every local disk. The
     // underlying filesystems are shared across the OS, the kernel
@@ -304,22 +316,25 @@ async fn run_runtime(
             }
             lock_peers.push(local_lock_peer.clone());
         } else {
-            // Peer node — one shared `PeerConn`, then one
-            // `RemoteBackend` per disk on that peer. The same
-            // `PeerConn` Rc threads through every disk_idx, so all
-            // disks on this peer share one TCP/TLS connection pool.
+            // Peer node — one shared `PeerClient`, then one
+            // `RemoteBackend` per disk on that peer. The `PeerClient`
+            // wraps a `cyper::Client`; its hyper-util pool keeps a
+            // single multiplexed h2 connection per (runtime, peer)
+            // pair, so concurrent disk RPCs ride h2 streams instead
+            // of fresh TCP dials.
             //
-            // `server_name` for rustls is the peer's IP literal —
-            // the cluster CA's leaf certs must include this IP in
-            // their SubjectAltName for verification to pass.
-            let peer = match &rpc_connector {
-                Some(connector) => Rc::new(PeerConn::with_tls(
-                    n.rpc_addr,
-                    n.rpc_addr.ip().to_string(),
-                    connector.clone(),
-                )),
-                None => Rc::new(PeerConn::new(n.rpc_addr)),
-            };
+            // The cluster CA's leaf certs must include the peer's IP
+            // (or DNS name reachable via the cyper URL parser) in
+            // their SubjectAltName for verification to pass — same
+            // requirement the legacy raw-rustls path had.
+            //
+            // Multi-node clusters require `rpc_tls` (validated in
+            // `Config::from_toml`); the `expect` here exists only to
+            // turn a config-validation oversight into an immediate
+            // panic rather than silent plaintext fallback.
+            let connector = rpc_connector.clone()
+                .expect("multi-node cluster requires rpc_tls (config validation)");
+            let peer = Rc::new(PeerClient::new(n.rpc_addr, connector));
             for disk_idx in 0..n.disk_count {
                 let rb = Rc::new(RemoteBackend::new(peer.clone(), disk_idx));
                 backends.insert(
@@ -336,25 +351,11 @@ async fn run_runtime(
         }
     }
 
-    let cluster = ClusterConfig {
-        nodes:                cfg.nodes.clone(),
-        set_drive_count:      cfg.set_drive_count,
-        default_parity_count: cfg.default_parity_count,
-    };
-    let dsync  = Rc::new(DsyncClient::new(lock_peers));
-    let engine = Rc::new(Engine::new(cluster, backends, dsync, cfg.self_id));
-
-    // Per-runtime SigV4 verifier. Shared as an `Rc` so every connection
-    // task on this runtime can look up secrets without a lock or a
-    // cross core cache miss.
     let auth_state = Rc::new(auth::AuthState::new(
         cfg.region.clone(),
         &cfg.credentials,
     ));
 
-    // SO_REUSEPORT lets every runtime bind the same (ip, port). The
-    // kernel's reuseport hash routes each incoming connection to
-    // exactly one runtime's accept queue based on the 4-tuple.
     let s3_listener  = s3::listener::bind_reuseport(cfg.s3_addr)
         .with_context(|| format!("runtime {runtime_id}: bind s3 on {}", cfg.s3_addr))?;
     let rpc_listener = rpc_server::bind_reuseport(cfg.rpc_addr)
@@ -362,26 +363,63 @@ async fn run_runtime(
 
     tracing::info!(runtime_id, s3 = %cfg.s3_addr, rpc = %cfg.rpc_addr, "runtime serving");
 
-    // Both accept loops live on this runtime's scheduler as detached
-    // tasks. Each spawns per-connection tasks into the same runtime.
-    // All connection work stays on this runtime's thread / core / ring.
-    //
-    // The RPC server gets a single `Rc<Vec<Rc<dyn StorageBackend>>>`
-    // — one entry per local disk, indexed by `disk_idx`. Cloning
-    // into the spawned task is one Rc bump.
-    let rpc_disks    = Rc::new(local_disks.clone());
-    let rpc_locks    = lock_server.clone();
-    let rpc_acceptor = rpc_acceptor.clone();
+    let rpc_disks      = Rc::new(local_disks.clone());
+    let rpc_locks      = lock_server.clone();
+    let rpc_acceptor_t = rpc_acceptor.clone();
     let rpc_task = compio::runtime::spawn(async move {
-        if let Err(e) = rpc_server::serve(rpc_listener, rpc_disks, rpc_locks, rpc_acceptor).await {
+        if let Err(e) = rpc_server::serve(rpc_listener, rpc_disks, rpc_locks, rpc_acceptor_t).await {
             tracing::error!(runtime_id, "rpc serve error: {e:#}");
         }
     });
 
-    // S3 frontend. Plaintext and TLS both flow through axum + cyper-
-    // axum, with the TLS path going through the `TlsTcpListener`
-    // wrapper that completes the rustls handshake during `accept()`
-    // before yielding the connection to hyper.
+    let deployment_id: Uuid = if runtime_id == 0 {
+        let mut local_b   : Vec<Rc<dyn StorageBackend>> = Vec::new();
+        let mut local_off : Vec<u32>                    = Vec::new();
+        let mut peer_b    : Vec<Rc<dyn StorageBackend>> = Vec::new();
+        let mut peer_off  : Vec<u32>                    = Vec::new();
+        let mut flat_idx  : u32                         = 0;
+        for n in &cfg.nodes {
+            for d in 0..n.disk_count {
+                flat_idx += 1; // 1-based per FormatJson contract
+                let addr = DiskAddr { node_id: n.id, disk_idx: d };
+                let be = backends.get(&addr).expect("backend for every disk").clone();
+                if n.id == cfg.self_id {
+                    local_b.push(be);
+                    local_off.push(flat_idx);
+                } else {
+                    peer_b.push(be);
+                    peer_off.push(flat_idx);
+                }
+            }
+        }
+        let mut node_ids: Vec<u16> = cfg.nodes.iter().map(|n| n.id).collect();
+        node_ids.sort_unstable();
+        let id = bootstrap_format(
+            &local_b, &peer_b, &local_off, &peer_off,
+            cfg.self_id, &node_ids, cfg.set_drive_count,
+            Duration::from_secs(1),    
+            Duration::from_secs(300), 
+        ).await
+            .with_context(|| format!("runtime {runtime_id}: cluster format bootstrap"))?;
+        bootstrap_id.set(id).expect("only runtime 0 sets bootstrap_id");
+        tracing::info!(deployment_id = %id, "cluster bootstrap complete");
+        id
+    } else {
+        loop {
+            if let Some(&id) = bootstrap_id.get() { break id; }
+            compio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+
+    let cluster = ClusterConfig {
+        nodes:                cfg.nodes.clone(),
+        set_drive_count:      cfg.set_drive_count,
+        default_parity_count: cfg.default_parity_count,
+        deployment_id,
+    };
+    let dsync  = Rc::new(DsyncClient::new(lock_peers));
+    let engine = Rc::new(Engine::new(cluster, backends, dsync, cfg.self_id));
+
     let s3_engine     = engine.clone();
     let s3_auth       = auth_state.clone();
     let s3_acceptor   = s3_acceptor.clone();
@@ -391,7 +429,6 @@ async fn run_runtime(
         tracing::error!(runtime_id, "s3 serve loop exited");
     });
 
-    // Both loop forever; awaiting either just parks this task.
     let _ = s3_task.await;
     let _ = rpc_task.await;
     Ok(())
