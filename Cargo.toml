@@ -53,8 +53,21 @@ compio = { version = "0.18", default-features = false, features = [
 # `send_wrapper` lets us use compio's `!Send` futures inside tower's
 # Send-bound `Service::Future` slot. Each runtime is single-threaded
 # so the SendWrapper's panic-on-cross-thread guard never fires.
-cyper        = { version = "0.8.3", default-features = false, features = ["rustls"] }
-cyper-axum   = { version = "0.8.0" }
+#
+# Inter-node RPC plane is HTTP/2 over mTLS: every node is both a cyper
+# client (`RemoteBackend`) and a cyper-axum server (`rpc_server`). Both
+# halves require the `http2` feature, which switches `hyper-util`'s
+# legacy::Client and `hyper_util::server::conn::auto::Builder` from h1-
+# only to ALPN-driven h1+h2. ALPN selects h2 because rustls is configured
+# with `alpn_protocols = vec![b"h2"]` on both ServerConfig and
+# ClientConfig in `tls_material.rs`. The `stream` feature surfaces
+# `Response::bytes_stream()` for streaming GETs and `Body::stream(...)`
+# for streaming PUTs — used by `remote_fs::RemoteRead/WriteSink`. The
+# old custom binary protocol over raw TCP (length-prefixed bincode
+# envelopes + per-call `dial()`) is gone with this commit; `cyper`
+# replaces every byte of that wire path.
+cyper        = { version = "0.8.3", default-features = false, features = ["rustls", "http2", "stream"] }
+cyper-axum   = { version = "0.8.0", features = ["http2"] }
 axum         = { version = "0.8", features = ["macros"] }
 send_wrapper = "0.6"
 tower        = { version = "0.5", features = ["util"] }
@@ -71,6 +84,11 @@ socket2     = "0.6"
 hwlocality  = "1.0.0-alpha.12"
 
 futures-util       = "0.3"
+# `futures::channel::mpsc` is the bridge between the engine's push-style
+# `ByteSink::write_all` writes and cyper's pull-style `Body::stream`.
+# `Receiver` already implements `Stream`, so the sink side just `tx.send`s
+# `Bytes` and the cyper body half polls them off the channel.
+futures            = "0.3"
 
 # Pure-userspace HTTP / S3 protocol helpers. Intentionally library-provided
 # rather than hand-rolled: aws-sigv4 for SigV4 verification, http for typed
@@ -123,6 +141,14 @@ crossbeam-queue    = "0.3"
 once_cell          = "1"
 regex              = "1"
 crc32c             = "0.6"
+
+# format.json — JSON-serialized cluster identity file persisted to every
+# disk root. Matches MinIO's format.json shape (human-inspectable).
+serde_json         = "1"
+# URL-safe base64 for MinIO-format upload IDs:
+# `base64(deployment_id + "." + uuid + "x" + nanos)`. URL_SAFE_NO_PAD
+# matches `base64.RawURLEncoding` in MinIO.
+base64             = "0.22"
 
 # SipHash-2-4 keyed PRF. Used by `cluster::set_index_for` to hash
 # `(bucket, key)` strings into a set index. Same crate rustfs uses

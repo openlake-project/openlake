@@ -109,12 +109,19 @@ pub struct Config {
     /// only HTTPS with the supplied cert chain + key.
     #[serde(default)]
     pub s3_tls:          Option<TlsConfig>,
-    /// Optional TLS for the inter-node RPC plane. Configures the
-    /// listener (server side) on this node and the connector (client
-    /// side) `RemoteBackend`s use to reach peers. When `client_ca`
-    /// is set, the connector verifies peer certs against it; without
-    /// it, the connector is rejected at config validation because we
-    /// refuse to ship a TLS connector that trusts everything.
+    /// TLS for the inter-node RPC plane. **Required for any cluster of
+    /// `nodes.len() > 1`.** The RPC plane speaks HTTP/2 negotiated via
+    /// ALPN over rustls (cyper does not expose `http2_only(true)`, so
+    /// ALPN-h2 over TLS is the only path to h2 on the client side).
+    /// Single-node deployments never dial peers, so RPC TLS is allowed
+    /// to be absent there for development convenience.
+    ///
+    /// Configures the listener (server side) on this node and the
+    /// rustls `ClientConfig` `RemoteBackend`s consume on the cyper
+    /// client side. `client_ca` is the cluster CA bundle the connector
+    /// pins on; required for any multi-node cluster — without it we'd
+    /// either trust everything (insecure) or trust nothing (won't
+    /// connect).
     #[serde(default)]
     pub rpc_tls:         Option<TlsConfig>,
     /// Optional pool tuning. Defaults to enabled / 4 GiB / 8192-per-
@@ -294,17 +301,34 @@ impl Config {
         if let Some(t) = &cfg.s3_tls {
             validate_tls_files(t, "s3_tls")?;
         }
+        // Multi-node clusters require the inter-node RPC plane to be
+        // TLS-terminated. The plane speaks HTTP/2 negotiated via ALPN,
+        // and ALPN is only consulted during the TLS handshake — without
+        // TLS there is no h2 negotiation surface, and cyper's
+        // `ClientBuilder` does not expose `http2_only(true)` to force
+        // h2 prior-knowledge over plaintext. Single-node deployments
+        // never call `RemoteBackend`, so plaintext is fine there.
+        match (cfg.nodes.len(), &cfg.rpc_tls) {
+            (1, _) => {}
+            (_, None) => anyhow::bail!(
+                "rpc_tls is required for multi-node clusters: the inter-node \
+                 RPC plane is HTTP/2 over TLS only"
+            ),
+            (_, Some(t)) => {
+                validate_tls_files(t, "rpc_tls")?;
+                if t.client_ca.is_none() {
+                    anyhow::bail!(
+                        "rpc_tls.client_ca is required for multi-node clusters \
+                         so RemoteBackend can verify peer certificates"
+                    );
+                }
+            }
+        }
         if let Some(t) = &cfg.rpc_tls {
-            validate_tls_files(t, "rpc_tls")?;
-            // For multi-node clusters the connector side needs a CA to
-            // verify peers against. Single-node deployments don't talk
-            // RPC to themselves, so `client_ca` is allowed to be absent
-            // there; we only enforce it when there is more than one node.
-            if cfg.nodes.len() > 1 && t.client_ca.is_none() {
-                anyhow::bail!(
-                    "rpc_tls.client_ca is required for multi-node clusters \
-                     so RemoteBackend can verify peer certificates"
-                );
+            // Single-node case may still set rpc_tls (harmless); validate
+            // its files so a typo in cert_path is caught at startup.
+            if cfg.nodes.len() == 1 {
+                validate_tls_files(t, "rpc_tls")?;
             }
         }
         Ok(cfg)

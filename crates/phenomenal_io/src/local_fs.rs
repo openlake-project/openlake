@@ -43,6 +43,11 @@ use crate::types::{
 use crate::xl_meta::{self, DecodedRecord};
 
 const META_FILENAME:         &str = "xl.meta";
+/// Cluster-identity file. One per drive root, persisted JSON,
+/// written exactly once at first cluster init by the seed node.
+/// See [`crate::types::FormatJson`] and the bootstrap state machine
+/// in `phenomenal_storage::format`.
+const FORMAT_FILENAME:       &str = ".phenomenal.format.json";
 /// Backup-of-prior-xl.meta filename written inside the old data_dir
 /// on same-`version_id` overwrites (S-6). A crash-recovery scrubber
 /// finds this and can reconstruct the pre-PUT state if the live
@@ -82,6 +87,7 @@ impl LocalFsBackend {
         let trash = root.join(TRASH_DIRNAME);
         std::fs::create_dir_all(&trash)?;
         std::fs::create_dir_all(root.join(STAGING_VOL))?;
+        std::fs::create_dir_all(root.join(MULTIPART_VOL))?;
         std::fs::create_dir_all(root.join(SYSTEM_BUCKET))?;
         Ok(Self { root, trash })
     }
@@ -219,13 +225,53 @@ fn map_open_err(e: std::io::Error, volume: &str, path: &str) -> IoError {
     }
 }
 
-
-/// `fsync` the directory inode so a preceding `rename` inside it is
-/// durable across power loss.
 async fn fsync_dir(dir: &Path) -> IoResult<()> {
     let f = File::open(dir).await.map_err(IoError::Io)?;
     f.sync_all().await.map_err(IoError::Io)?;
     f.close().await.map_err(IoError::Io)
+}
+
+async fn atomic_write_with<F, Fut>(final_path: &Path, write_fn: F) -> IoResult<()>
+where
+    F:   FnOnce(File) -> Fut,
+    Fut: std::future::Future<Output = IoResult<File>>,
+{
+    let parent = final_path.parent()
+        .ok_or_else(|| IoError::InvalidArgument(
+            format!("atomic_write_with: no parent for {}", final_path.display())
+        ))?
+        .to_path_buf();
+    let fname = final_path.file_name()
+        .ok_or_else(|| IoError::InvalidArgument(
+            format!("atomic_write_with: empty filename for {}", final_path.display())
+        ))?
+        .to_string_lossy()
+        .into_owned();
+    let tmp_path = parent.join(format!(".{fname}.{}.tmp", Uuid::new_v4().simple()));
+
+    let result: IoResult<()> = async {
+        let file = OpenOptions::new()
+            .create_new(true).write(true)
+            .open(&tmp_path).await.map_err(IoError::Io)?;
+        let file = write_fn(file).await?;
+        file.sync_all().await.map_err(IoError::Io)?;
+        file.close().await.map_err(IoError::Io)?;
+        compio::fs::rename(&tmp_path, final_path).await.map_err(IoError::Io)?;
+        fsync_dir(&parent).await
+    }.await;
+
+    if result.is_err() {
+        let _ = compio::fs::remove_file(&tmp_path).await;
+    }
+    result
+}
+
+async fn atomic_write_bytes(final_path: &Path, bytes: Vec<u8>) -> IoResult<()> {
+    atomic_write_with(final_path, |mut file| async move {
+        let compio::buf::BufResult(res, _) = file.write_all_at(bytes, 0).await;
+        res.map_err(IoError::Io)?;
+        Ok(file)
+    }).await
 }
 
 /// `ByteStream` over an open compio `File`, bounded to `[pos, end)`.
@@ -510,32 +556,14 @@ impl StorageBackend for LocalFsBackend {
         &self, _orig_volume: &str, volume: &str, path: &str, fi: &FileInfo,
     ) -> IoResult<()> {
         self.require_vol(volume).await?;
-        let dir = self.file_path(volume, path);
+        let dir        = self.file_path(volume, path);
         compio::fs::create_dir_all(&dir).await.map_err(IoError::Io)?;
-
         let encoded    = xl_meta::encode(fi)?;
         let final_path = dir.join(META_FILENAME);
-        let tmp_path   = dir.join(format!(".{}.{}.tmp", META_FILENAME, Uuid::new_v4().simple()));
-
-        let result: IoResult<()> = async {
-            let file = OpenOptions::new()
-                .create_new(true).write(true)
-                .open(&tmp_path).await.map_err(|e| map_open_err(e, volume, path))?;
-            // Vectored write: kernel scatters from `head` and `tail`
-            // (when present) in one io_uring `writev` SQE — no userspace
-            // memcpy of the inline payload, no concat into a staging
-            // buffer. `tail` is a refcount-clone of `fi.data`.
+        atomic_write_with(&final_path, |file| async move {
             write_xl_meta_vectored(&file, encoded).await?;
-            file.sync_all().await.map_err(IoError::Io)?;
-            file.close().await.map_err(IoError::Io)?;
-            compio::fs::rename(&tmp_path, &final_path).await.map_err(IoError::Io)?;
-            fsync_dir(&dir).await
-        }.await;
-
-        if result.is_err() {
-            let _ = compio::fs::remove_file(&tmp_path).await;
-        }
-        result
+            Ok(file)
+        }).await
     }
 
     async fn read_version(
@@ -757,6 +785,50 @@ impl StorageBackend for LocalFsBackend {
     async fn verify_file(&self, volume: &str, path: &str, _fi: &FileInfo) -> IoResult<()> {
         self.check_file(volume, path).await
     }
+
+    async fn read_format(&self) -> IoResult<Option<crate::types::FormatJson>> {
+        let path = self.root.join(FORMAT_FILENAME);
+        match compio::fs::read(&path).await {
+            Ok(bytes) => {
+                let fmt: crate::types::FormatJson = serde_json::from_slice(&bytes)
+                    .map_err(|e| IoError::Decode(format!("format.json: {e}")))?;
+                Ok(Some(fmt))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(IoError::Io(e)),
+        }
+    }
+
+    async fn write_file(&self, volume: &str, path: &str, bytes: Vec<u8>) -> IoResult<()> {
+        self.require_vol(volume).await?;
+        let final_path = self.file_path(volume, path);
+        if let Some(parent) = final_path.parent() {
+            compio::fs::create_dir_all(parent).await.map_err(IoError::Io)?;
+        }
+        atomic_write_bytes(&final_path, bytes).await
+    }
+
+    async fn read_file(&self, volume: &str, path: &str) -> IoResult<Option<Vec<u8>>> {
+        self.require_vol(volume).await?;
+        let final_path = self.file_path(volume, path);
+        match compio::fs::read(&final_path).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(IoError::Io(e)),
+        }
+    }
+
+    async fn make_dir_all(&self, volume: &str, path: &str) -> IoResult<()> {
+        self.require_vol(volume).await?;
+        let dir = self.file_path(volume, path);
+        compio::fs::create_dir_all(&dir).await.map_err(IoError::Io)
+    }
+
+    async fn write_format(&self, fmt: &crate::types::FormatJson) -> IoResult<()> {
+        let bytes = serde_json::to_vec_pretty(fmt)
+            .map_err(|e| IoError::Encode(format!("format.json: {e}")))?;
+        atomic_write_bytes(&self.root.join(FORMAT_FILENAME), bytes).await
+    }
 }
 
 /// Write an `EncodedXlMeta` (head + optional tail) to `file` at offset
@@ -776,9 +848,6 @@ async fn write_xl_meta_vectored(
         let BufResult(res, _) = file.write_all_at(head, 0).await;
         return res.map_err(IoError::Io);
     }
-    // [head, frame_0, frame_1, ..., frame_n] as one writev SQE — kernel
-    // scatter-gathers from N+1 distinct allocations in one syscall, no
-    // userspace concat anywhere.
     let mut iovecs: Vec<bytes::Bytes> = Vec::with_capacity(1 + tail.len());
     iovecs.push(head);
     iovecs.extend(tail);

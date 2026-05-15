@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use crate::error::IoResult;
 use crate::stream::{ByteSink, ByteStream};
 use crate::types::{
-    DeleteOptions, DiskInfo, FileInfo, RenameDataResp, RenameOptions,
+    DeleteOptions, DiskInfo, FileInfo, FormatJson, RenameDataResp, RenameOptions,
     UpdateMetadataOpts, VolInfo,
 };
 
@@ -163,6 +163,16 @@ pub trait StorageBackend {
     ) -> IoResult<RenameDataResp>;
 
     async fn verify_file(&self, volume: &str, path: &str, fi: &FileInfo) -> IoResult<()>;
+
+    async fn read_format(&self) -> IoResult<Option<FormatJson>>;
+
+    async fn write_format(&self, fmt: &FormatJson) -> IoResult<()>;
+
+    async fn write_file(&self, volume: &str, path: &str, bytes: Vec<u8>) -> IoResult<()>;
+
+    async fn read_file(&self, volume: &str, path: &str) -> IoResult<Option<Vec<u8>>>;
+
+    async fn make_dir_all(&self, volume: &str, path: &str) -> IoResult<()>;
 }
 
 /// Lock-plane peer.

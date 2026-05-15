@@ -37,11 +37,6 @@
 //!   TCP window-scaling negotiates with enough room for ~25 Gbps at
 //!   1 ms RTT (BDP ≈ 3 MiB). Set on the socket BEFORE the SYN
 //!   handshake — once negotiated it cannot grow without renegotiation.
-//! - `FRAME_HEADER_BYTES = 4`. Wire-format constant: every RPC frame
-//!   is `[u32 BE length][body bytes]`. The 4 is the on-wire size of
-//!   `u32`. NOT a tunable — changing it would break the wire
-//!   protocol. Surfaced as a named constant only to eliminate the
-//!   bare `4` magic number at construction sites.
 
 /// Per-iteration chunk size for the streaming pump (read from peer
 /// socket → write to local disk, and read from local disk → write to
@@ -72,9 +67,8 @@ pub const DRAIN_CHUNK_BYTES: usize = 64 * 1024;
 /// cannot grow afterwards.
 pub const TCP_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
-/// Wire-format constant: bytes occupied by the length prefix of a
-/// `[u32 BE length][body]` RPC frame. NOT a tunable — changing this
-/// breaks the wire protocol and the peer's framing. Surfaced as a
-/// named constant only so `4` doesn't appear as a magic number at
-/// every frame-construction site.
-pub const FRAME_HEADER_BYTES: usize = std::mem::size_of::<u32>();
+// FRAME_HEADER_BYTES was the length-prefix size of the legacy
+// custom-binary inter-node wire protocol. The plane is now HTTP/2
+// over rustls (cyper-axum on the server, cyper on the client), where
+// h2 DATA frames carry the framing — there is no length prefix for
+// this code to define. Removed alongside the protocol it described.

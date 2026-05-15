@@ -417,3 +417,14 @@ pub struct BitrotVerifier {
     /// Expected full file hash, hex encoded.
     pub sum_hex: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FormatJson {
+    pub version:         u32,
+    pub format:          String,
+    pub id:              uuid::Uuid,
+    #[serde(rename = "setDriveCount")]
+    pub set_drive_count: usize,
+    #[serde(rename = "thisDisk")]
+    pub this_disk:       u32,
+}

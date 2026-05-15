@@ -12,7 +12,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use phenomenal_io::stream::{read_full, VecByteStream};
-use phenomenal_io::{LocalFsBackend, StorageBackend};
+use phenomenal_io::{BucketMeta, LocalFsBackend, StorageBackend};
 use phenomenal_storage::{ClusterConfig, DiskAddr, Engine, NodeAddr};
 
 #[derive(Parser)]
@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let cluster = ClusterConfig {
+        deployment_id: uuid::Uuid::nil(),
         nodes: vec![NodeAddr {
             id: 0,
             rpc_addr: "127.0.0.1:0".parse().unwrap(),
@@ -95,7 +96,11 @@ async fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::CreateBucket { bucket } => {
-            engine.create_bucket(&bucket).await?;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            engine.create_bucket(&bucket, BucketMeta::new(now_ms, false)).await?;
             println!("created {bucket}");
         }
         Cmd::DeleteBucket { bucket, force } => {
@@ -148,7 +153,11 @@ async fn run_bench(
     c: usize,
 ) -> Result<()> {
     // Idempotent setup: create the bucket if absent, ignore if present.
-    match engine.create_bucket(&bucket).await {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    match engine.create_bucket(&bucket, BucketMeta::new(now_ms, false)).await {
         Ok(()) => {}
         Err(e) => {
             // BucketAlreadyExists is fine; any other error is fatal.

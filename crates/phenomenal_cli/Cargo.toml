@@ -19,3 +19,4 @@ bytes              = { workspace = true }
 clap               = { workspace = true }
 anyhow             = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid               = { version = "1", features = ["v4"] }

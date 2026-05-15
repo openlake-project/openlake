@@ -7,10 +7,12 @@ pub mod dsync;
 pub mod ec;
 pub mod engine;
 pub mod error;
+pub mod format;
 pub mod object;
 
 pub use cluster::{ClusterConfig, DiskAddr, DiskIdx, NodeAddr, NodeId};
 pub use dsync::{DsyncClient, LockGuard};
 pub use engine::{Engine, DEFAULT_INLINE_THRESHOLD};
 pub use error::{StorageError, StorageResult};
-pub use object::{ObjectInfo, StorageClass};
+pub use format::{bootstrap_format, FormatError};
+pub use object::{CompletePart, MultipartInit, ObjectInfo, StorageClass};

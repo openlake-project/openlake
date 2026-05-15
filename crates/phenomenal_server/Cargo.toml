@@ -42,6 +42,14 @@ tracing-subscriber = { workspace = true }
 clap               = { workspace = true }
 async-trait        = { workspace = true }
 futures-util       = { workspace = true }
+# `futures::stream::unfold` builds the streaming response body for
+# `POST /v1/rpc/stream-read` (mirroring the s3 GET handler). The
+# `futures` umbrella crate already lives at the workspace level for
+# the same purpose in `phenomenal_io`.
+futures            = { workspace = true }
+uuid               = { version = "1", features = ["v4"] }
+base64             = { workspace = true }
+md-5               = "0.10"
 
 # TLS plane. compio's `rustls` feature pulls compio-tls 0.4
 # transitively (accessed via `compio::tls`). rustls is the engine,

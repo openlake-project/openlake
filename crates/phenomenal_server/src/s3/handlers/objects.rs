@@ -9,7 +9,7 @@
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_TYPE, ETAG, LAST_MODIFIED};
-use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use send_wrapper::SendWrapper;
@@ -41,6 +41,19 @@ const SHA_STREAMING_UNSIGNED_TRAILER: &str = "STREAMING-UNSIGNED-PAYLOAD-TRAILER
 pub struct ObjectQuery {
     #[serde(default, rename = "versionId")]
     pub version_id: Option<String>,
+    /// `?partNumber=N&uploadId=X` on `PUT /{bucket}/{key}` selects
+    /// `UploadPart`. Both keys must be present together (S3 spec
+    /// rejects either-only as malformed).
+    #[serde(default, rename = "partNumber")]
+    pub part_number: Option<u32>,
+    #[serde(default, rename = "uploadId")]
+    pub upload_id:   Option<String>,
+    /// `?uploads` on `POST /{bucket}/{key}` selects `CreateMultipartUpload`;
+    /// when paired with `?uploadId=X` the request is malformed. Bare
+    /// presence (`?uploads` with no value) deserializes via serde as
+    /// `Some("")`, which the handler treats as "uploads flag set".
+    #[serde(default)]
+    pub uploads:     Option<String>,
 }
 
 // todo: @arnav implement multi-part (multipart upload + ?partNumber on GET)
@@ -100,14 +113,38 @@ fn parse_version_id(raw: Option<&str>) -> Result<Option<String>, AppError> {
 }
 
 pub async fn head_object(
-    State(state): State<AppState>,
+    State(state):       State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    Query(query):       Query<ObjectQuery>,
 ) -> Result<Response, AppError> {
+
+    let version_id = parse_version_id(query.version_id.as_deref())?;
+    let explicit_version_requested = version_id.is_some();
+
     let engine = state.engine().clone();
     let info = SendWrapper::new(async move {
-        engine.stat(&bucket, &key).await
+        match version_id.as_deref() {
+            None       => engine.stat(&bucket, &key).await,
+            Some(vid)  => engine.stat_version(&bucket, &key, vid).await,
+        }
     })
     .await?;
+
+    if info.is_delete_marker {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-amz-delete-marker", HeaderValue::from_static("true"));
+        if !info.version_id.is_empty() {
+            if let Ok(v) = HeaderValue::from_str(&info.version_id) {
+                headers.insert("x-amz-version-id", v);
+            }
+        }
+        let status = if explicit_version_requested {
+            StatusCode::METHOD_NOT_ALLOWED
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        return Ok((status, headers, Body::empty()).into_response());
+    }
 
     let mut headers = HeaderMap::new();
     populate_object_headers(&mut headers, &info);
@@ -130,16 +167,6 @@ pub async fn delete_object(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ---------------------------------------------------------------------------
-// POST /{bucket}?delete  — DeleteObjects (batch object delete)
-// ---------------------------------------------------------------------------
-//
-// URL is bucket-scoped because the request carries N keys in the body
-// (no single primary key fits in the URL). The operation itself is
-// purely object-scoped — bucket directory and unlisted objects are
-// untouched. Lives in this module alongside the rest of the object
-// CRUD handlers.
-
 const DELETE_OBJECTS_MAX_KEYS: usize = 1000;
 
 pub async fn delete_objects(
@@ -154,11 +181,8 @@ pub async fn delete_objects(
         .and_then(|s| s.parse().ok())
         .ok_or(AppError::Malformed("DeleteObjects requires Content-Length"))?;
 
-    // S3 requires Content-MD5 (or x-amz-checksum-*) on DeleteObjects so
-    // a tampered body is detected. We accept either; absence of both
-    // is a 400.
     let supplied_md5 = headers
-        .get(axum::http::header::CONTENT_MD5)
+        .get("content-md5")
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let supplied_sha256 = headers
@@ -175,8 +199,10 @@ pub async fn delete_objects(
         .map_err(|_| AppError::Malformed("DeleteObjects body unreadable"))?;
 
     if let Some(expected_md5) = supplied_md5.as_deref() {
-        let actual_md5 = base64::engine::general_purpose::STANDARD
-            .encode(md5::compute(bytes.as_ref()).as_ref());
+        use base64::Engine as _;
+        use md5::Digest as _;
+        let digest = md5::Md5::digest(bytes.as_ref());
+        let actual_md5 = base64::engine::general_purpose::STANDARD.encode(digest);
         if actual_md5 != expected_md5 {
             return Err(AppError::Malformed("Content-MD5 does not match request body"));
         }
@@ -193,14 +219,15 @@ pub async fn delete_objects(
             "<Delete> exceeds the 1000-key limit",
         ));
     }
+    if request.objects.iter().any(|o| o.version_id.as_deref().map_or(false, |v| !v.is_empty())) {
+        return Err(AppError::NotImplemented(
+            "DeleteObjects with <VersionId> entries is not yet implemented",
+        ));
+    }
 
     let quiet  = request.quiet.unwrap_or(false);
     let engine = state.engine().clone();
 
-    // Per-key deletes run in parallel, bounded so a 1000-key request
-    // doesn't fan out 1000 concurrent dsync acquires. 32 in flight is
-    // enough to saturate cluster throughput without overwhelming the
-    // lock service.
     use futures_util::stream::{self as fstream, StreamExt};
     let bucket = bucket.clone();
     let result = SendWrapper::new(async move {
@@ -298,89 +325,125 @@ struct ErrorEntry {
     message: String,
 }
 
-// ---------------------------------------------------------------------------
-// PUT /{bucket}/{key}
-// ---------------------------------------------------------------------------
-
-/// Streaming PUT.
-///
-/// SigV4 seed verification has already run in the `sigv4` middleware
-/// — we land here with `x-amz-content-sha256` describing how the body
-/// is to be verified:
-///
-///   * `UNSIGNED-PAYLOAD` — body is signed only via the seed; pass
-///     bytes through `BodySource::Plain` (no body hash check).
-///   * hex-sha256 (single-shot signed) — `BodySource::HexSha` tees
-///     bytes through a streaming SHA-256 and rejects on mismatch.
-///   * `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` (aws-chunked) — not yet
-///     wired on the axum body path; rejected with 501 here. The
-///     existing chunked-decoder in `auth::ChunkedSource` operates on
-///     a raw `compio::io::AsyncRead` and needs to be ported to the
-///     `ByteStream` trait before it can ride on top of axum's body.
-pub async fn put_object(
-    State(state):       State<AppState>,
+pub async fn post_object(
+    State(state):        State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
-    request:            Request<Body>,
+    Query(query):        Query<ObjectQuery>,
+    headers:             HeaderMap,
+    body:                Body,
 ) -> Result<Response, AppError> {
-    let (parts, body) = request.into_parts();
+    let has_uploads   = query.uploads.is_some();
+    let has_upload_id = query.upload_id.is_some();
+    match (has_uploads, has_upload_id) {
+        (true,  false) => create_multipart_handler(state, bucket, key, headers).await,
+        (false, true)  => complete_multipart_handler(
+            state, bucket, key,
+            query.upload_id.expect("checked above"),
+            headers, body,
+        ).await,
+        (true,  true)  => Err(AppError::Malformed(
+            "?uploads and ?uploadId are mutually exclusive",
+        )),
+        (false, false) => Err(AppError::Malformed(
+            "object POST requires ?uploads or ?uploadId",
+        )),
+    }
+}
 
-    // Content-Length is required: this layer doesn't yet implement
-    // chunked-transfer or auto-detect via aws-chunked decode.
-    let content_length: u64 = parts
-        .headers
-        .get(axum::http::header::CONTENT_LENGTH)
+async fn create_multipart_handler(
+    state:   AppState,
+    bucket:  String,
+    key:     String,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok())
-        .ok_or(AppError::Malformed("missing or invalid Content-Length"))?;
+        .map(str::to_owned);
 
-    // Body verification mode is dictated by `x-amz-content-sha256`.
-    let content_sha = parts
-        .headers
+    let engine       = state.engine().clone();
+    let bucket_owned = bucket.clone();
+    let key_owned    = key.clone();
+    let init = SendWrapper::new(async move {
+        engine.create_multipart_upload(&bucket_owned, &key_owned, content_type).await
+    }).await?;
+
+    let body = crate::s3::xml::InitiateMultipartUploadResult::new(bucket, key, init.upload_id);
+    Ok(crate::s3::xml::Xml(body).into_response())
+}
+
+async fn complete_multipart_handler(
+    state:     AppState,
+    bucket:    String,
+    key:       String,
+    upload_id: String,
+    headers:   HeaderMap,
+    body:      Body,
+) -> Result<Response, AppError> {
+    use crate::s3::xml::{CompleteMultipartUploadRequest, CompleteMultipartUploadResult};
+    use phenomenal_storage::CompletePart;
+
+    let bytes = axum::body::to_bytes(body, 1 << 20).await
+        .map_err(|_| AppError::Malformed("CompleteMultipartUpload body unreadable or too large"))?;
+
+    let parsed: CompleteMultipartUploadRequest =
+        quick_xml::de::from_reader(bytes.as_ref())
+            .map_err(|_| AppError::Malformed("invalid <CompleteMultipartUpload> XML"))?;
+
+    if parsed.parts.is_empty() {
+        return Err(AppError::Malformed(
+            "CompleteMultipartUpload requires at least one <Part>",
+        ));
+    }
+
+    let parts: Vec<CompletePart> = parsed.parts.into_iter().map(|p| CompletePart {
+        part_number: p.part_number,
+        etag:        p.etag,
+    }).collect();
+
+    let _ = headers; 
+
+    let engine     = state.engine().clone();
+    let bucket_for = bucket.clone();
+    let key_for    = key.clone();
+    let info = SendWrapper::new(async move {
+        engine.complete_multipart_upload(&bucket_for, &key_for, &upload_id, parts).await
+    }).await?;
+
+    let body = CompleteMultipartUploadResult::new(
+        bucket,
+        key,
+        format!("\"{}\"", info.etag),
+    );
+    Ok(crate::s3::xml::Xml(body).into_response())
+}
+
+fn build_body_source(
+    state:          &AppState,
+    headers:        &HeaderMap,
+    body:           Body,
+    content_length: u64,
+) -> Result<(u64, BodySource), AppError> {
+    let content_sha = headers
         .get("x-amz-content-sha256")
         .and_then(|v| v.to_str().ok())
-        .ok_or(AppError::Auth(AuthError::MissingContentSha))?
-        .to_owned();
+        .ok_or(AppError::Auth(AuthError::MissingContentSha))?;
 
-    // Streaming aws-chunked PUT: total payload size is the *decoded*
-    // length declared in `x-amz-decoded-content-length` (the
-    // `Content-Length` header counts the framed wire size including
-    // chunk-header overhead).
-    let decoded_len: Option<u64> = parts
-        .headers
+    let decoded_len: Option<u64> = headers
         .get("x-amz-decoded-content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse().ok());
 
-    // Phenomenal accepts only BLAKE3 as the body-integrity algorithm.
-    // Reject the legacy `Content-MD5` header outright — clients that
-    // care about integrity must use `x-amz-checksum-blake3`.
-    if parts.headers.contains_key("content-md5") {
-        return Err(AppError::BadRequest(
-            "Content-MD5 is not supported; use x-amz-checksum-blake3",
-        ));
-    }
-    // One pass over the headers: any non-blake3 `x-amz-checksum-*`
-    // rejects with 400; an `x-amz-checksum-blake3` header is captured
-    // for post-PUT comparison against the engine's computed digest.
-    let client_blake3 = extract_blake3_claim(&parts.headers)?;
-
-    let (engine_size, mut body_src) = match content_sha.as_str() {
-        SHA_UNSIGNED => (content_length, BodySource::plain(body)),
+    match content_sha {
+        SHA_UNSIGNED => Ok((content_length, BodySource::plain(body))),
         SHA_STREAMING => {
-            // Re-parse the Authorization header to recover the seed
-            // signature (the rolling start of the per-chunk chain).
-            // Middleware already verified seed validity, so any error
-            // here is a logic bug rather than a real auth failure.
-            let auth_hdr = parts
-                .headers
+            let auth_hdr = headers
                 .get(http::header::AUTHORIZATION)
                 .ok_or(AppError::Auth(AuthError::MissingAuth))?
                 .to_str()
                 .map_err(|_| AppError::Auth(AuthError::MalformedAuth("Authorization not ASCII")))?;
-            let parsed_auth = crate::auth::parse_authorization(auth_hdr)
-                .map_err(AppError::Auth)?;
-            let amz_date = parts
-                .headers
+            let parsed_auth = crate::auth::parse_authorization(auth_hdr).map_err(AppError::Auth)?;
+            let amz_date = headers
                 .get("x-amz-date")
                 .ok_or(AppError::Auth(AuthError::MissingDate))?
                 .to_str()
@@ -391,7 +454,7 @@ pub async fn put_object(
                 .secret_for(&parsed_auth.access_key)
                 .ok_or_else(|| AppError::Auth(AuthError::InvalidAccessKeyId(parsed_auth.access_key.clone())))?
                 .to_owned();
-            let region = state.auth().region().to_owned();
+            let region  = state.auth().region().to_owned();
             let decoded = decoded_len.ok_or(AppError::Auth(AuthError::MissingDecodedContentLength))?;
             let src = BodySource::chunked(
                 body,
@@ -401,30 +464,59 @@ pub async fn put_object(
                 region,
                 request_time,
             );
-            (decoded, src)
+            Ok((decoded, src))
         }
-        SHA_STREAMING_TRAILER => {
-            return Err(AppError::NotImplemented(
-                "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER: chunked + \
-                 trailer-header checksum mode pending implementation",
-            ));
-        }
-        SHA_STREAMING_UNSIGNED_TRAILER => {
-            return Err(AppError::NotImplemented(
-                "STREAMING-UNSIGNED-PAYLOAD-TRAILER: chunked unsigned + \
-                 trailer-header checksum mode pending implementation",
-            ));
-        }
-        hex if is_hex_sha256(hex) => (
+        SHA_STREAMING_TRAILER => Err(AppError::NotImplemented(
+            "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER: chunked + \
+             trailer-header checksum mode pending implementation",
+        )),
+        SHA_STREAMING_UNSIGNED_TRAILER => Err(AppError::NotImplemented(
+            "STREAMING-UNSIGNED-PAYLOAD-TRAILER: chunked unsigned + \
+             trailer-header checksum mode pending implementation",
+        )),
+        hex if is_hex_sha256(hex) => Ok((
             content_length,
             BodySource::hex_sha(body, hex).map_err(|e| AppError::BadRequest(io_error_msg(e)))?,
-        ),
-        other => {
-            return Err(AppError::Auth(AuthError::UnsupportedContentSha(
-                other.to_owned(),
-            )));
-        }
-    };
+        )),
+        other => Err(AppError::Auth(AuthError::UnsupportedContentSha(other.to_owned()))),
+    }
+}
+
+pub async fn put_object(
+    State(state):       State<AppState>,
+    Path((bucket, key)): Path<(String, String)>,
+    Query(query):       Query<ObjectQuery>,
+    headers:            HeaderMap,
+    body:               Body,
+) -> Result<Response, AppError> {
+    match (query.part_number, query.upload_id.as_deref()) {
+        (Some(n), Some(uid)) => return upload_part_handler(
+            state, bucket, key, uid.to_owned(), n, headers, body,
+        ).await,
+        (None, None) => {}
+        _ => return Err(AppError::Malformed(
+            "partNumber and uploadId must both be present or both absent",
+        )),
+    }
+
+    let mut parts = http::Request::new(()).into_parts().0;
+    parts.headers = headers;
+
+    let content_length: u64 = parts
+        .headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .ok_or(AppError::Malformed("missing or invalid Content-Length"))?;
+
+    if parts.headers.contains_key("content-md5") {
+        return Err(AppError::BadRequest(
+            "Content-MD5 is not supported; use x-amz-checksum-blake3",
+        ));
+    }
+    let client_blake3 = extract_blake3_claim(&parts.headers)?;
+
+    let (engine_size, mut body_src) = build_body_source(&state, &parts.headers, body, content_length)?;
 
     let content_type: Option<String> = parts
         .headers
@@ -470,18 +562,44 @@ pub async fn put_object(
     Ok((StatusCode::OK, headers).into_response())
 }
 
+async fn upload_part_handler(
+    state:       AppState,
+    bucket:      String,
+    key:         String,
+    upload_id:   String,
+    part_number: u32,
+    headers:     HeaderMap,
+    body:        Body,
+) -> Result<Response, AppError> {
+    let content_length: u64 = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse().ok())
+        .ok_or(AppError::Malformed("UploadPart requires Content-Length"))?;
+
+    let (engine_size, mut body_src) = build_body_source(&state, &headers, body, content_length)?;
+
+    let engine     = state.engine().clone();
+    let bucket_for = bucket.clone();
+    let key_for    = key.clone();
+    let info = SendWrapper::new(async move {
+        engine.upload_part(
+            &bucket_for, &key_for, &upload_id, part_number,
+            engine_size, &mut body_src,
+        ).await
+    }).await?;
+
+    let mut resp_headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&format!("\"{}\"", info.etag)) {
+        resp_headers.insert(ETAG, v);
+    }
+    Ok((StatusCode::OK, resp_headers).into_response())
+}
+
 fn is_hex_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Single pass over the request headers to enforce BLAKE3 as the
-/// only accepted additional-checksum algorithm and return the
-/// claimed digest if present.
-///
-/// Why one pass: the rejection check (`x-amz-checksum-<other>`) and
-/// the extraction (`x-amz-checksum-blake3`) share a predicate, so
-/// folding them avoids walking the header map twice and keeps the
-/// algorithm policy in one place.
 fn extract_blake3_claim(headers: &HeaderMap) -> Result<Option<String>, AppError> {
     let mut blake3: Option<String> = None;
     for (name, value) in headers.iter() {
@@ -522,10 +640,6 @@ fn stream_object_response(
         HeaderValue::from(total),
     );
 
-    // Pull `Bytes` directly from the engine — zero copy on the GET
-    // hot path. Each `body.read()` yields a refcounted slice (the
-    // engine's stripe buffer freeze, the inline rope frame, etc.);
-    // axum forwards it to the TLS layer without touching the bytes.
     let frames = SendWrapper::new(stream::unfold(
         (byte_stream, total, 0u64),
         move |(mut body, total, mut sent)| async move {
@@ -535,8 +649,6 @@ fn stream_object_response(
             match body.read().await {
                 Ok(chunk) if chunk.is_empty() => None,
                 Ok(chunk) => {
-                    // Bound the served chunk by `total - sent` so we
-                    // never overshoot the declared content-length.
                     let take = (total - sent).min(chunk.len() as u64) as usize;
                     let frame = if take < chunk.len() {
                         bytes::Bytes::slice(&chunk, ..take)
@@ -565,8 +677,6 @@ fn populate_object_headers(headers: &mut HeaderMap, info: &ObjectInfo) {
     if let Ok(v) = HeaderValue::from_str(&format!("\"{}\"", info.etag)) {
         headers.insert(ETAG, v);
     }
-    // Algorithm-explicit checksum so clients that want to verify
-    // know the digest type. `info.etag` IS the BLAKE3 hex.
     if let Ok(v) = HeaderValue::from_str(&info.etag) {
         headers.insert("x-amz-checksum-blake3", v);
     }
@@ -578,10 +688,6 @@ fn populate_object_headers(headers: &mut HeaderMap, info: &ObjectInfo) {
             headers.insert(CONTENT_TYPE, v);
         }
     }
-    // Echo the version_id so the client knows which version they got
-    // back. Empty string means the engine had no opinion (e.g. an
-    // older write that predated versioning); skip the header in that
-    // case to avoid sending a literal empty `x-amz-version-id:` line.
     if !info.version_id.is_empty() {
         if let Ok(v) = HeaderValue::from_str(&info.version_id) {
             headers.insert("x-amz-version-id", v);
@@ -589,7 +695,6 @@ fn populate_object_headers(headers: &mut HeaderMap, info: &ObjectInfo) {
     }
 }
 
-/// RFC 1123 `Last-Modified` format (`Wed, 01 May 2026 12:00:00 GMT`).
 fn http_date_rfc1123(ms: u64) -> String {
     use time::format_description::FormatItem;
     use time::macros::format_description;

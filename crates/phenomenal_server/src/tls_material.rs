@@ -37,24 +37,34 @@ use std::path::Path;
 use std::sync::{Arc, Once};
 
 use anyhow::{Context, Result};
-use compio::tls::{TlsAcceptor, TlsConnector};
+use compio::tls::TlsAcceptor;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 
 use crate::config::Config;
 
-/// HTTP/1.1 only on the wire. Add `b"h2"` ahead of this once an h2
-/// frontend lands.
+/// ALPN protocol identifiers. The S3 frontend speaks HTTP/1.1 to AWS-SDK
+/// clients (as MinIO does); the inter-node RPC plane speaks HTTP/2 only,
+/// negotiated via ALPN against rustls. Each plane gets a distinct ALPN
+/// list so a misconfigured client cannot land on the wrong listener and
+/// silently degrade to the wrong protocol.
 const ALPN_H1: &[u8] = b"http/1.1";
+const ALPN_H2: &[u8] = b"h2";
 
 /// One loaded snapshot of all TLS handles this node needs. Cheap to
 /// `.clone()` — the underlying `Arc<*Config>` refcount is bumped once
 /// per clone, no rustls work re-runs.
+///
+/// The RPC-plane connector is exposed as a bare `Arc<ClientConfig>`
+/// (not a `TlsConnector`) because cyper takes the rustls config
+/// directly via `ClientBuilder::use_rustls(...)`. Wrapping it in a
+/// `TlsConnector` would force cyper to extract the inner config
+/// again — pointless indirection.
 #[derive(Clone)]
 pub struct TlsMaterial {
     s3_acceptor:   Option<TlsAcceptor>,
     rpc_acceptor:  Option<TlsAcceptor>,
-    rpc_connector: Option<TlsConnector>,
+    rpc_connector: Option<Arc<ClientConfig>>,
 }
 
 impl TlsMaterial {
@@ -64,19 +74,29 @@ impl TlsMaterial {
     pub fn load(cfg: &Config) -> Result<Self> {
         install_default_crypto_provider();
 
+        // S3 plane: HTTP/1.1 ALPN — what every AWS SDK still expects.
         let s3_acceptor = cfg.s3_tls.as_ref()
-            .map(|t| build_tls_acceptor(&t.cert_path, &t.key_path)
+            .map(|t| build_tls_acceptor(&t.cert_path, &t.key_path, &[ALPN_H1])
                 .context("building S3 TLS acceptor"))
             .transpose()?;
 
+        // RPC plane: HTTP/2 ALPN. Server must advertise only `h2` so a
+        // peer client cannot accidentally negotiate HTTP/1.1 on the
+        // inter-node plane — the wire protocol is h2-only by contract.
         let rpc_acceptor = cfg.rpc_tls.as_ref()
-            .map(|t| build_tls_acceptor(&t.cert_path, &t.key_path)
+            .map(|t| build_tls_acceptor(&t.cert_path, &t.key_path, &[ALPN_H2])
                 .context("building RPC TLS acceptor"))
             .transpose()?;
 
+        // RPC connector: ALPN `h2` so cyper / hyper-util route every
+        // request over an h2 multiplexed connection. Without this,
+        // hyper-util's negotiator would fall back to HTTP/1.1 even when
+        // the http2 feature is on (cyper does not expose
+        // `http2_only(true)`; ALPN is the only switch that flips the
+        // pool to h2).
         let rpc_connector = cfg.rpc_tls.as_ref()
             .and_then(|t| t.client_ca.as_ref())
-            .map(|ca| build_tls_connector(ca)
+            .map(|ca| build_tls_connector(ca, &[ALPN_H2])
                 .context("building RPC TLS connector"))
             .transpose()?;
 
@@ -94,10 +114,11 @@ impl TlsMaterial {
         self.rpc_acceptor.clone()
     }
 
-    /// Cheap clone of the inter-node RPC connector, used by
-    /// `RemoteBackend` to dial peers and verify their certs against the
-    /// cluster CA.
-    pub fn rpc_connector(&self) -> Option<TlsConnector> {
+    /// Cheap clone of the inter-node RPC client config. Fed to
+    /// `cyper::ClientBuilder::use_rustls` by `RemoteBackend` so every
+    /// outgoing inter-node request rides ALPN-negotiated HTTP/2 over a
+    /// rustls connection that pins on the cluster CA.
+    pub fn rpc_connector(&self) -> Option<Arc<ClientConfig>> {
         self.rpc_connector.clone()
     }
 }
@@ -109,8 +130,9 @@ impl TlsMaterial {
 
 /// Build a server-side TLS acceptor from a PEM cert chain + PEM private
 /// key. `cert_path` should contain the full chain (leaf first, then
-/// intermediates).
-fn build_tls_acceptor(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor> {
+/// intermediates). `alpn` is the ordered list of ALPN protocols this
+/// listener will advertise — clients pick the first overlap.
+fn build_tls_acceptor(cert_path: &Path, key_path: &Path, alpn: &[&[u8]]) -> Result<TlsAcceptor> {
     let chain = load_cert_chain(cert_path)
         .with_context(|| format!("loading cert chain from {}", cert_path.display()))?;
     let key = load_private_key(key_path)
@@ -120,14 +142,22 @@ fn build_tls_acceptor(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor> 
         .with_no_client_auth()
         .with_single_cert(chain, key)
         .context("rustls ServerConfig::with_single_cert")?;
-    cfg.alpn_protocols = vec![ALPN_H1.to_vec()];
+    cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     Ok(TlsAcceptor::from(Arc::new(cfg)))
 }
 
-/// Build a client-side TLS connector that trusts the supplied CA bundle.
-/// Used by `RemoteBackend::dial` when this node calls another node and
-/// needs to verify the peer's cert.
-fn build_tls_connector(ca_path: &Path) -> Result<TlsConnector> {
+/// Build a client-side rustls `ClientConfig` that trusts the supplied
+/// CA bundle. Used by the inter-node RPC plane: cyper consumes this
+/// config via `ClientBuilder::use_rustls(Arc<ClientConfig>)`, so the
+/// returned value is the rustls config (wrapped in `Arc` for cheap
+/// per-runtime clones), not a `TlsConnector` wrapper.
+///
+/// `alpn` advertises which HTTP versions this client is willing to
+/// speak. For the RPC plane we pass `[b"h2"]` only — if the server
+/// (which advertises the same single entry) doesn't agree, the TLS
+/// handshake fails outright. This is the design intent: inter-node
+/// traffic is HTTP/2 or nothing.
+fn build_tls_connector(ca_path: &Path, alpn: &[&[u8]]) -> Result<Arc<ClientConfig>> {
     let bundle = load_cert_chain(ca_path)
         .with_context(|| format!("loading CA bundle from {}", ca_path.display()))?;
     if bundle.is_empty() {
@@ -137,10 +167,11 @@ fn build_tls_connector(ca_path: &Path) -> Result<TlsConnector> {
     for cert in bundle {
         roots.add(cert).context("adding CA cert to root store")?;
     }
-    let cfg = ClientConfig::builder()
+    let mut cfg = ClientConfig::builder()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    Ok(TlsConnector::from(Arc::new(cfg)))
+    cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    Ok(Arc::new(cfg))
 }
 
 /// Read a PEM file containing one or more certificates and parse them

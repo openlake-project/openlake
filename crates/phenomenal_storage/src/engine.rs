@@ -18,38 +18,19 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::future::join_all;
 use phenomenal_io::stream::ByteSink;
-use phenomenal_io::{BucketMeta, ByteStream, DeleteOptions, ErasureInfo, FileInfo, IoError, ObjectPartInfo, PooledBuffer, RenameDataResp, StorageBackend, VersioningStatus, SYSTEM_BUCKET};
+use phenomenal_io::{BucketMeta, ByteStream, DeleteOptions, ErasureInfo, FileInfo, IoError, MULTIPART_VOL, ObjectPartInfo, PooledBuffer, RenameDataResp, StorageBackend, STAGING_VOL, UpdateMetadataOpts, VersioningStatus, SYSTEM_BUCKET};
 use uuid::Uuid;
 
 use crate::cluster::{ClusterConfig, DiskAddr, NodeId};
 use crate::dsync::DsyncClient;
 use crate::ec::{self, Erasure};
 use crate::error::{StorageError, StorageResult};
-use crate::object::{ObjectInfo, StorageClass};
+use crate::object::{MultipartInit, ObjectInfo, StorageClass};
 
-/// Objects at or below this size are embedded in xl.meta. Larger
-/// payloads stream into `part.1` next to xl.meta. The threshold is
-/// also the max size we'll buffer in RAM end-to-end — anything above
-/// goes through the streaming EC path with a bounded per-stripe
-/// working set.
 pub const DEFAULT_INLINE_THRESHOLD: usize = 128 * 1024;
 
-/// Default per-shard byte width for **new** EC writes only. Used at
-/// PUT time as the encoder's per-stripe input width per disk; the
-/// resulting full-stripe byte count (`data_shards * this`) is
-/// persisted into every record's `fi.erasure.block_size`.
-///
-/// **Read paths must not consult this constant.** They read
-/// `fi.erasure.block_size` from the on-disk record and derive the
-/// per-shard width from there, so changing this constant in a future
-/// binary release doesn't break old objects. Mirrors MinIO's
-/// `blockSizeV2` design (`object-api-common.go:25-37`): per-object
-/// persistence is the source of truth on read; the constant only
-/// seeds new writes.
 const DEFAULT_EC_PER_SHARD_BYTES: usize = 1024 * 1024;
 
-/// How long any single write op will wait for its dsync lock before
-/// surfacing `LockTimeout`.
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const CONTENT_TYPE_META_KEY: &str = "content-type";
@@ -58,9 +39,6 @@ const PART1_PATH_SUFFIX:     &str = "part.1";
 
 pub struct Engine {
     cluster:  ClusterConfig,
-    /// One backend per physical disk, keyed by `DiskAddr`. For local
-    /// disks this is a `LocalFsBackend`; for remote disks a
-    /// `RemoteBackend` sharing a per-peer-node connection pool.
     backends: HashMap<DiskAddr, Rc<dyn StorageBackend>>,
     dsync:    Rc<DsyncClient>,
     self_id:  NodeId,
@@ -82,11 +60,6 @@ impl Engine {
         self
     }
 
-    /// First local-disk backend on this node. The historical "local
-    /// node's view" used by `list` for v0; with multi-disk this only
-    /// surfaces a fraction of objects (those whose set landed on
-    /// disk 0). Cluster-wide listing is a separate, larger concern
-    /// tracked outside this migration.
     fn local(&self) -> &Rc<dyn StorageBackend> {
         let disk0 = DiskAddr { node_id: self.self_id, disk_idx: 0 };
         self.backends.get(&disk0)
@@ -99,9 +72,6 @@ impl Engine {
         })
     }
 
-    /// All disk backends in the cluster, in `ClusterConfig::all_disks`
-    /// order. Used for cluster-wide bucket lifecycle ops (make/delete
-    /// on every disk) where the per-set fan-out doesn't apply.
     fn all_backends(&self) -> StorageResult<Vec<Rc<dyn StorageBackend>>> {
         self.cluster.all_disks().into_iter()
             .map(|addr| self.backend(addr).cloned())
@@ -116,6 +86,12 @@ impl Engine {
 
     fn obj_lock_key(bucket: &str, key: &str) -> String { format!("obj:{bucket}/{key}") }
     fn bkt_lock_key(bucket: &str)              -> String { format!("bkt:{bucket}") }
+    /// Per-part lock: serializes concurrent UploadPart calls for the
+    /// same `(upload_id, part_number)`. Different part numbers on the
+    /// same session run in parallel — each holds its own per-part lock.
+    fn part_lock_key(bucket: &str, key: &str, upload_id: &str, part_number: u32) -> String {
+        format!("part:{bucket}/{key}/{upload_id}/{part_number}")
+    }
 
     /// Object key under SYSTEM_BUCKET that holds `bucket`'s meta.
     fn bkt_meta_key(bucket: &str) -> String { format!("buckets/{bucket}/.metadata.bin") }
@@ -154,7 +130,7 @@ impl Engine {
         let base_erasure = default_erasure_info(data_shards as u8, parity_shards as u8, n as u8);
         let staging_id   = Uuid::new_v4().simple().to_string();
         let per_disk_fis = with_per_disk_index(&base_fi, &base_erasure, n);
-        promote_versions(&backends, &staging_id, per_disk_fis, volume, key, quorum).await
+        promote_versions(&backends, STAGING_VOL, &staging_id, per_disk_fis, volume, key, quorum).await
     }
 
     pub(crate) async fn get_bucket_meta(&self, bucket: &str) -> StorageResult<BucketMeta> {
@@ -304,16 +280,323 @@ impl Engine {
             .map_err(Into::into)
     }
 
-    /// PUT a known-size object. `src` is consumed exactly `size` bytes
-    /// (treated as `UnexpectedEof` if it ends short). Inline (≤
-    /// `inline_threshold`) buffers the whole payload in `xl.meta`;
-    /// non-inline drives stripe-at-a-time EC across the set's
-    /// backends, with no per-object materialisation.
-    ///
-    /// Steps that don't depend on the inline-vs-EC choice live here:
-    /// take the per-object dsync lock, resolve the set, decide the
-    /// new version_id from bucket versioning state, then dispatch to
-    /// [`Engine::put_inline`] or [`Engine::put_ec`].
+    pub async fn create_multipart_upload(
+        &self,
+        bucket:       &str,
+        key:          &str,
+        content_type: Option<String>,
+    ) -> StorageResult<MultipartInit> {
+        validate_bucket_name(bucket)?;
+
+        let bucket_meta = self.get_bucket_meta(bucket).await?;
+
+        let version_id  = bucket_meta.next_version_id();
+
+        let data_dir    = Uuid::new_v4().to_string();
+        let mod_time_ms = now_ms();
+        let upload_id   = format_upload_id(self.cluster.deployment_id);
+
+        let backends      = self.set_backends(bucket, key)?;
+        let n             = backends.len();
+        let quorum        = self.cluster.write_quorum();
+        let parity_shards = self.cluster.default_parity_count;
+        let data_shards   = n - parity_shards;
+
+        let session_path = format!("{bucket}/{key}/{upload_id}");
+        let mut session_fi      = FileInfo::default();
+        session_fi.volume       = MULTIPART_VOL.to_owned();
+        session_fi.name         = session_path.clone();
+        session_fi.version_id   = version_id;
+        session_fi.is_latest    = true;
+        session_fi.mod_time_ms  = mod_time_ms;
+        session_fi.data_dir     = data_dir;
+        session_fi.fresh        = true;
+        if let Some(ct) = content_type {
+            session_fi.metadata.insert(CONTENT_TYPE_META_KEY.to_owned(), ct);
+        }
+
+        let base_erasure = default_erasure_info(data_shards as u8, parity_shards as u8, n as u8);
+        let per_disk_fis = with_per_disk_index(&session_fi, &base_erasure, n);
+
+        let writes = backends.iter().zip(per_disk_fis.into_iter()).map(|(b, fi)| {
+            let b    = b.clone();
+            let path = session_path.clone();
+            async move {
+                b.update_metadata(MULTIPART_VOL, &path, &fi, &UpdateMetadataOpts::default()).await
+            }
+        });
+        let results = join_all(writes).await;
+
+        let mut ok       = 0usize;
+        let mut first_err: Option<IoError> = None;
+        for r in results {
+            match r {
+                Ok(())  => ok += 1,
+                Err(e) => { if first_err.is_none() { first_err = Some(e); } }
+            }
+        }
+        if ok < quorum {
+            let cleanups = backends.iter().map(|b| {
+                let b    = b.clone();
+                let path = session_path.clone();
+                async move { let _ = b.delete(MULTIPART_VOL, &path, true).await; }
+            });
+            let _ = join_all(cleanups).await;
+            return Err(StorageError::Io(
+                first_err.unwrap_or_else(|| IoError::InvalidArgument("no quorum".into()))
+            ));
+        }
+
+        Ok(MultipartInit { upload_id })
+    }
+
+    pub async fn upload_part(
+        &self,
+        bucket:      &str,
+        key:         &str,
+        upload_id:   &str,
+        part_number: u32,
+        size:        u64,
+        src:         &mut dyn ByteStream,
+    ) -> StorageResult<ObjectPartInfo> {
+        if part_number == 0 || part_number > 10_000 {
+            return Err(StorageError::Io(IoError::InvalidArgument(
+                format!("partNumber must be in 1..=10000, got {part_number}")
+            )));
+        }
+        validate_bucket_name(bucket)?;
+
+        let backends = self.set_backends(bucket, key)?;
+        let n        = backends.len();
+        let quorum   = self.cluster.write_quorum();
+        let session_path = format!("{bucket}/{key}/{upload_id}");
+
+        let session_fi = read_session_fi(&backends, &session_path).await?;
+        let data_dir   = session_fi.data_dir.clone();
+        if data_dir.is_empty() {
+            return Err(StorageError::Io(IoError::InvalidArgument(
+                "session xl.meta missing data_dir".into(),
+            )));
+        }
+        let parity_shards = session_fi.erasure.parity_blocks as usize;
+        let data_shards   = session_fi.erasure.data_blocks   as usize;
+
+        let _lock = self.dsync
+            .acquire(&Self::part_lock_key(bucket, key, upload_id, part_number),
+                     LOCK_ACQUIRE_TIMEOUT).await?;
+
+        let ec = Erasure::new(data_shards, parity_shards).map_err(|e| {
+            StorageError::Io(IoError::InvalidArgument(format!(
+                "EC init ({data_shards}+{parity_shards}): {e}"
+            )))
+        })?;
+        let stripe_unit = DEFAULT_EC_PER_SHARD_BYTES;
+        let stripe_data = data_shards * stripe_unit;
+        let stripes     = (size as usize).div_ceil(stripe_data).max(1);
+        let per_shard_on_disk = (stripes as u64) * stripe_unit as u64;
+        let per_shard_actual  = ec::shard_size(size as usize, data_shards) as u64;
+        let mod_time_ms       = now_ms();
+
+        let staging_id    = format!("{}x{}", Uuid::new_v4().simple(), now_nanos());
+        let tmp_part_path = format!("{staging_id}/part.{part_number}");
+
+        let final_dir   = format!("{bucket}/{key}/{upload_id}/{data_dir}");
+        let final_part  = format!("{final_dir}/part.{part_number}");
+        let final_meta  = format!("{final_dir}/part.{part_number}.meta");
+
+        let result: StorageResult<ObjectPartInfo> = async {
+            let sinks = open_part_staging_sinks(&backends, &tmp_part_path, per_shard_on_disk)
+                .await
+                .map_err(map_bucket_or_io(bucket))?;
+
+            let (etag, sinks) = encode_and_write_stripes(
+                &ec, src, size, stripe_data, stripes, sinks,
+            ).await.map_err(map_bucket_or_io(bucket))?;
+
+            finalize_sinks_quorum(sinks, quorum)
+                .await
+                .map_err(map_bucket_or_io(bucket))?;
+
+            let part_info = ObjectPartInfo {
+                etag:        etag.clone(),
+                number:      part_number as i32,
+                size:        per_shard_actual as i64,
+                actual_size: size as i64,
+                mod_time_ms,
+                index:       Vec::new(),
+                checksums:   std::collections::BTreeMap::new(),
+            };
+            let sidecar = rmp_serde::to_vec_named(&part_info).map_err(|e| {
+                StorageError::Io(IoError::Encode(format!("part sidecar: {e}")))
+            })?;
+
+            let cleanups = backends.iter().map(|b| {
+                let b    = b.clone();
+                let part = final_part.clone();
+                let meta = final_meta.clone();
+                async move {
+                    let _ = b.delete(MULTIPART_VOL, &part, false).await;
+                    let _ = b.delete(MULTIPART_VOL, &meta, false).await;
+                }
+            });
+            join_all(cleanups).await;
+
+            let mkdirs = backends.iter().map(|b| {
+                let b   = b.clone();
+                let dir = final_dir.clone();
+                async move { b.make_dir_all(MULTIPART_VOL, &dir).await }
+            });
+            require_quorum(join_all(mkdirs).await, n, |_| false)
+                .map_err(map_bucket_or_io(bucket))?;
+
+            let placements = backends.iter().map(|b| {
+                let b     = b.clone();
+                let src   = tmp_part_path.clone();
+                let dst   = final_part.clone();
+                let meta  = final_meta.clone();
+                let bytes = sidecar.clone();
+                async move {
+                    b.rename_file(STAGING_VOL, &src, MULTIPART_VOL, &dst).await?;
+                    b.write_file(MULTIPART_VOL, &meta, bytes).await
+                }
+            });
+            require_quorum(join_all(placements).await, n, |_| false)
+                .map_err(map_bucket_or_io(bucket))?;
+
+            Ok(part_info)
+        }.await;
+
+        if result.is_err() {
+            cleanup_src(&backends, STAGING_VOL, &staging_id).await;
+        }
+        result
+    }
+
+    pub async fn complete_multipart_upload(
+        &self,
+        bucket:    &str,
+        key:       &str,
+        upload_id: &str,
+        parts:     Vec<crate::object::CompletePart>,
+    ) -> StorageResult<ObjectInfo> {
+        validate_bucket_name(bucket)?;
+        if parts.is_empty() {
+            return Err(StorageError::Io(IoError::InvalidArgument(
+                "CompleteMultipartUpload requires at least one part".into(),
+            )));
+        }
+        for w in parts.windows(2) {
+            if w[0].part_number >= w[1].part_number {
+                return Err(StorageError::Io(IoError::InvalidArgument(format!(
+                    "parts must be ascending by part_number (got {} after {})",
+                    w[1].part_number, w[0].part_number,
+                ))));
+            }
+        }
+
+        let _lock = self.dsync
+            .acquire(&Self::obj_lock_key(bucket, key), LOCK_ACQUIRE_TIMEOUT).await?;
+
+        let backends     = self.set_backends(bucket, key)?;
+        let n            = backends.len();
+        let write_quorum = self.cluster.write_quorum();
+        let read_quorum  = self.cluster.read_quorum().max(1);
+        let session_path = format!("{bucket}/{key}/{upload_id}");
+
+        let session_fi   = read_session_fi(&backends, &session_path).await?;
+        let data_dir     = session_fi.data_dir.clone();
+        if data_dir.is_empty() {
+            return Err(StorageError::Io(IoError::InvalidArgument(
+                "session xl.meta missing data_dir".into(),
+            )));
+        }
+        let parity = session_fi.erasure.parity_blocks as usize;
+        let data_blocks = session_fi.erasure.data_blocks as usize;
+
+        let part_infos = read_part_sidecars(
+            &backends, &session_path, &data_dir, &parts, read_quorum,
+        ).await?;
+
+        const MIN_PART_SIZE: i64 = 5 * 1024 * 1024;
+        let mut total_actual_size: i64 = 0;
+        let mut etag_concat: Vec<u8> = Vec::with_capacity(parts.len() * blake3::OUT_LEN);
+
+        for (i, (claimed, actual)) in parts.iter().zip(part_infos.iter()).enumerate() {
+            let claimed_etag = claimed.etag.trim_matches('"').to_ascii_lowercase();
+            if claimed_etag != actual.etag.to_ascii_lowercase() {
+                return Err(StorageError::Io(IoError::InvalidArgument(format!(
+                    "part {} etag mismatch: client {:?}, server {:?}",
+                    claimed.part_number, claimed_etag, actual.etag,
+                ))));
+            }
+            if i < parts.len() - 1 && actual.actual_size < MIN_PART_SIZE {
+                return Err(StorageError::Io(IoError::InvalidArgument(format!(
+                    "part {} below 5 MiB minimum (got {} bytes)",
+                    claimed.part_number, actual.actual_size,
+                ))));
+            }
+            total_actual_size += actual.actual_size;
+            let raw = hex::decode(&actual.etag).map_err(|e| StorageError::Io(
+                IoError::InvalidArgument(format!("part {} etag not hex: {e}", claimed.part_number))
+            ))?;
+            etag_concat.extend_from_slice(&raw);
+        }
+
+        let assembled_etag = format!("{}-{}", blake3::hash(&etag_concat).to_hex(), parts.len());
+        let mod_time_ms    = now_ms();
+
+        let parts_for_fi: Vec<ObjectPartInfo> = part_infos.iter().cloned().collect();
+        let mut assembled_fi    = FileInfo::default();
+        assembled_fi.volume       = bucket.to_owned();
+        assembled_fi.name         = key.to_owned();
+        assembled_fi.version_id   = session_fi.version_id.clone();
+        assembled_fi.is_latest    = true;
+        assembled_fi.size         = total_actual_size;
+        assembled_fi.mod_time_ms  = mod_time_ms;
+        assembled_fi.data_dir     = data_dir.clone();
+        assembled_fi.fresh        = true;
+        assembled_fi.parts        = parts_for_fi;
+        assembled_fi.metadata     = session_fi.metadata.clone();
+        assembled_fi.metadata.insert(ETAG_META_KEY.into(), assembled_etag.clone());
+        assembled_fi.num_versions = 1;
+
+        let base_erasure = default_erasure_info(data_blocks as u8, parity as u8, n as u8);
+        let per_disk_fis = with_per_disk_index(&assembled_fi, &base_erasure, n);
+
+        let cleanup_meta_paths: Vec<String> = parts.iter()
+            .map(|p| format!("{session_path}/{data_dir}/part.{}.meta", p.part_number))
+            .collect();
+        let cleanups = backends.iter().flat_map(|b| {
+            let b     = b.clone();
+            let paths = cleanup_meta_paths.clone();
+            paths.into_iter().map(move |p| {
+                let b = b.clone();
+                async move { let _ = b.delete(MULTIPART_VOL, &p, false).await; }
+            })
+        });
+        join_all(cleanups).await;
+
+        promote_versions(
+            &backends,
+            MULTIPART_VOL, &session_path,
+            per_disk_fis,
+            bucket, key,
+            write_quorum,
+        ).await?;
+
+        Ok(ObjectInfo {
+            bucket:           bucket.to_owned(),
+            key:              key.to_owned(),
+            size:             total_actual_size as u64,
+            etag:             assembled_etag,
+            storage_class:    StorageClass::Single,
+            modified_ms:      mod_time_ms,
+            content_type:     assembled_fi.metadata.get(CONTENT_TYPE_META_KEY).cloned(),
+            version_id:       assembled_fi.version_id,
+            is_delete_marker: false,
+        })
+    }
+
     pub async fn put(
         &self,
         bucket: &str,
@@ -339,27 +622,11 @@ impl Engine {
         }
     }
 
-    /// Resolve the version id to stamp on the PUT. Reads the user
-    /// bucket's persisted `BucketMeta` and asks it for the next id —
-    /// fresh UUIDv4 when versioning is Enabled, the literal `"null"`
-    /// sentinel when Unversioned/Suspended. Meta is required —
-    /// `create_bucket` persists it eagerly, so missing meta on a PUT
-    /// surfaces as an I/O error rather than a silent default.
-    ///
-    /// Engine-internal writes (bucket meta, future config files) do
-    /// NOT come through here — they take the dedicated
-    /// [`Engine::save_config`] path, mirroring MinIO's `saveConfig`.
     async fn resolve_put_version_id(&self, bucket: &str) -> StorageResult<String> {
         let meta = self.get_bucket_meta(bucket).await?;
         Ok(meta.next_version_id())
     }
 
-    /// Inline PUT. The whole body is pulled into a refcount-only
-    /// `Vec<Bytes>` rope, blake3'd for the etag, then handed to
-    /// every disk via `fi.data` — no on-disk shards. Each per-disk
-    /// record still carries the cluster's nominal EC contract so
-    /// `common_parity` consensus and the decode-time invariant
-    /// checks behave uniformly with EC objects.
     #[allow(clippy::too_many_arguments)]
     async fn put_inline(
         &self,
@@ -392,7 +659,7 @@ impl Engine {
 
         let staging_id   = Uuid::new_v4().simple().to_string();
         let per_disk_fis = with_per_disk_index(&base_fi, &base_erasure, n);
-        promote_versions(backends, &staging_id, per_disk_fis, bucket, key, quorum).await?;
+        promote_versions(backends, STAGING_VOL, &staging_id, per_disk_fis, bucket, key, quorum).await?;
 
         Ok(ObjectInfo {
             bucket:        bucket.to_owned(),
@@ -403,20 +670,10 @@ impl Engine {
             modified_ms:   mod_time_ms,
             content_type,
             version_id,
+            is_delete_marker: false,
         })
     }
 
-    /// Streaming EC PUT. Encodes one stripe at a time across the
-    /// set, fanning each stripe's `D + P` shards out to the backends'
-    /// staged `part.1` sinks. After the body is fully written and
-    /// every sink has finished with quorum, the per-disk records
-    /// are atomically promoted via `promote_versions`.
-    ///
-    /// Failure anywhere in the body (open, write, finish, encode,
-    /// promotion) triggers a best-effort `cleanup_staging` so the
-    /// per-disk `STAGING_VOL/{staging_id}/` shells don't linger.
-    /// `promote_versions` does its own cleanup on quorum-fail, so
-    /// this sweep is redundant in that path but idempotent.
     #[allow(clippy::too_many_arguments)]
     async fn put_ec(
         &self,
@@ -490,7 +747,7 @@ impl Engine {
             base_fi.data_dir   = data_dir.clone();
             let base_erasure   = default_erasure_info(data_shards as u8, parity_shards as u8, n as u8);
             let per_disk_fis   = with_per_disk_index(&base_fi, &base_erasure, n);
-            promote_versions(backends, &staging_id, per_disk_fis, bucket, key, quorum).await?; // rpc 5, 6, 7
+            promote_versions(backends, STAGING_VOL, &staging_id, per_disk_fis, bucket, key, quorum).await?; // rpc 5, 6, 7
 
             Ok(ObjectInfo {
                 bucket:        bucket.to_owned(),
@@ -501,11 +758,12 @@ impl Engine {
                 modified_ms:   mod_time_ms,
                 content_type,
                 version_id,
+                is_delete_marker: false,
             })
         }.await;
 
         if result.is_err() {
-            cleanup_staging(backends, &staging_id).await; // todo: @arnav check the cleanups we already are cleaning up in promote versions
+            cleanup_src(backends, STAGING_VOL, &staging_id).await; // todo: @arnav check the cleanups we already are cleaning up in promote versions
         }
         result
     }
@@ -617,56 +875,50 @@ impl Engine {
                 msg:    "EC object missing data_dir in xl.meta".into(),
             });
         }
-        let part_path = format!("{key}/{}/{}", fi.data_dir, PART1_PATH_SUFFIX);
-        let opens = backends.iter().map(|b| {
-            let b      = b.clone();
-            let bucket = bucket.to_owned();
-            let pp     = part_path.clone();
-            async move { b.read_file_stream(&bucket, &pp, 0, on_disk_per_shard).await }
-        });
-        let opened = join_all(opens).await;
-        let mut sources: Vec<Option<Box<dyn ByteStream>>> = Vec::with_capacity(n);
-        let mut ok_count = 0usize;
-        for r in opened {
-            match r {
-                Ok(s)  => { sources.push(Some(s)); ok_count += 1; }
-                Err(_) => sources.push(None),
-            }
-        }
-        if ok_count < data_shards {
-            // Not enough shards alive to reconstruct. The cause may be
-            // a missing bucket on some disks (volume gone) or a
-            // missing part file — at this point both mean "the object
-            // cannot be served," which is `ObjectNotFound` from the
-            // frontend's perspective.
-            return Err(StorageError::ObjectNotFound {
-                bucket: bucket.to_owned(),
-                key:    key.to_owned(),
-            });
-        }
-
-        let stream = EcReadStream {
-            ec,
-            sources,
-            stripes_remaining: stripes,
+        // Multipart-aware read path: walks `fi.parts` in order. For
+        // single-shot PUTs `fi.parts` is `[{number:1, actual_size: fi.size}]`
+        // so the wrapper opens one EC stream and drains it — same
+        // bytes-on-the-wire behavior as before. For multipart-assembled
+        // objects (`fi.parts.len() > 1`) the wrapper opens each part's
+        // EC streams sequentially, transparently to the caller.
+        let _ = (stripes, on_disk_per_shard);  // recomputed per-part inside the wrapper
+        let stream = MultiPartEcStream {
+            backends:      backends.to_vec(),
+            bucket:        bucket.to_owned(),
+            key:           key.to_owned(),
+            data_dir:      fi.data_dir.clone(),
+            parts:         fi.parts.clone(),
+            next_idx:      0,
+            block_size,
             stripe_unit,
             data_shards,
             parity_shards,
-            total_remaining: fi.size as u64,
-            decoded:         Vec::new(),
-            decode_shard:    0,
-            shard_pos:       0,
-            bucket: bucket.to_owned(),
-            key:    key.to_owned(),
+            ec,
+            current:       None,
         };
         Ok((info, Box::new(stream)))
     }
 
-    // todo: @arnav check why get object cant serve this 
+    // todo: @arnav check why get object cant serve this
     /// STAT. Same consensus race as GET but without inline payload.
     pub async fn stat(&self, bucket: &str, key: &str) -> StorageResult<ObjectInfo> {
         let backends = self.set_backends(bucket, key)?;
         let (_, fi) = self.read_latest(&backends, bucket, key, false).await?;
+        Ok(to_object_info(bucket, &fi))
+    }
+
+    /// STAT a specific version. `version_id == "null"` selects the
+    /// null-versioned record (the default for objects written under
+    /// Unversioned or Suspended buckets); a UUID string selects that
+    /// exact version. Surfaces `ObjectNotFound` if the bucket/key
+    /// doesn't exist; `VersionNotFound` if the key exists but the
+    /// requested version doesn't. The returned `ObjectInfo`'s
+    /// `is_delete_marker` reflects whether the resolved version is a
+    /// tombstone — callers (e.g. HEAD) translate that to
+    /// `405 MethodNotAllowed` per S3 spec.
+    pub async fn stat_version(&self, bucket: &str, key: &str, version_id: &str) -> StorageResult<ObjectInfo> {
+        let backends = self.set_backends(bucket, key)?;
+        let (_, fi) = self.read_with_consensus(&backends, bucket, key, Some(version_id), false).await?;
         Ok(to_object_info(bucket, &fi))
     }
 
@@ -1076,6 +1328,13 @@ fn erasure_is_valid(ei: &ErasureInfo) -> bool {
 struct EcReadStream {
     ec:                Erasure,
     sources:           Vec<Option<Box<dyn ByteStream>>>,
+    /// Per-source leftover from a prior `src.read()` that returned more
+    /// bytes than the in-progress refill needed. Without this, the
+    /// over-read tail would be discarded and the next stripe's refill
+    /// would short-read against an exhausted source. Empty `Bytes`
+    /// when no carry is held. Only ever populated by a successful
+    /// over-read; cleared as soon as it's consumed.
+    source_carries:    Vec<bytes::Bytes>,
     stripes_remaining: usize,
     stripe_unit:       usize,
     data_shards:       usize,
@@ -1113,23 +1372,40 @@ impl EcReadStream {
         let mut fan = Vec::with_capacity(n);
         for (i, slot) in self.sources.iter_mut().enumerate() {
             if let Some(src) = slot.take() {
+                // Take any leftover from the prior refill — these are
+                // bytes the source already yielded but the prior
+                // stripe didn't need.
+                let initial_carry = std::mem::replace(&mut self.source_carries[i], bytes::Bytes::new());
                 fan.push(Box::pin(async move {
-                    let mut src = src;
-                    let mut buf = phenomenal_io::PooledBuffer::with_capacity(unit);
+                    let mut src   = src;
+                    let mut carry = initial_carry;
+                    let mut buf   = phenomenal_io::PooledBuffer::with_capacity(unit);
+                    // First, drain whatever we already had in carry.
+                    if !carry.is_empty() {
+                        let take = (unit - buf.len()).min(carry.len());
+                        buf.extend_from_slice(&carry[..take]);
+                        carry = bytes::Bytes::slice(&carry, take..);
+                    }
+                    // Pull more chunks until buf == unit. Save the
+                    // remainder of any over-read into `carry` for the
+                    // next stripe.
                     while buf.len() < unit {
                         match src.read().await {
                             Ok(chunk) if chunk.is_empty() => break,
                             Ok(chunk) => {
                                 let take = (unit - buf.len()).min(chunk.len());
                                 buf.extend_from_slice(&chunk[..take]);
+                                if take < chunk.len() {
+                                    carry = bytes::Bytes::slice(&chunk, take..);
+                                }
                             }
-                            Err(e) => return (i, None::<Box<dyn ByteStream>>, None, Some(e)),
+                            Err(e) => return (i, None::<Box<dyn ByteStream>>, None, carry, Some(e)),
                         }
                     }
                     let frozen = if buf.len() == unit { Some(buf.freeze()) } else { None };
-                    (i, Some(src), frozen, None)
+                    (i, Some(src), frozen, carry, None)
                 }) as std::pin::Pin<Box<dyn std::future::Future<Output =
-                    (usize, Option<Box<dyn ByteStream>>, Option<bytes::Bytes>, Option<IoError>)>>>);
+                    (usize, Option<Box<dyn ByteStream>>, Option<bytes::Bytes>, bytes::Bytes, Option<IoError>)>>>);
             }
         }
         let results = join_all(fan).await;
@@ -1137,7 +1413,8 @@ impl EcReadStream {
         // Reassemble: alive sources & their shard bytes; failed ones
         // become None for the decoder.
         let mut shard_opts: Vec<Option<bytes::Bytes>> = vec![None; n];
-        for (i, src_opt, shard, err) in results {
+        for (i, src_opt, shard, carry, err) in results {
+            self.source_carries[i] = carry;
             if err.is_none() {
                 if shard.is_some() {
                     self.sources[i] = src_opt;
@@ -1183,6 +1460,131 @@ impl EcReadStream {
             r += s.len();
         }
         r
+    }
+}
+
+/// Open one part's EC streams across the set, returning a configured
+/// `EcReadStream` ready to yield that part's bytes. Shared by single-
+/// part and multipart reads — single-shot PUTs invoke this once
+/// (parts == 1); multipart-assembled objects invoke once per part.
+async fn open_ec_part_stream(
+    backends:      &[Rc<dyn StorageBackend>],
+    bucket:        &str,
+    key:           &str,
+    part_path:     &str,
+    actual_size:   u64,
+    block_size:    usize,
+    stripe_unit:   usize,
+    data_shards:   usize,
+    parity_shards: usize,
+    ec:            Erasure,
+) -> StorageResult<EcReadStream> {
+    let n       = backends.len();
+    let stripes = (actual_size as usize).div_ceil(block_size).max(1);
+    let on_disk_per_shard = (stripes as u64) * stripe_unit as u64;
+
+    let opens = backends.iter().map(|b| {
+        let b      = b.clone();
+        let bucket = bucket.to_owned();
+        let pp     = part_path.to_owned();
+        async move { b.read_file_stream(&bucket, &pp, 0, on_disk_per_shard).await }
+    });
+    let opened = join_all(opens).await;
+    let mut sources: Vec<Option<Box<dyn ByteStream>>> = Vec::with_capacity(n);
+    let mut ok_count = 0usize;
+    for r in opened {
+        match r {
+            Ok(s)  => { sources.push(Some(s)); ok_count += 1; }
+            Err(_) => sources.push(None),
+        }
+    }
+    if ok_count < data_shards {
+        return Err(StorageError::ObjectNotFound {
+            bucket: bucket.to_owned(),
+            key:    key.to_owned(),
+        });
+    }
+    let n_carries = sources.len();
+    Ok(EcReadStream {
+        ec,
+        sources,
+        source_carries:    vec![bytes::Bytes::new(); n_carries],
+        stripes_remaining: stripes,
+        stripe_unit,
+        data_shards,
+        parity_shards,
+        total_remaining:   actual_size,
+        decoded:           Vec::new(),
+        decode_shard:      0,
+        shard_pos:         0,
+        bucket:            bucket.to_owned(),
+        key:               key.to_owned(),
+    })
+}
+
+/// `ByteStream` that walks `fi.parts` in order and drains each part's
+/// own `EcReadStream` before opening the next. Single-part objects
+/// (single-shot PUTs) and multipart-assembled objects share this
+/// path — only the part count differs.
+///
+/// Lazy: at most one part's set of per-disk streams is open at a
+/// time, so file-descriptor count stays at N (set size) even for
+/// objects with thousands of parts.
+struct MultiPartEcStream {
+    backends:      Vec<Rc<dyn StorageBackend>>,
+    bucket:        String,
+    key:           String,
+    data_dir:      String,
+    parts:         Vec<ObjectPartInfo>,
+    next_idx:      usize,
+    block_size:    usize,
+    stripe_unit:   usize,
+    data_shards:   usize,
+    parity_shards: usize,
+    ec:            Erasure,
+    current:       Option<EcReadStream>,
+}
+
+impl MultiPartEcStream {
+    /// Ensure `self.current` is populated with the next part's stream.
+    /// Returns `Ok(false)` once every part has been drained.
+    async fn advance(&mut self) -> phenomenal_io::IoResult<bool> {
+        if self.current.is_some() { return Ok(true); }
+        if self.next_idx >= self.parts.len() { return Ok(false); }
+        let p    = &self.parts[self.next_idx];
+        let path = format!("{}/{}/part.{}", self.key, self.data_dir, p.number);
+        let s    = open_ec_part_stream(
+            &self.backends, &self.bucket, &self.key, &path,
+            p.actual_size as u64,
+            self.block_size, self.stripe_unit,
+            self.data_shards, self.parity_shards,
+            self.ec.clone(),
+        ).await.map_err(|e| match e {
+            StorageError::ObjectNotFound { .. } => IoError::FileNotFound {
+                volume: self.bucket.clone(), path: path.clone(),
+            },
+            StorageError::Io(io) => io,
+            other                => IoError::InvalidArgument(other.to_string()),
+        })?;
+        self.current  = Some(s);
+        self.next_idx += 1;
+        Ok(true)
+    }
+}
+
+#[async_trait(?Send)]
+impl ByteStream for MultiPartEcStream {
+    async fn read(&mut self) -> phenomenal_io::IoResult<bytes::Bytes> {
+        loop {
+            if !self.advance().await? {
+                return Ok(bytes::Bytes::new());
+            }
+            let chunk = self.current.as_mut().unwrap().read().await?;
+            if !chunk.is_empty() { return Ok(chunk); }
+            // Current part fully drained — close and let the next loop
+            // iteration open the next part.
+            self.current = None;
+        }
     }
 }
 
@@ -1327,6 +1729,7 @@ fn to_object_info(bucket: &str, fi: &FileInfo) -> ObjectInfo {
         modified_ms:   fi.mod_time_ms,
         content_type:  fi.metadata.get(CONTENT_TYPE_META_KEY).cloned(),
         version_id:    fi.version_id.clone(),
+        is_delete_marker: fi.deleted,
     }
 }
 
@@ -1337,20 +1740,24 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-// ---------------------------------------------------------------------------
-// PUT building blocks — composed by `Engine::put_inline` and `Engine::put_ec`.
-// Each helper has one responsibility and no engine state.
-// ---------------------------------------------------------------------------
+fn now_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
 
-/// Pull exactly `payload_len` bytes from `src` as a refcount-only
-/// rope of `Bytes` frames. Each frame's allocation comes straight
-/// from the source — no userspace memcpy of the payload anywhere.
-/// Streams a blake3 hash over the frames in order so the etag
-/// matches the unencoded body, just like MinIO and rustfs.
-///
-/// EOF before `payload_len` bytes surfaces as `UnexpectedEof`. A
-/// chunk that overshoots is split via `Bytes::slice` (still
-/// refcount-only) so the caller never sees more than `payload_len`.
+fn format_upload_id(deployment_id: uuid::Uuid) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let payload = format!(
+        "{}.{}x{}",
+        deployment_id.simple(),
+        Uuid::new_v4().simple(),
+        now_nanos(),
+    );
+    URL_SAFE_NO_PAD.encode(payload.as_bytes())
+}
+
 async fn drain_inline_payload(
     src:         &mut dyn ByteStream,
     payload_len: usize,
@@ -1435,17 +1842,110 @@ async fn open_staging_sinks(
     join_all(opens).await.into_iter().collect()
 }
 
-/// Stripe loop: read `stripe_data` bytes per stripe from `src`,
-/// hash the real bytes for the etag, zero-pad the tail of the last
-/// stripe, EC-encode, and fan the resulting `D + P` shards out to
-/// the sinks in parallel. Returns the etag and the sinks (still
-/// open, ready for finalization).
-///
-/// Each stripe owns one fresh [`PooledBuffer`]; the encoder slices
-/// `D` data shards out of it (zero copy via `Bytes::slice`) and
-/// produces `P` parity shards in fresh pool-backed buffers. After
-/// the fan-out write completes, all `D + P` `Bytes` refcounts drop
-/// and the underlying allocations recycle to the pool.
+async fn read_part_sidecars(
+    backends:     &[Rc<dyn StorageBackend>],
+    session_path: &str,
+    data_dir:     &str,
+    parts:        &[crate::object::CompletePart],
+    min_present:  usize,
+) -> StorageResult<Vec<ObjectPartInfo>> {
+    let mut out: Vec<ObjectPartInfo> = Vec::with_capacity(parts.len());
+    for p in parts {
+        let path = format!("{session_path}/{data_dir}/part.{}.meta", p.part_number);
+        let reads = backends.iter().map(|b| {
+            let b    = b.clone();
+            let path = path.clone();
+            async move { b.read_file(MULTIPART_VOL, &path).await }
+        });
+        let results = join_all(reads).await;
+
+        let mut decoded: Option<ObjectPartInfo> = None;
+        let mut present = 0usize;
+        for r in results {
+            if let Ok(Some(bytes)) = r {
+                present += 1;
+                if decoded.is_none() {
+                    decoded = Some(rmp_serde::from_slice(&bytes).map_err(|e| {
+                        StorageError::Io(IoError::Decode(format!(
+                            "part.{}.meta: {e}", p.part_number
+                        )))
+                    })?);
+                }
+            }
+        }
+        if present < min_present || decoded.is_none() {
+            return Err(StorageError::Io(IoError::InvalidArgument(format!(
+                "part.{} sidecar missing or below read quorum ({present}/{min_present})",
+                p.part_number
+            ))));
+        }
+        out.push(decoded.unwrap());
+    }
+    Ok(out)
+}
+
+async fn open_part_staging_sinks(
+    backends:       &[Rc<dyn StorageBackend>],
+    tmp_part_path:  &str,
+    per_shard_size: u64,
+) -> phenomenal_io::IoResult<Vec<Box<dyn ByteSink>>> {
+    use phenomenal_io::STAGING_VOL;
+    let opens = backends.iter().map(|b| {
+        let b  = b.clone();
+        let pp = tmp_part_path.to_owned();
+        async move { b.create_file_writer(STAGING_VOL, &pp, per_shard_size).await }
+    });
+    join_all(opens).await.into_iter().collect()
+}
+
+fn majority_key<I, K>(items: I, threshold: usize) -> Option<K>
+where
+    I: IntoIterator<Item = K>,
+    K: Eq + std::hash::Hash + Clone,
+{
+    let mut counts: HashMap<K, usize> = HashMap::new();
+    for k in items {
+        let entry = counts.entry(k.clone()).or_insert(0);
+        *entry += 1;
+        if *entry >= threshold { return Some(k); }
+    }
+    None
+}
+
+async fn read_session_fi(
+    backends:     &[Rc<dyn StorageBackend>],
+    session_path: &str,
+) -> StorageResult<FileInfo> {
+    let metas: Vec<phenomenal_io::IoResult<FileInfo>> = join_all(
+        backends.iter().map(|b| {
+            let b    = b.clone();
+            let path = session_path.to_owned();
+            async move { b.read_version("", MULTIPART_VOL, &path, None, false).await }
+        })
+    ).await;
+
+    let mut valid: Vec<FileInfo>     = Vec::with_capacity(metas.len());
+    let mut last_err: Option<IoError> = None;
+    for r in metas {
+        match r {
+            Ok(fi) => valid.push(fi),
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    let needed = (backends.len() / 2) + 1;
+    let key_of = |fi: &FileInfo| {
+        (fi.data_dir.clone(), fi.erasure.data_blocks, fi.erasure.parity_blocks)
+    };
+    let winner = majority_key(valid.iter().map(key_of), needed).ok_or_else(|| {
+        StorageError::Io(last_err.unwrap_or_else(|| IoError::InvalidArgument(
+            format!("session {session_path}: no quorum on data_dir/erasure")
+        )))
+    })?;
+    Ok(valid.into_iter().find(|fi| key_of(fi) == winner)
+        .expect("majority_key returned a key with at least one matching record"))
+}
+
 async fn encode_and_write_stripes(
     ec:          &Erasure,
     src:         &mut dyn ByteStream,
@@ -1454,8 +1954,6 @@ async fn encode_and_write_stripes(
     stripes:     usize,
     sinks:       Vec<Box<dyn ByteSink>>,
 ) -> phenomenal_io::IoResult<(String, Vec<Box<dyn ByteSink>>)> {
-    // Wrap each sink in `Option` so the parallel fan-out can `take`
-    // owned sinks into futures and put them back per-slot.
     let mut slots: Vec<Option<Box<dyn ByteSink>>> = sinks.into_iter().map(Some).collect();
     let n = slots.len();
     let mut etag_hasher = blake3::Hasher::new();
@@ -1559,27 +2057,46 @@ async fn finalize_sinks_quorum(
 /// success the staging dir is already empty (rename_data moved the
 /// data dir out); we issue a best-effort dir remove for both the
 /// success and quorum-fail paths.
+/// Atomic per-disk promotion of a staged object into its final
+/// `(bucket, key)` location. The staged dir lives at
+/// `src_volume/src_path/` and contains the object's `data_dir/` subdir
+/// plus any session metadata; this function fans out a `rename_data`
+/// RPC across all backends to move both the data_dir and a synthesized
+/// `xl.meta` into the user bucket atomically per-disk.
+///
+/// On quorum failure: undo every successful disk via `delete_version
+/// (undo_write=true)` (which restores the prior `xl.meta.bkp`) and
+/// best-effort wipe the source staging dir.
+///
+/// On quorum success: trash any prior version's `data_dir` for which
+/// `rename_data` returned an `old_data_dir` (Suspended/Unversioned
+/// overwrite path), then wipe the source staging dir.
+///
+/// Used by:
+///   - `Engine::put_ec`        with `src_volume = STAGING_VOL`,  `src_path = <staging_id>`
+///   - `Engine::complete_multipart_upload` with
+///     `src_volume = MULTIPART_VOL`, `src_path = <bucket>/<key>/<upload_id>`
 async fn promote_versions(
     backends:     &[Rc<dyn StorageBackend>],
-    staging_id:   &str,
+    src_volume:   &str,
+    src_path:     &str,
     per_disk_fis: Vec<FileInfo>,
     bucket:       &str,
     key:          &str,
     quorum:       usize,
 ) -> StorageResult<()> {
-    use phenomenal_io::STAGING_VOL;
-
     assert_eq!(per_disk_fis.len(), backends.len());
 
     let promotes = backends.iter().zip(per_disk_fis.into_iter()).enumerate().map(
         |(i, (b, fi))| {
             let b          = b.clone();
-            let staging_id = staging_id.to_owned();
+            let src_volume = src_volume.to_owned();
+            let src_path   = src_path.to_owned();
             let bucket     = bucket.to_owned();
             let key        = key.to_owned();
             async move {
                 let res = b.rename_data(
-                    STAGING_VOL, &staging_id,
+                    &src_volume, &src_path,
                     &fi,
                     &bucket, &key,
                     &Default::default(),
@@ -1612,7 +2129,7 @@ async fn promote_versions(
             }
         });
         let _ = join_all(undos).await;
-        cleanup_staging(backends, staging_id).await;
+        cleanup_src(backends, src_volume, src_path).await;
         return Err(map_bucket_or_io(bucket)(
             first_err.unwrap_or_else(|| IoError::InvalidArgument("no quorum".into()))
         ));
@@ -1632,21 +2149,23 @@ async fn promote_versions(
         });
     let _ = join_all(stale_cleanups).await;
 
-    cleanup_staging(backends, staging_id).await;
+    cleanup_src(backends, src_volume, src_path).await;
 
     Ok(())
 }
 
-/// Best-effort recursive remove of every backend's
-/// `STAGING_VOL/{staging_id}/`. Used both on PUT failure
-/// (errors before promotion) and as a defensive sweep after success.
-async fn cleanup_staging(backends: &[Rc<dyn StorageBackend>], staging_id: &str) {
-    use phenomenal_io::STAGING_VOL;
+/// Best-effort recursive remove of `(src_volume, src_path)` on every
+/// backend. Used both on failure (errors before promotion / quorum
+/// not reached) and as a defensive sweep after a successful promote.
+/// Generic over the source volume so it can clean STAGING_VOL after a
+/// regular PUT and MULTIPART_VOL after a CompleteMultipartUpload.
+async fn cleanup_src(backends: &[Rc<dyn StorageBackend>], src_volume: &str, src_path: &str) {
     let _ = join_all(backends.iter().map(|b| {
-        let b          = b.clone();
-        let staging_id = staging_id.to_owned();
+        let b   = b.clone();
+        let vol = src_volume.to_owned();
+        let p   = src_path.to_owned();
         async move {
-            let _ = b.delete(STAGING_VOL, &staging_id, true).await;
+            let _ = b.delete(&vol, &p, true).await;
         }
     })).await;
 }
@@ -1693,6 +2212,7 @@ mod tests {
                 .collect(),
             set_drive_count:      set_size,
             default_parity_count: (set_size / 4).max(1),
+            deployment_id:        Uuid::nil(),
         }
     }
 
@@ -2036,5 +2556,300 @@ mod tests {
         let (_dirs, e) = eng(3, 3).await;
         put_bytes(&e, "buk", "k", b"x".to_vec(), None).await;
         e.delete_bucket("buk", true).await.unwrap();
+    }
+
+    /// CMU + UploadPart end-to-end round-trip: initiate a session,
+    /// upload three parts, verify each part lands at
+    /// `MULTIPART_VOL/buk/k/<uploadId>/<dataDir>/part.{N}` with a
+    /// sibling `.meta` sidecar, and confirm the session `xl.meta`
+    /// itself was not touched (its mtime stays at the CMU value).
+    #[compio::test]
+    async fn upload_part_round_trip() {
+        let (dirs, e) = eng(3, 3).await;
+
+        let init = e.create_multipart_upload("buk", "k", Some("text/plain".into()))
+            .await.expect("CMU");
+
+        // Upload 3 parts with distinct payloads.
+        let payloads: [Vec<u8>; 3] = [
+            (0..1024usize).map(|i| (i % 251) as u8).collect(),
+            (0..2048usize).map(|i| ((i + 17) % 251) as u8).collect(),
+            (0..4096usize).map(|i| ((i + 91) % 251) as u8).collect(),
+        ];
+        for (i, payload) in payloads.iter().enumerate() {
+            let part_no = (i + 1) as u32;
+            let mut src = VecByteStream::new(payload.clone());
+            let info = e.upload_part(
+                "buk", "k", &init.upload_id, part_no,
+                payload.len() as u64, &mut src,
+            ).await.expect("upload_part");
+            assert_eq!(info.number, part_no as i32);
+            assert_eq!(info.actual_size, payload.len() as i64);
+            assert!(!info.etag.is_empty(), "etag must be populated");
+        }
+
+        // The session xl.meta on every disk must carry parts=[] still
+        // (UploadPart never touches the session record). The data_dir
+        // and (per-disk) part.{N}/part.{N}.meta files exist.
+        for d in &dirs {
+            let session_dir = d.path()
+                .join(".phenomenal.multipart")
+                .join("buk").join("k")
+                .join(&init.upload_id);
+            assert!(session_dir.join("xl.meta").exists(), "session xl.meta missing");
+
+            // Scan one level down to find the dataDir UUID dir, then
+            // verify each part + .meta sidecar is present.
+            let mut found_data_dir: Option<std::path::PathBuf> = None;
+            for entry in std::fs::read_dir(&session_dir).unwrap() {
+                let p = entry.unwrap().path();
+                if p.is_dir() { found_data_dir = Some(p); break; }
+            }
+            let dd = found_data_dir.expect("dataDir not found under session");
+            for part_no in 1..=3 {
+                assert!(dd.join(format!("part.{part_no}")).exists(),
+                        "part.{part_no} missing on disk {:?}", d.path());
+                assert!(dd.join(format!("part.{part_no}.meta")).exists(),
+                        "part.{part_no}.meta sidecar missing on disk {:?}", d.path());
+            }
+        }
+    }
+
+    /// Out-of-range partNumber is rejected before any disk work.
+    #[compio::test]
+    async fn upload_part_rejects_invalid_part_number() {
+        let (_dirs, e) = eng(3, 3).await;
+        let init = e.create_multipart_upload("buk", "k", None).await.unwrap();
+        let mut src = VecByteStream::new(b"x".to_vec());
+        assert!(e.upload_part("buk", "k", &init.upload_id, 0, 1, &mut src).await.is_err());
+        let mut src = VecByteStream::new(b"x".to_vec());
+        assert!(e.upload_part("buk", "k", &init.upload_id, 10_001, 1, &mut src).await.is_err());
+    }
+
+    /// Full multipart round-trip: CMU → 3 UploadParts (each ≥ 5 MiB
+    /// except the last) → CompleteMultipartUpload. Verifies the
+    /// assembled object is GET-able with the expected payload, the
+    /// session dir under MULTIPART_VOL is gone, and the dataDir +
+    /// xl.meta land at `{bucket}/{key}/`.
+    #[compio::test]
+    async fn complete_multipart_full_roundtrip() {
+        let (dirs, e) = eng(3, 3).await;
+        let init = e.create_multipart_upload("buk", "k", Some("application/octet-stream".into()))
+            .await.unwrap();
+
+        let part_size: usize = 5 * 1024 * 1024;
+        let payloads: [Vec<u8>; 3] = [
+            (0..part_size).map(|i| (i % 251) as u8).collect(),
+            (0..part_size).map(|i| ((i + 17) % 251) as u8).collect(),
+            (0..1024).map(|i| ((i + 91) % 251) as u8).collect(),  // tail < 5 MiB OK
+        ];
+        let mut part_etags: Vec<(u32, String)> = Vec::new();
+        for (i, payload) in payloads.iter().enumerate() {
+            let part_no = (i + 1) as u32;
+            let mut src = VecByteStream::new(payload.clone());
+            let info = e.upload_part("buk", "k", &init.upload_id, part_no,
+                                     payload.len() as u64, &mut src).await.unwrap();
+            part_etags.push((part_no, info.etag));
+        }
+
+        let parts: Vec<crate::object::CompletePart> = part_etags.into_iter()
+            .map(|(n, etag)| crate::object::CompletePart { part_number: n, etag })
+            .collect();
+        let info = e.complete_multipart_upload("buk", "k", &init.upload_id, parts)
+            .await.expect("Complete");
+
+        // Assembled etag has the multipart suffix `-N`.
+        assert!(info.etag.ends_with("-3"), "etag {:?} missing -N suffix", info.etag);
+        // Total size sums all parts.
+        let expected_size: usize = payloads.iter().map(|p| p.len()).sum();
+        assert_eq!(info.size as usize, expected_size);
+
+        // Session dir is gone on every disk.
+        for d in &dirs {
+            let session_dir = d.path()
+                .join(".phenomenal.multipart")
+                .join("buk").join("k").join(&init.upload_id);
+            assert!(!session_dir.exists(), "session dir survived on {:?}", d.path());
+        }
+
+        // Object xl.meta lives at bucket/key on every disk.
+        for d in &dirs {
+            let meta_path = d.path().join("buk").join("k").join("xl.meta");
+            assert!(meta_path.exists(), "xl.meta missing at {:?}", meta_path);
+        }
+
+        // Each part landed at bucket/key/{data_dir}/part.{N} on every disk.
+        for d in &dirs {
+            let object_dir = d.path().join("buk").join("k");
+            let mut data_dir: Option<std::path::PathBuf> = None;
+            for entry in std::fs::read_dir(&object_dir).unwrap() {
+                let p = entry.unwrap().path();
+                if p.is_dir() { data_dir = Some(p); break; }
+            }
+            let dd = data_dir.expect("dataDir not found under bucket/key");
+            for part_no in 1..=3 {
+                assert!(dd.join(format!("part.{part_no}")).exists(),
+                        "part.{part_no} missing under {:?}", dd);
+            }
+            assert!(!dd.join("part.1.meta").exists(), "stale sidecar at {:?}", dd);
+        }
+
+        // GET assembles a stream that yields exactly the concatenation
+        // of all parts in order — `MultiPartEcStream` walks `fi.parts`
+        // and drains each part's EC stream sequentially.
+        let (get_info, mut stream) = e.get("buk", "k").await.expect("GET");
+        assert_eq!(get_info.size, info.size);
+        assert_eq!(get_info.etag, info.etag);
+        let mut got = vec![0u8; info.size as usize];
+        let n = read_full(stream.as_mut(), &mut got[..]).await.unwrap();
+        got.truncate(n);
+        let mut expected: Vec<u8> = Vec::with_capacity(info.size as usize);
+        for p in &payloads { expected.extend_from_slice(p); }
+        assert_eq!(got.len(), expected.len(), "GET length mismatch");
+        assert_eq!(got, expected, "GET payload mismatch — multi-part stream walk");
+    }
+
+    /// On a Versioning=Enabled bucket, CreateMultipartUpload must
+    /// stamp a real UUID into the session FI (not the "null" sentinel),
+    /// and Complete must inherit it onto the assembled object.
+    /// Mirrors MinIO's `fi.VersionID = mustGetUUID()` at CMU time.
+    #[compio::test]
+    async fn complete_multipart_versioned_bucket_uses_uuid_version() {
+        let (_dirs, e) = eng(3, 3).await;
+        e.put_bucket_versioning("buk", VersioningStatus::Enabled).await.unwrap();
+
+        let init = e.create_multipart_upload("buk", "k", None).await.unwrap();
+
+        let payload = vec![0xAAu8; 5 * 1024 * 1024];
+        let mut src = VecByteStream::new(payload.clone());
+        let part = e.upload_part("buk", "k", &init.upload_id, 1, payload.len() as u64, &mut src)
+            .await.unwrap();
+
+        let info = e.complete_multipart_upload("buk", "k", &init.upload_id,
+            vec![crate::object::CompletePart { part_number: 1, etag: part.etag }],
+        ).await.unwrap();
+
+        assert_ne!(info.version_id, "null",
+            "Versioning=Enabled bucket must mint a UUID version_id, got {:?}",
+            info.version_id);
+        // UUID v4 simple form is 32 hex chars, dashed form is 36.
+        assert!(info.version_id.len() >= 32,
+            "version_id {:?} doesn't look like a UUID", info.version_id);
+
+        // On Suspended/Unversioned the original "null" behavior holds.
+        e.put_bucket_versioning("buk", VersioningStatus::Suspended).await.unwrap();
+        let init2 = e.create_multipart_upload("buk", "k2", None).await.unwrap();
+        let mut src = VecByteStream::new(payload.clone());
+        let part2 = e.upload_part("buk", "k2", &init2.upload_id, 1, payload.len() as u64, &mut src)
+            .await.unwrap();
+        let info2 = e.complete_multipart_upload("buk", "k2", &init2.upload_id,
+            vec![crate::object::CompletePart { part_number: 1, etag: part2.etag }],
+        ).await.unwrap();
+        assert_eq!(info2.version_id, "null",
+            "Suspended bucket should keep null version_id");
+    }
+
+    /// Complete with an etag that doesn't match the sidecar must fail
+    /// before the rename step, leaving the session intact for retry.
+    #[compio::test]
+    async fn complete_multipart_rejects_etag_mismatch() {
+        let (_dirs, e) = eng(3, 3).await;
+        let init = e.create_multipart_upload("buk", "k", None).await.unwrap();
+
+        let payload = vec![0xCDu8; 5 * 1024 * 1024];
+        let mut src = VecByteStream::new(payload.clone());
+        let _ = e.upload_part("buk", "k", &init.upload_id, 1, payload.len() as u64, &mut src)
+            .await.unwrap();
+
+        let bad_parts = vec![crate::object::CompletePart {
+            part_number: 1,
+            etag: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+        }];
+        let r = e.complete_multipart_upload("buk", "k", &init.upload_id, bad_parts).await;
+        assert!(r.is_err(), "expected etag-mismatch error, got {r:?}");
+    }
+
+    /// Non-tail part below 5 MiB must fail.
+    #[compio::test]
+    async fn complete_multipart_rejects_small_part() {
+        let (_dirs, e) = eng(3, 3).await;
+        let init = e.create_multipart_upload("buk", "k", None).await.unwrap();
+
+        let small = vec![0xEEu8; 1024];
+        let mut src = VecByteStream::new(small.clone());
+        let info = e.upload_part("buk", "k", &init.upload_id, 1, small.len() as u64, &mut src)
+            .await.unwrap();
+
+        let tail = vec![0xFFu8; 1024];
+        let mut src = VecByteStream::new(tail.clone());
+        let info2 = e.upload_part("buk", "k", &init.upload_id, 2, tail.len() as u64, &mut src)
+            .await.unwrap();
+
+        let parts = vec![
+            crate::object::CompletePart { part_number: 1, etag: info.etag },
+            crate::object::CompletePart { part_number: 2, etag: info2.etag },
+        ];
+        let r = e.complete_multipart_upload("buk", "k", &init.upload_id, parts).await;
+        assert!(r.is_err(), "non-tail < 5 MiB should be rejected");
+    }
+
+    /// Re-uploading the same part number replaces both the data file
+    /// and the sidecar atomically per-disk. Verifies A4 (pre-cleanup)
+    /// and A3 (per-disk grouping): after the second upload, every
+    /// disk must hold the new etag's data + new sidecar — no torn
+    /// (stale data, fresh meta) or (fresh data, stale meta) state.
+    #[compio::test]
+    async fn upload_part_reupload_replaces_atomically() {
+        let (dirs, e) = eng(3, 3).await;
+        let init = e.create_multipart_upload("buk", "k", None).await.unwrap();
+
+        let payload_a: Vec<u8> = vec![0xAAu8; 4096];
+        let payload_b: Vec<u8> = vec![0xBBu8; 8192];
+
+        let mut src = VecByteStream::new(payload_a.clone());
+        let info_a = e.upload_part("buk", "k", &init.upload_id, 1, payload_a.len() as u64, &mut src)
+            .await.unwrap();
+
+        let mut src = VecByteStream::new(payload_b.clone());
+        let info_b = e.upload_part("buk", "k", &init.upload_id, 1, payload_b.len() as u64, &mut src)
+            .await.unwrap();
+
+        // Etags must differ — different payloads.
+        assert_ne!(info_a.etag, info_b.etag);
+
+        // On every disk, the sidecar's etag matches the SECOND upload.
+        // (If A4's pre-cleanup or A3's per-disk grouping were missing,
+        // we could observe info_a's sidecar racing with info_b's data.)
+        for d in &dirs {
+            let session_dir = d.path()
+                .join(".phenomenal.multipart")
+                .join("buk").join("k")
+                .join(&init.upload_id);
+            let mut data_dir: Option<std::path::PathBuf> = None;
+            for entry in std::fs::read_dir(&session_dir).unwrap() {
+                let p = entry.unwrap().path();
+                if p.is_dir() { data_dir = Some(p); break; }
+            }
+            let dd = data_dir.expect("dataDir not found");
+            let meta_bytes = std::fs::read(dd.join("part.1.meta"))
+                .expect("sidecar present");
+            let parsed: phenomenal_io::ObjectPartInfo = rmp_serde::from_slice(&meta_bytes)
+                .expect("sidecar decodes");
+            assert_eq!(parsed.etag, info_b.etag,
+                "disk {:?} sidecar must reflect the second upload", d.path());
+            assert_eq!(parsed.actual_size, payload_b.len() as i64);
+            assert!(dd.join("part.1").exists(), "part data missing on {:?}", d.path());
+        }
+    }
+
+    /// Unknown upload_id (no session xl.meta on any disk) must fail
+    /// before allocating staging — the session-FI consensus read
+    /// returns no quorum on a missing path.
+    #[compio::test]
+    async fn upload_part_unknown_upload_id() {
+        let (_dirs, e) = eng(3, 3).await;
+        let mut src = VecByteStream::new(b"x".to_vec());
+        let r = e.upload_part("buk", "k", "no-such-upload", 1, 1, &mut src).await;
+        assert!(r.is_err());
     }
 }

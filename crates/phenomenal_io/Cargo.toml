@@ -8,6 +8,24 @@ license.workspace      = true
 [dependencies]
 compio       = { workspace = true }
 
+# HTTP/2 inter-node RPC plane. `RemoteBackend` is a cyper client; every
+# `StorageBackend` method becomes a single h2 stream on a long-lived
+# connection per peer. `futures` brings in `mpsc` for the push→pull
+# bridge that turns `ByteSink::write_all` calls into a `cyper::Body`
+# stream. `send_wrapper` lifts the runtime-local (`!Send`) receiver
+# into `Body::stream`'s `Send + 'static` bound; sound because each
+# compio runtime is pinned to one OS thread.
+cyper        = { workspace = true }
+http         = { workspace = true }
+futures      = { workspace = true }
+futures-util = { workspace = true }
+send_wrapper = { workspace = true }
+# URL-safe-no-pad base64 for encoding the bincode `Request` envelope
+# into the `x-phenomenal-rpc` HTTP header on the streaming-write
+# route. Same encoder MinIO and rustfs use for upload-IDs and other
+# header-borne tokens, so the alphabet matches AWS conventions.
+base64       = { workspace = true }
+
 bytes        = { workspace = true }
 serde        = { workspace = true }
 bincode      = { workspace = true }
@@ -15,8 +33,9 @@ async-trait  = { workspace = true }
 thiserror    = { workspace = true }
 tracing      = { workspace = true }
 libc         = "0.2"
-uuid         = { version = "1", features = ["v4"] }
+uuid         = { version = "1", features = ["v4", "serde"] }
 rmp-serde    = "1"
+serde_json   = { workspace = true }
 xxhash-rust  = { version = "0.8", features = ["xxh64"] }
 crc32c       = { workspace = true }
 rustls       = { workspace = true }
