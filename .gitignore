@@ -1,6 +1,8 @@
+# Build artifacts and editor scratch.
 /target
 **/*.rs.bk
 Cargo.lock.bak
 *.swp
+*.orig
 .DS_Store
 /data
