@@ -7,7 +7,7 @@
 
 ### The shortest path from NVMe to GPU memory.
 
-S3 wire compatible distributed object storage, written from scratch in Rust on `io_uring`, for the workloads that move terabytes between storage and GPUs.
+S3 wire compatible distributed object storage, written in Rust on `io_uring`, for the workloads that move terabytes between storage and GPUs.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](rust-toolchain.toml)
