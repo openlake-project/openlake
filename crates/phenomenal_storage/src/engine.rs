@@ -45,6 +45,11 @@ pub struct Engine {
     /// so a coordinator only votes against the data targets it's about
     /// to write — never the full cluster. Length is `cluster.num_sets()`.
     dsync_by_set: Vec<Rc<DsyncClient>>,
+    /// Identity of the node hosting this Engine. Set by callers (server,
+    /// CLI). Reserved for heal/MRF routing where we must distinguish local
+    /// backends from `RemoteBackend` peers; the LIST path resolves
+    /// placement via `cluster.set_disks` and does not depend on it.
+    #[allow(dead_code)]
     self_id:  NodeId,
     inline_threshold: usize,
 }
@@ -83,12 +88,6 @@ impl Engine {
     fn dsync_for_bucket(&self, bucket: &str) -> &Rc<DsyncClient> {
         let s = self.cluster.set_index_for(bucket, "");
         &self.dsync_by_set[s]
-    }
-
-    fn local(&self) -> &Rc<dyn StorageBackend> {
-        let disk0 = DiskAddr { node_id: self.self_id, disk_idx: 0 };
-        self.backends.get(&disk0)
-            .expect("self_id with disk_idx=0 must be in backends")
     }
 
     fn backend(&self, addr: DiskAddr) -> StorageResult<&Rc<dyn StorageBackend>> {
@@ -1006,40 +1005,50 @@ impl Engine {
         else { Err(StorageError::ObjectNotFound { bucket: bucket.into(), key: key.into() }) }
     }
 
-    /// List objects under `prefix`. v0 walks the local node's tree.
     pub async fn list(&self, bucket: &str, prefix: &str) -> StorageResult<Vec<ObjectInfo>> {
-        let mut out = Vec::new();
-        self.walk(self.local(), bucket, "", prefix, &mut out).await?;
-        Ok(out)
+        let num_sets = self.cluster.num_sets();
+        if num_sets == 0 {
+            return Ok(Vec::new());
+        }
+        let per_set = join_all(
+            (0..num_sets).map(|set_idx| self.list_one_set(set_idx, bucket, prefix))
+        ).await;
+        let mut sets_ok: Vec<Vec<ObjectInfo>> = Vec::with_capacity(num_sets);
+        for r in per_set {
+            sets_ok.push(r?);
+        }
+        Ok(merge_across_sets(sets_ok))
     }
 
-    fn walk<'a>(
-        &'a self,
-        backend: &'a Rc<dyn StorageBackend>,
-        bucket: &'a str,
-        dir: &'a str,
-        prefix: &'a str,
-        out: &'a mut Vec<ObjectInfo>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = StorageResult<()>> + 'a>> {
-        Box::pin(async move {
-            let entries = backend.list_dir(bucket, dir, 0).await
-                .map_err(map_bucket_or_io(bucket))?;
-            for name in entries {
-                let child = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
-                match backend.read_version("", bucket, &child, None, false).await {
-                    Ok(fi) => {
-                        if prefix.is_empty() || fi.name.starts_with(prefix) {
-                            out.push(to_object_info(bucket, &fi));
-                        }
-                    }
-                    Err(IoError::FileNotFound { .. }) => {
-                        self.walk(backend, bucket, &child, prefix, out).await?;
-                    }
-                    Err(e) => return Err(e.into()),
-                }
+    async fn list_one_set(
+        &self,
+        set_idx: usize,
+        bucket: &str,
+        prefix: &str,
+    ) -> StorageResult<Vec<ObjectInfo>> {
+        let disks: Vec<Rc<dyn StorageBackend>> = self.cluster.set_disks(set_idx)
+            .into_iter()
+            .filter_map(|a| self.backends.get(&a).cloned())
+            .collect();
+        if disks.is_empty() {
+            return Ok(Vec::new());
+        }
+        let n = disks.len();
+        let walks: Vec<_> = disks.into_iter()
+            .map(|d| walk_disk_recursive(d, bucket.to_owned(), prefix.to_owned()))
+            .collect();
+        let results = join_all(walks).await;
+        let mut streams: Vec<Vec<(String, FileInfo)>> = Vec::with_capacity(n);
+        for r in results {
+            if let Ok(s) = r {
+                streams.push(s);
             }
-            Ok(())
-        })
+        }
+        let quorum = (n + 1) / 2;
+        if streams.len() < quorum {
+            return Ok(Vec::new());
+        }
+        Ok(merge_within_set(streams, quorum, bucket))
     }
     // todo: @arnav we need to implement health check and healer, we can get away with it today due to strict write consensus but not ideal long term.
     /// Read consensus across the EC set.
@@ -1790,6 +1799,150 @@ fn to_object_info(bucket: &str, fi: &FileInfo) -> ObjectInfo {
     }
 }
 
+fn walk_disk_recursive(
+    backend: Rc<dyn StorageBackend>,
+    bucket: String,
+    prefix: String,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = StorageResult<Vec<(String, FileInfo)>>>>> {
+    Box::pin(async move {
+        let mut out: Vec<(String, FileInfo)> = Vec::new();
+        walk_disk_inner(&backend, &bucket, "", &prefix, &mut out).await?;
+        Ok(out)
+    })
+}
+
+fn walk_disk_inner<'a>(
+    backend: &'a Rc<dyn StorageBackend>,
+    bucket: &'a str,
+    dir: &'a str,
+    prefix: &'a str,
+    out: &'a mut Vec<(String, FileInfo)>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = StorageResult<()>> + 'a>> {
+    Box::pin(async move {
+        let mut entries = backend.list_dir(bucket, dir, 0).await
+            .map_err(map_bucket_or_io(bucket))?;
+        // K-way merge across drives requires each drive's stream to be lex-sorted.
+        // We sort per-directory and recurse depth-first; the property "a/..." lex
+        // precedes any sibling "a+ε" makes the descent globally sorted.
+        entries.sort();
+        for name in entries {
+            let child = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+            match backend.read_version("", bucket, &child, None, false).await {
+                Ok(fi) => {
+                    if prefix.is_empty() || fi.name.starts_with(prefix) {
+                        out.push((fi.name.clone(), fi));
+                    }
+                }
+                Err(IoError::FileNotFound { .. }) => {
+                    walk_disk_inner(backend, bucket, &child, prefix, out).await?;
+                }
+                Err(_) => {
+                    // Defective xl.meta or transient I/O on this drive for this
+                    // entry. Drop this drive's vote for this key; the set merger
+                    // will rely on quorum from the remaining drives.
+                    continue;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+fn merge_within_set(
+    streams: Vec<Vec<(String, FileInfo)>>,
+    quorum: usize,
+    bucket: &str,
+) -> Vec<ObjectInfo> {
+    let mut heads: Vec<usize> = vec![0; streams.len()];
+    let mut out: Vec<ObjectInfo> = Vec::new();
+    loop {
+        let mut smallest: Option<String> = None;
+        for (i, &h) in heads.iter().enumerate() {
+            if let Some((name, _)) = streams[i].get(h) {
+                if smallest.as_ref().map_or(true, |cur| name < cur) {
+                    smallest = Some(name.clone());
+                }
+            }
+        }
+        let target = match smallest {
+            Some(n) => n,
+            None    => break,
+        };
+        let mut candidates: Vec<FileInfo> = Vec::new();
+        for i in 0..streams.len() {
+            let h = heads[i];
+            if let Some((name, fi)) = streams[i].get(h) {
+                if *name == target {
+                    candidates.push(fi.clone());
+                    heads[i] = h + 1;
+                }
+            }
+        }
+        if candidates.len() < quorum {
+            continue;
+        }
+        if let Some(canonical) = vote_fileinfo(&candidates, quorum) {
+            if !canonical.deleted {
+                out.push(to_object_info(bucket, &canonical));
+            }
+        }
+    }
+    out
+}
+
+fn vote_fileinfo(candidates: &[FileInfo], quorum: usize) -> Option<FileInfo> {
+    use std::collections::HashMap;
+    type Sig = (String, u64, String, i64, bool);
+    let mut tally: HashMap<Sig, (usize, FileInfo)> = HashMap::new();
+    for fi in candidates {
+        let etag = fi.metadata.get(ETAG_META_KEY).cloned().unwrap_or_default();
+        let sig: Sig = (etag, fi.mod_time_ms, fi.version_id.clone(), fi.size, fi.deleted);
+        let slot = tally.entry(sig).or_insert_with(|| (0, fi.clone()));
+        slot.0 += 1;
+    }
+    tally.into_iter()
+        .filter(|(_, (c, _))| *c >= quorum)
+        .max_by_key(|(_, (c, _))| *c)
+        .map(|(_, (_, fi))| fi)
+}
+
+fn merge_across_sets(streams: Vec<Vec<ObjectInfo>>) -> Vec<ObjectInfo> {
+    let mut heads: Vec<usize> = vec![0; streams.len()];
+    let mut out: Vec<ObjectInfo> = Vec::new();
+    loop {
+        let mut smallest_key: Option<String> = None;
+        let mut smallest_idx: Option<usize>  = None;
+        for (i, &h) in heads.iter().enumerate() {
+            if let Some(oi) = streams[i].get(h) {
+                if smallest_key.as_ref().map_or(true, |cur| oi.key < *cur) {
+                    smallest_key = Some(oi.key.clone());
+                    smallest_idx = Some(i);
+                }
+            }
+        }
+        let (i, target_key) = match (smallest_idx, smallest_key) {
+            (Some(i), Some(k)) => (i, k),
+            _ => break,
+        };
+        let mut chosen = streams[i][heads[i]].clone();
+        heads[i] += 1;
+        for j in 0..streams.len() {
+            if j == i { continue; }
+            let h = heads[j];
+            if let Some(oi) = streams[j].get(h) {
+                if oi.key == target_key {
+                    if oi.modified_ms > chosen.modified_ms {
+                        chosen = oi.clone();
+                    }
+                    heads[j] = h + 1;
+                }
+            }
+        }
+        out.push(chosen);
+    }
+    out
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2322,6 +2475,73 @@ mod tests {
         e.delete("buk", "k").await.unwrap();
         assert!(matches!(e.get("buk", "k").await,
             Err(StorageError::ObjectNotFound { .. })));
+    }
+
+    /// LIST on a single-set cluster returns every put object, in lex order.
+    /// Validates the per-set merge primitive end-to-end against the simplest
+    /// topology.
+    #[compio::test]
+    async fn list_single_set_returns_all_puts() {
+        let (_dirs, e) = eng(3, 3).await;
+        let keys = ["alpha", "beta", "gamma", "delta", "epsilon"];
+        for k in &keys {
+            put_bytes(&e, "buk", k, format!("body-{k}").into_bytes(), None).await;
+        }
+        let listed = e.list("buk", "").await.unwrap();
+        let listed_keys: Vec<&str> = listed.iter().map(|o| o.key.as_str()).collect();
+        let mut expected: Vec<&str> = keys.to_vec();
+        expected.sort();
+        assert_eq!(listed_keys, expected);
+    }
+
+    /// LIST on a multi-set cluster must fan out across every set and merge
+    /// the streams in lex order. This is the regression that motivated the
+    /// MinIO-style cross-set port: the previous single-disk walk returned
+    /// only the fraction of objects placed in the receiving node's set.
+    #[compio::test]
+    async fn list_spans_all_sets() {
+        // 6 disks, set_size=3 -> 2 sets. With 20 keys the SipHash placement
+        // distributes objects across both sets; LIST must surface every one.
+        let (_dirs, e) = eng(6, 3).await;
+        let n = 20usize;
+        let mut expected: Vec<String> = (0..n).map(|i| format!("obj-{:04}", i)).collect();
+        for k in &expected {
+            put_bytes(&e, "buk", k, format!("body-{k}").into_bytes(), None).await;
+        }
+        let listed = e.list("buk", "").await.unwrap();
+        assert_eq!(listed.len(), n, "expected {n} objects, got {}", listed.len());
+        expected.sort();
+        let listed_keys: Vec<String> = listed.iter().map(|o| o.key.clone()).collect();
+        assert_eq!(listed_keys, expected, "listing must be lex-sorted");
+        // Confirm placement actually crossed sets (otherwise the test is
+        // degenerate). Counts hash placements directly off the cluster config
+        // to avoid coupling the assertion to engine internals.
+        let cluster = local_cluster(6, 3);
+        let mut sets_hit = std::collections::HashSet::new();
+        for k in &expected {
+            sets_hit.insert(cluster.set_index_for("buk", k));
+        }
+        assert!(sets_hit.len() >= 2,
+            "test invariant: 20 keys must land in >= 2 sets, hit={sets_hit:?}");
+    }
+
+    /// LIST with a non-empty prefix returns only matching keys, sorted.
+    /// Validates prefix filtering survives the cross-set merge.
+    #[compio::test]
+    async fn list_with_prefix_filters_across_sets() {
+        let (_dirs, e) = eng(6, 3).await;
+        for i in 0..10 {
+            put_bytes(&e, "buk", &format!("foo/{:02}", i), b"x".to_vec(), None).await;
+            put_bytes(&e, "buk", &format!("bar/{:02}", i), b"y".to_vec(), None).await;
+        }
+        let listed = e.list("buk", "foo/").await.unwrap();
+        assert_eq!(listed.len(), 10);
+        for oi in &listed {
+            assert!(oi.key.starts_with("foo/"));
+        }
+        for w in listed.windows(2) {
+            assert!(w[0].key <= w[1].key);
+        }
     }
 
     /// 1 MiB payload — straight onto the EC streaming path with the
