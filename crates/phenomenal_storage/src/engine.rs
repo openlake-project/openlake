@@ -1005,103 +1005,19 @@ impl Engine {
         else { Err(StorageError::ObjectNotFound { bucket: bucket.into(), key: key.into() }) }
     }
 
-    pub async fn delete_objects(
-        &self,
-        bucket: &str,
-        keys: &[String],
-    ) -> StorageResult<Vec<StorageResult<()>>> {
-        if keys.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut by_set: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
-        for (idx, k) in keys.iter().enumerate() {
-            let s = self.cluster.set_index_for(bucket, k);
-            by_set.entry(s).or_default().push((idx, k.clone()));
-        }
-        let set_futs = by_set.into_iter().map(|(set_idx, idx_keys)| {
-            async move {
-                let disks: Vec<Rc<dyn StorageBackend>> = self.cluster.set_disks(set_idx)
-                    .into_iter()
-                    .filter_map(|a| self.backends.get(&a).cloned())
-                    .collect();
-                let key_strs: Vec<String> = idx_keys.iter().map(|(_, k)| k.clone()).collect();
-                let per_drive = join_all(disks.iter().map(|d| {
-                    let d   = d.clone();
-                    let vol = bucket.to_owned();
-                    let ks  = key_strs.clone();
-                    async move {
-                        let refs: Vec<&str> = ks.iter().map(String::as_str).collect();
-                        d.delete_batch(&vol, &refs, true).await
-                    }
-                })).await;
-                (idx_keys, per_drive)
-            }
-        });
-        let set_results = join_all(set_futs).await;
-
-        let quorum = self.cluster.write_quorum();
-        let mut out: Vec<StorageResult<()>> = (0..keys.len())
-            .map(|_| Ok(()))
-            .collect();
-        for (idx_keys, per_drive_results) in set_results {
-            let n_keys = idx_keys.len();
-            let mut ok_counts        = vec![0usize; n_keys];
-            let mut not_found_counts = vec![0usize; n_keys];
-            let mut first_err: Vec<Option<IoError>> = (0..n_keys).map(|_| None).collect();
-            for drive_res in &per_drive_results {
-                let Ok(per_key) = drive_res else { continue; };
-                for (i, r) in per_key.iter().enumerate() {
-                    if i >= n_keys { break; }
-                    match r {
-                        Ok(())                              => ok_counts[i] += 1,
-                        Err(IoError::FileNotFound { .. })   => not_found_counts[i] += 1,
-                        Err(e) => {
-                            if first_err[i].is_none() {
-                                first_err[i] = Some(IoError::Io(std::io::Error::other(e.to_string())));
-                            }
-                        }
-                    }
-                }
-            }
-            for (i, (orig_idx, key)) in idx_keys.iter().enumerate() {
-                if ok_counts[i] + not_found_counts[i] >= quorum {
-                    out[*orig_idx] = Ok(());
-                } else if let Some(e) = first_err[i].take() {
-                    out[*orig_idx] = Err(map_object_missing(bucket, key)(e));
-                } else {
-                    out[*orig_idx] = Err(StorageError::ObjectNotFound {
-                        bucket: bucket.into(), key: key.clone(),
-                    });
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    pub async fn list(
-        &self,
-        bucket: &str,
-        prefix: &str,
-        start_after: Option<&str>,
-        max_keys: usize,
-    ) -> StorageResult<Vec<ObjectInfo>> {
+    pub async fn list(&self, bucket: &str, prefix: &str) -> StorageResult<Vec<ObjectInfo>> {
         let num_sets = self.cluster.num_sets();
         if num_sets == 0 {
             return Ok(Vec::new());
         }
-        let per_set_cap = if max_keys == 0 { None } else { Some(max_keys + 1) };
         let per_set = join_all(
-            (0..num_sets).map(|set_idx| self.list_one_set(set_idx, bucket, prefix, start_after, per_set_cap))
+            (0..num_sets).map(|set_idx| self.list_one_set(set_idx, bucket, prefix))
         ).await;
         let mut sets_ok: Vec<Vec<ObjectInfo>> = Vec::with_capacity(num_sets);
         for r in per_set {
             sets_ok.push(r?);
         }
-        let mut merged = merge_across_sets(sets_ok);
-        if max_keys > 0 && merged.len() > max_keys + 1 {
-            merged.truncate(max_keys + 1);
-        }
-        Ok(merged)
+        Ok(merge_across_sets(sets_ok))
     }
 
     async fn list_one_set(
@@ -1109,8 +1025,6 @@ impl Engine {
         set_idx: usize,
         bucket: &str,
         prefix: &str,
-        start_after: Option<&str>,
-        max_keys: Option<usize>,
     ) -> StorageResult<Vec<ObjectInfo>> {
         let disks: Vec<Rc<dyn StorageBackend>> = self.cluster.set_disks(set_idx)
             .into_iter()
@@ -1120,15 +1034,9 @@ impl Engine {
             return Ok(Vec::new());
         }
         let n = disks.len();
-        let walks = disks.into_iter().map(|d| {
-            let bucket = bucket.to_owned();
-            let prefix = prefix.to_owned();
-            let start_after = start_after.map(str::to_owned);
-            async move {
-                d.walk_dir(&bucket, "", true, &prefix,
-                           start_after.as_deref(), max_keys).await
-            }
-        });
+        let walks: Vec<_> = disks.into_iter()
+            .map(|d| walk_disk_recursive(d, bucket.to_owned(), prefix.to_owned()))
+            .collect();
         let results = join_all(walks).await;
         let mut streams: Vec<Vec<(String, FileInfo)>> = Vec::with_capacity(n);
         for r in results {
@@ -1891,6 +1799,55 @@ fn to_object_info(bucket: &str, fi: &FileInfo) -> ObjectInfo {
     }
 }
 
+fn walk_disk_recursive(
+    backend: Rc<dyn StorageBackend>,
+    bucket: String,
+    prefix: String,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = StorageResult<Vec<(String, FileInfo)>>>>> {
+    Box::pin(async move {
+        let mut out: Vec<(String, FileInfo)> = Vec::new();
+        walk_disk_inner(&backend, &bucket, "", &prefix, &mut out).await?;
+        Ok(out)
+    })
+}
+
+fn walk_disk_inner<'a>(
+    backend: &'a Rc<dyn StorageBackend>,
+    bucket: &'a str,
+    dir: &'a str,
+    prefix: &'a str,
+    out: &'a mut Vec<(String, FileInfo)>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = StorageResult<()>> + 'a>> {
+    Box::pin(async move {
+        let mut entries = backend.list_dir(bucket, dir, 0).await
+            .map_err(map_bucket_or_io(bucket))?;
+        // K-way merge across drives requires each drive's stream to be lex-sorted.
+        // We sort per-directory and recurse depth-first; the property "a/..." lex
+        // precedes any sibling "a+ε" makes the descent globally sorted.
+        entries.sort();
+        for name in entries {
+            let child = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+            match backend.read_version("", bucket, &child, None, false).await {
+                Ok(fi) => {
+                    if prefix.is_empty() || fi.name.starts_with(prefix) {
+                        out.push((fi.name.clone(), fi));
+                    }
+                }
+                Err(IoError::FileNotFound { .. }) => {
+                    walk_disk_inner(backend, bucket, &child, prefix, out).await?;
+                }
+                Err(_) => {
+                    // Defective xl.meta or transient I/O on this drive for this
+                    // entry. Drop this drive's vote for this key; the set merger
+                    // will rely on quorum from the remaining drives.
+                    continue;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
 fn merge_within_set(
     streams: Vec<Vec<(String, FileInfo)>>,
     quorum: usize,
@@ -2530,7 +2487,7 @@ mod tests {
         for k in &keys {
             put_bytes(&e, "buk", k, format!("body-{k}").into_bytes(), None).await;
         }
-        let listed = e.list("buk", "", None, 0).await.unwrap();
+        let listed = e.list("buk", "").await.unwrap();
         let listed_keys: Vec<&str> = listed.iter().map(|o| o.key.as_str()).collect();
         let mut expected: Vec<&str> = keys.to_vec();
         expected.sort();
@@ -2551,7 +2508,7 @@ mod tests {
         for k in &expected {
             put_bytes(&e, "buk", k, format!("body-{k}").into_bytes(), None).await;
         }
-        let listed = e.list("buk", "", None, 0).await.unwrap();
+        let listed = e.list("buk", "").await.unwrap();
         assert_eq!(listed.len(), n, "expected {n} objects, got {}", listed.len());
         expected.sort();
         let listed_keys: Vec<String> = listed.iter().map(|o| o.key.clone()).collect();
@@ -2577,7 +2534,7 @@ mod tests {
             put_bytes(&e, "buk", &format!("foo/{:02}", i), b"x".to_vec(), None).await;
             put_bytes(&e, "buk", &format!("bar/{:02}", i), b"y".to_vec(), None).await;
         }
-        let listed = e.list("buk", "foo/", None, 0).await.unwrap();
+        let listed = e.list("buk", "foo/").await.unwrap();
         assert_eq!(listed.len(), 10);
         for oi in &listed {
             assert!(oi.key.starts_with("foo/"));

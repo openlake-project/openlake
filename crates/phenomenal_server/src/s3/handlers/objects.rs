@@ -236,35 +236,32 @@ pub async fn delete_objects(
             "<Delete> exceeds the 1000-key limit",
         ));
     }
-    if request.objects.iter().any(|o| {
-        o.version_id.as_deref().map_or(false, |v| !v.is_empty() && v != "null")
-    }) {
+    if request.objects.iter().any(|o| o.version_id.as_deref().map_or(false, |v| !v.is_empty())) {
         return Err(AppError::NotImplemented(
-            "DeleteObjects with non-null <VersionId> entries is not yet implemented",
+            "DeleteObjects with <VersionId> entries is not yet implemented",
         ));
     }
 
     let quiet  = request.quiet.unwrap_or(false);
     let engine = state.engine().clone();
 
-    // MinIO parity: route the whole 1000-key batch through ONE
-    // `engine.delete_objects` call. Internally it groups by set and
-    // fans out a single `delete_batch` RPC per drive per set in
-    // parallel — total RPCs = num_drives_in_set × num_sets (e.g. 32
-    // for 16-disk × 2-set), regardless of how many keys. Previously
-    // every key did its own 16-way fan-out and held the dsync lock.
+    use futures_util::stream::{self as fstream, StreamExt};
     let bucket = bucket.clone();
-    let keys: Vec<String>  = request.objects.iter().map(|o| o.key.clone()).collect();
-    let versions: Vec<Option<String>> = request.objects.iter().map(|o| o.version_id.clone()).collect();
-    let originals = request.objects;
-    let batch_res = SendWrapper::new(async move {
-        engine.delete_objects(&bucket, &keys).await
-    }).await?;
-    let result: Vec<(String, Option<String>, _)> = originals.into_iter()
-        .zip(batch_res.into_iter())
-        .enumerate()
-        .map(|(i, (obj, res))| (obj.key, versions[i].clone(), res))
-        .collect();
+    let result = SendWrapper::new(async move {
+        fstream::iter(request.objects.into_iter())
+            .map(|obj| {
+                let engine = engine.clone();
+                let bucket = bucket.clone();
+                async move {
+                    let res = engine.delete(&bucket, &obj.key).await;
+                    (obj.key, obj.version_id, res)
+                }
+            })
+            .buffer_unordered(32)
+            .collect::<Vec<_>>()
+            .await
+    })
+    .await;
 
     let mut deleted = Vec::new();
     let mut errors  = Vec::new();

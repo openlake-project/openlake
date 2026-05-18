@@ -49,8 +49,6 @@ pub enum Request {
 
     ListDir   { disk_idx: DiskIdx, volume: String, dir_path: String, count: u32 },
 
-    WalkDir   { disk_idx: DiskIdx, volume: String, base_dir: String, recursive: bool, prefix_filter: String, start_after: Option<String>, max_keys: Option<u32> },
-
     /// Streaming write envelope. Travels in the
     /// `x-phenomenal-rpc` header of `PUT /v1/rpc/stream-write`; the
     /// HTTP body carries exactly `size` raw bytes.
@@ -65,8 +63,6 @@ pub enum Request {
     RenameFile { disk_idx: DiskIdx, src_volume: String, src_path: String, dst_volume: String, dst_path: String },
     CheckFile  { disk_idx: DiskIdx, volume: String, path: String },
     Delete     { disk_idx: DiskIdx, volume: String, path: String, recursive: bool },
-
-    DeleteBatch { disk_idx: DiskIdx, volume: String, paths: Vec<String>, recursive: bool },
 
     WriteMetadata  { disk_idx: DiskIdx, orig_volume: String, volume: String, path: String, fi: FileInfo },
     UpdateMetadata { disk_idx: DiskIdx, volume: String, path: String, fi: FileInfo, no_persistence: bool },
@@ -102,8 +98,6 @@ pub enum Response {
     Vols(Vec<VolInfo>),
     Strings(Vec<String>),
     File(FileInfo),
-    Walked(Vec<(String, FileInfo)>),
-    DeleteBatchResult(Vec<Option<WireError>>),
     Disk(DiskInfo),
     Renamed(RenameDataResp),
     /// Reply for `Request::ReadFormat`. `None` when the disk has not

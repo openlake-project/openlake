@@ -138,8 +138,7 @@ async fn main() -> Result<()> {
             println!("deleted {bucket}/{key}");
         }
         Cmd::List { bucket, prefix } => {
-            // CLI debug dump: no cursor, no cap (max_keys=0 means uncapped).
-            for info in engine.list(&bucket, &prefix, None, 0).await? {
+            for info in engine.list(&bucket, &prefix).await? {
                 println!("{:>12}  {}", info.size, info.key);
             }
         }

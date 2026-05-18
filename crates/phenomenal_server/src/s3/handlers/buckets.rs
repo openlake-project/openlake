@@ -208,17 +208,22 @@ async fn list_objects_v2(
     let engine = state.engine().clone();
     let bucket_for_list = bucket.clone();
     let prefix_for_list = prefix.clone();
-    let cursor_for_engine = cursor.clone();
-    let max_keys_usize = max_keys as usize;
-    let mut infos = SendWrapper::new(async move {
-        engine.list(&bucket_for_list, &prefix_for_list,
-                    cursor_for_engine.as_deref(), max_keys_usize).await
+    let infos = SendWrapper::new(async move {
+        engine.list(&bucket_for_list, &prefix_for_list).await
     }).await?;
+
+    let mut infos = infos;
     infos.sort_by(|a, b| a.key.cmp(&b.key));
 
-    let truncated = infos.len() > max_keys_usize;
-    let take = max_keys_usize.min(infos.len());
-    let returned: Vec<_> = infos.into_iter().take(take).collect();
+    let after_cursor: Vec<_> = match cursor.as_deref() {
+        Some(c) => infos.into_iter().filter(|i| i.key.as_str() > c).collect(),
+        None    => infos,
+    };
+
+    let total_after_cursor = after_cursor.len();
+    let take = (max_keys as usize).min(total_after_cursor);
+    let truncated = total_after_cursor > take;
+    let returned: Vec<_> = after_cursor.into_iter().take(take).collect();
 
     let next_token = if truncated {
         returned.last().map(|i| i.key.clone())
