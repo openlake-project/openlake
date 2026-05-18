@@ -502,6 +502,31 @@ impl StorageBackend for RemoteBackend {
         call_unit!(self, Request::Delete { disk_idx: self.disk_idx, volume: volume.into(), path: path.into(), recursive })
     }
 
+    async fn delete_batch(
+        &self,
+        volume: &str,
+        paths: &[&str],
+        recursive: bool,
+    ) -> IoResult<Vec<IoResult<()>>> {
+        // ONE unary RPC carrying the whole key list. Drive runs the
+        // batch locally and returns per-key results in order.
+        let req = Request::DeleteBatch {
+            disk_idx: self.disk_idx,
+            volume: volume.into(),
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+            recursive,
+        };
+        match self.unary(req).await? {
+            Response::DeleteBatchResult(per_key) => {
+                Ok(per_key.into_iter().map(|opt| match opt {
+                    None    => Ok(()),
+                    Some(e) => Err(e.into()),
+                }).collect())
+            }
+            other => Err(unexpected(other)),
+        }
+    }
+
     async fn write_metadata(
         &self, orig_volume: &str, volume: &str, path: &str, fi: &FileInfo,
     ) -> IoResult<()> {
@@ -527,6 +552,30 @@ impl StorageBackend for RemoteBackend {
                 read_data,
             },
             File
+        )
+    }
+
+    async fn walk_dir(
+        &self,
+        volume: &str,
+        base_dir: &str,
+        recursive: bool,
+        prefix_filter: &str,
+        start_after: Option<&str>,
+        max_keys: Option<usize>,
+    ) -> IoResult<Vec<(String, FileInfo)>> {
+        call_typed!(
+            self,
+            Request::WalkDir {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                base_dir: base_dir.into(),
+                recursive,
+                prefix_filter: prefix_filter.into(),
+                start_after: start_after.map(str::to_owned),
+                max_keys: max_keys.map(|n| n as u32),
+            },
+            Walked
         )
     }
 

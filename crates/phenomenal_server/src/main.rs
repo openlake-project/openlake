@@ -80,6 +80,7 @@ fn main() -> anyhow::Result<()> {
     // `PooledBuffer::with_capacity` call. Idempotent — repeat invocations
     // are no-ops via `OnceCell::get_or_init`.
     phenomenal_io::MemoryPool::init_pool(&(&cfg.memory_pool).into());
+    phenomenal_io::init_purge_worker();
 
     // One runtime per physical core. Hyperthread siblings are
     // skipped so two runtimes never share a physical core's L1/L2.

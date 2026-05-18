@@ -112,6 +112,13 @@ pub trait StorageBackend {
     /// Remove a file or tree.
     async fn delete(&self, volume: &str, path: &str, recursive: bool) -> IoResult<()>;
 
+    async fn delete_batch(
+        &self,
+        volume: &str,
+        paths: &[&str],
+        recursive: bool,
+    ) -> IoResult<Vec<IoResult<()>>>;
+
     // -------------------------------------------------------------------
     // xl.meta aware
     // -------------------------------------------------------------------
@@ -132,6 +139,16 @@ pub trait StorageBackend {
         version_id: Option<&str>,
         read_data: bool,
     ) -> IoResult<FileInfo>;
+
+    async fn walk_dir(
+        &self,
+        volume: &str,
+        base_dir: &str,
+        recursive: bool,
+        prefix_filter: &str,
+        start_after: Option<&str>,
+        max_keys: Option<usize>,
+    ) -> IoResult<Vec<(String, FileInfo)>>;
 
     async fn update_metadata(
         &self,

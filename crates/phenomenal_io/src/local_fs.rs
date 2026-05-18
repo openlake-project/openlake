@@ -89,6 +89,8 @@ impl LocalFsBackend {
         std::fs::create_dir_all(root.join(STAGING_VOL))?;
         std::fs::create_dir_all(root.join(MULTIPART_VOL))?;
         std::fs::create_dir_all(root.join(SYSTEM_BUCKET))?;
+        crate::purge::init_purge_worker();
+        crate::purge::register_drive(&trash);
         Ok(Self { root, trash })
     }
 
@@ -104,9 +106,8 @@ impl LocalFsBackend {
     /// One hour matches MinIO's default for tmp scrub.
     ///
     /// Reads the entire `STAGING_VOL` directory once; for each child
-    /// older than `min_age`, recursively removes it via `move_to_trash`
-    /// (which renames into `.phenomenal.trash` and spawns a detached
-    /// purge task — same as `delete(recursive=true)`).
+    /// older than `min_age`, renames it into `.phenomenal.trash` and
+    /// enqueues it on the global `phen-purge` worker.
     pub async fn scrub_staging(&self, min_age: std::time::Duration) -> std::io::Result<usize> {
         let staging = self.root.join(STAGING_VOL);
         let rd = match std::fs::read_dir(&staging) {
@@ -171,50 +172,12 @@ impl LocalFsBackend {
         }
     }
 
-    /// One-syscall rename into the trash dir; the subtree walk and
-    /// per-entry unlinks run as a detached compio task on the current
-    /// runtime.
     async fn move_to_trash(&self, target: &Path) -> std::io::Result<()> {
         let slot = self.trash.join(Uuid::new_v4().simple().to_string());
         compio::fs::rename(target, &slot).await?;
-        compio::runtime::spawn(async move {
-            let _ = purge_tree(slot).await;
-        })
-        .detach();
+        crate::purge::try_enqueue(slot);
         Ok(())
     }
-}
-
-/// Recursively unlink every entry under `root`, then remove `root`.
-async fn purge_tree(root: PathBuf) -> std::io::Result<()> {
-    let mut files = Vec::new();
-    let mut dirs  = Vec::new();
-    let mut stack = vec![root];
-
-    while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(it)                                             => it,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e)                                             => return Err(e),
-        };
-        for entry in entries {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                stack.push(entry.path());
-            } else {
-                files.push(entry.path());
-            }
-        }
-        dirs.push(dir);
-    }
-
-    for f in &files {
-        let _ = compio::fs::remove_file(f).await;
-    }
-    for d in dirs.iter().rev() {
-        let _ = compio::fs::remove_dir(d).await;
-    }
-    Ok(())
 }
 
 fn map_open_err(e: std::io::Error, volume: &str, path: &str) -> IoError {
@@ -552,6 +515,23 @@ impl StorageBackend for LocalFsBackend {
         }
     }
 
+    async fn delete_batch(
+        &self,
+        volume: &str,
+        paths: &[&str],
+        recursive: bool,
+    ) -> IoResult<Vec<IoResult<()>>> {
+        self.require_vol(volume).await?;
+        let futs = paths.iter().map(|p| {
+            let path = (*p).to_owned();
+            async move {
+                self.delete(volume, &path, recursive).await
+            }
+        });
+        let results = futures_util::future::join_all(futs).await;
+        Ok(results)
+    }
+
     async fn write_metadata(
         &self, _orig_volume: &str, volume: &str, path: &str, fi: &FileInfo,
     ) -> IoResult<()> {
@@ -601,6 +581,24 @@ impl StorageBackend for LocalFsBackend {
         let mut fi = xl_meta::file_info_from_record(rec, volume, path);
         if !read_data { fi.data = None; }
         Ok(fi)
+    }
+
+    async fn walk_dir(
+        &self,
+        volume: &str,
+        base_dir: &str,
+        recursive: bool,
+        prefix_filter: &str,
+        start_after: Option<&str>,
+        max_keys: Option<usize>,
+    ) -> IoResult<Vec<(String, FileInfo)>> {
+        self.require_vol(volume).await?;
+        let mut out: Vec<(String, FileInfo)> = Vec::new();
+        walk_dir_local_inner(
+            self, volume, base_dir, prefix_filter, recursive,
+            start_after, max_keys, &mut out,
+        ).await?;
+        Ok(out)
     }
 
     async fn update_metadata(
@@ -862,6 +860,65 @@ async fn write_xl_meta_vectored(
 async fn write_all_bytes_at(mut file: &File, buf: bytes::Bytes, base_offset: u64) -> IoResult<()> {
     let BufResult(res, _) = file.write_all_at(buf, base_offset).await;
     res.map_err(IoError::Io)
+}
+
+fn walk_dir_local_inner<'a>(
+    backend: &'a LocalFsBackend,
+    volume: &'a str,
+    dir: &'a str,
+    prefix_filter: &'a str,
+    recursive: bool,
+    start_after: Option<&'a str>,
+    max_keys: Option<usize>,
+    out: &'a mut Vec<(String, FileInfo)>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = IoResult<()>> + 'a>> {
+    Box::pin(async move {
+        if let Some(n) = max_keys {
+            if out.len() >= n { return Ok(()); }
+        }
+        let mut entries = backend.list_dir(volume, dir, 0).await?;
+        entries.sort();
+        for name in entries {
+            if let Some(n) = max_keys {
+                if out.len() >= n { return Ok(()); }
+            }
+            let child = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+            if let Some(after) = start_after {
+                if child.as_str() < after && !after.starts_with(&format!("{child}/")) && after != child {
+                    continue;
+                }
+            }
+
+            if !prefix_filter.is_empty()
+                && !child.starts_with(prefix_filter)
+                && !prefix_filter.starts_with(&format!("{child}/"))
+            {
+                continue;
+            }
+
+            match backend.read_version("", volume, &child, None, false).await {
+                Ok(fi) => {
+                    if !prefix_filter.is_empty() && !fi.name.starts_with(prefix_filter) {
+                        continue;
+                    }
+                    if let Some(after) = start_after {
+                        if fi.name.as_str() <= after { continue; }
+                    }
+                    out.push((fi.name.clone(), fi));
+                }
+                Err(IoError::FileNotFound { .. }) => {
+                    if recursive {
+                        walk_dir_local_inner(
+                            backend, volume, &child, prefix_filter, recursive,
+                            start_after, max_keys, out,
+                        ).await?;
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        Ok(())
+    })
 }
 
 

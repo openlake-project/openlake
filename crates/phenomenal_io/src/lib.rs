@@ -15,6 +15,7 @@ pub mod alloc;
 pub mod backend;
 pub mod error;
 pub mod local_fs;
+pub mod purge;
 pub mod remote_fs;
 pub mod rpc;
 pub mod stream;
@@ -26,6 +27,7 @@ pub use alloc::{MemoryPool, MemoryPoolConfig, PooledBuffer};
 pub use backend::{LockPeer, StorageBackend};
 pub use error::{IoError, IoResult};
 pub use local_fs::{LocalFsBackend, MULTIPART_VOL, STAGING_VOL, SYSTEM_BUCKET};
+pub use purge::init_purge_worker;
 pub use remote_fs::{PeerClient, RemoteBackend};
 pub use stream::{
     pump_compio_to_sink, pump_n, read_full, ByteSink, ByteStream,

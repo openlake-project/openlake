@@ -475,6 +475,14 @@ async fn dispatch(
         DeleteVol    { disk_idx, volume, force_delete }           => fold_unit(disk_or_err!(disk_idx).delete_vol(&volume, force_delete).await),
 
         ListDir      { disk_idx, volume, dir_path, count }        => fold(disk_or_err!(disk_idx).list_dir(&volume, &dir_path, count as usize).await, RpcResponse::Strings),
+        WalkDir      { disk_idx, volume, base_dir, recursive, prefix_filter, start_after, max_keys } =>
+            fold(
+                disk_or_err!(disk_idx)
+                    .walk_dir(&volume, &base_dir, recursive, &prefix_filter,
+                              start_after.as_deref(), max_keys.map(|n| n as usize))
+                    .await,
+                RpcResponse::Walked
+            ),
 
         // Streaming variants land on dedicated routes; if one
         // arrives here the client is misrouting and we surface a
@@ -488,6 +496,18 @@ async fn dispatch(
             fold_unit(disk_or_err!(disk_idx).rename_file(&src_volume, &src_path, &dst_volume, &dst_path).await),
         CheckFile    { disk_idx, volume, path }                   => fold_unit(disk_or_err!(disk_idx).check_file(&volume, &path).await),
         Delete       { disk_idx, volume, path, recursive }        => fold_unit(disk_or_err!(disk_idx).delete(&volume, &path, recursive).await),
+        DeleteBatch  { disk_idx, volume, paths, recursive }       => {
+            let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+            match disk_or_err!(disk_idx).delete_batch(&volume, &path_refs, recursive).await {
+                Ok(per_key) => RpcResponse::DeleteBatchResult(
+                    per_key.into_iter().map(|r| match r {
+                        Ok(())  => None,
+                        Err(e)  => Some(e.into()),
+                    }).collect()
+                ),
+                Err(e) => RpcResponse::Err(e.into()),
+            }
+        },
 
         WriteMetadata  { disk_idx, orig_volume, volume, path, fi } =>
             fold_unit(disk_or_err!(disk_idx).write_metadata(&orig_volume, &volume, &path, &fi).await),
