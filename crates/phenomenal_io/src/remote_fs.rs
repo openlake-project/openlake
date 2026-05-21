@@ -129,11 +129,13 @@ impl PeerClient {
     /// rustls `ClientConfig` (ALPN list = `[b"h2"]`, root CA pinned).
     /// The client is lazy: no socket is opened until the first
     /// request.
-    pub fn new(addr: SocketAddr, tls: Arc<ClientConfig>) -> Self {
-        let client = cyper::Client::builder()
-            .use_rustls(tls)
-            .build();
-        Self { base: format!("https://{addr}"), client }
+    pub fn new(addr: SocketAddr, tls: Option<Arc<ClientConfig>>) -> Self {
+        let builder = cyper::Client::builder();
+        let (client, scheme) = match tls {
+            Some(cfg) => (builder.use_rustls(cfg).build(), "https"),
+            None      => (builder.http2_prior_knowledge().build(), "http"),
+        };
+        Self { base: format!("{scheme}://{addr}"), client }
     }
 
     fn url(&self, suffix: &str) -> String {
