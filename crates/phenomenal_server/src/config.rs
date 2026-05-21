@@ -128,6 +128,40 @@ pub struct Config {
     /// bucket — sane for production. Operators rarely set this.
     #[serde(default)]
     pub memory_pool:     MemoryPoolToml,
+    #[serde(default)]
+    pub transport:       TransportMode,        // h2 (default) | rdma
+    #[serde(default)]
+    pub rdma:            Option<RdmaToml>,     // required when transport = rdma
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportMode {
+    #[default] H2,
+    Rdma,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RdmaToml {
+    pub self_node_id: u16,
+    pub dev_name:     String,
+    pub dc_key:       u64,
+    pub qos:          RdmaQosToml,
+    pub peers:        Vec<RdmaPeerToml>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct RdmaQosToml {
+    pub traffic_class: u8,
+    pub service_level: u8,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RdmaPeerToml {
+    pub node_id: u16,
+    pub gid:     [u8; 16],
+    pub dct_num: u32,
+    pub dc_key:  u64,
 }
 
 /// TOML-friendly mirror of `phenomenal_io::MemoryPoolConfig`. Defaults
@@ -310,10 +344,10 @@ impl Config {
         // never call `RemoteBackend`, so plaintext is fine there.
         match (cfg.nodes.len(), &cfg.rpc_tls) {
             (1, _) => {}
-            (_, None) => anyhow::bail!(
-                "rpc_tls is required for multi-node clusters: the inter-node \
-                 RPC plane is HTTP/2 over TLS only"
-            ),
+            // Plaintext multi-node is allowed (trusted private network):
+            // PeerClient falls back to h2c (http2_prior_knowledge) when
+            // rpc_tls is absent.
+            (_, None) => {}
             (_, Some(t)) => {
                 validate_tls_files(t, "rpc_tls")?;
                 if t.client_ca.is_none() {
@@ -329,6 +363,16 @@ impl Config {
             // its files so a typo in cert_path is caught at startup.
             if cfg.nodes.len() == 1 {
                 validate_tls_files(t, "rpc_tls")?;
+            }
+        }
+        if cfg.transport == TransportMode::Rdma && cfg.rdma.is_none() {
+            anyhow::bail!("transport = \"rdma\" requires an [rdma] config block");
+        }
+        if cfg.transport == TransportMode::Rdma {
+            if !cfg!(all(feature = "rdma", target_os = "linux")) {
+                anyhow::bail!(
+                    "transport = \"rdma\" requires the `rdma` cargo feature on a Linux build"
+                );
             }
         }
         Ok(cfg)

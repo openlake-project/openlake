@@ -46,5 +46,16 @@ aligned-vec     = { workspace = true }
 crossbeam-queue = { workspace = true }
 once_cell       = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rdma-mummy-sys = { version = "0.2", optional = true }
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+bindgen = { version = "0.71", optional = true }
+
+[features]
+rdma = ["dep:rdma-mummy-sys", "dep:bindgen"]
+
 [dev-dependencies]
-tempfile      = { workspace = true }
+tempfile           = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow             = { workspace = true }

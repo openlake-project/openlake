@@ -448,7 +448,7 @@ fn disk_at<'a>(
 /// One match arm per envelope-shaped `Request` variant. Streaming
 /// variants are handled by their dedicated routes (and rejected
 /// here as a wire-protocol bug).
-async fn dispatch(
+pub(crate) async fn dispatch(
     disks: &[Rc<dyn StorageBackend>],
     locks: &Arc<LockServer>,
     req:   Request,

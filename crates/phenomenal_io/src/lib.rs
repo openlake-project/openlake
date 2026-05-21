@@ -16,6 +16,10 @@ pub mod backend;
 pub mod error;
 pub mod local_fs;
 pub mod purge;
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+pub mod rdma;
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+pub mod rdma_backend;
 pub mod remote_fs;
 pub mod rpc;
 pub mod stream;

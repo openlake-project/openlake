@@ -9,6 +9,9 @@ license.workspace      = true
 name = "phenomenald"
 path = "src/main.rs"
 
+[features]
+rdma = ["phenomenal_io/rdma"]
+
 [dependencies]
 phenomenal_io      = { path = "../phenomenal_io" }
 phenomenal_storage = { path = "../phenomenal_storage" }

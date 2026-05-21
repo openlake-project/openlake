@@ -34,6 +34,8 @@ mod config;
 mod s3;
 mod lock_server;
 mod rpc_server;
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+mod rdma_server;
 mod tls_material;
 
 use std::path::PathBuf;
@@ -230,8 +232,8 @@ fn create_runtime() -> anyhow::Result<compio::runtime::Runtime> {
     let mut proactor = compio::driver::ProactorBuilder::new();
     proactor
         .capacity(4096) // iouring size
-        .coop_taskrun(true)
-        .taskrun_flag(true);
+        .coop_taskrun(false)
+        .taskrun_flag(false);
 
     #[cfg(not(target_os = "macos"))]
     proactor.thread_pool_limit(0);
@@ -310,6 +312,14 @@ async fn run_runtime(
     let local_lock_peer: Rc<dyn LockPeer> =
         Rc::new(LocalLockPeer::new(lock_server.clone()));
 
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
+    let rdma_node: Option<std::sync::Arc<phenomenal_io::rdma::RdmaNode>> = match cfg.transport {
+        config::TransportMode::Rdma => Some(std::sync::Arc::new(
+            phenomenal_io::rdma::RdmaNode::start(build_rdma_config(cfg.rdma.as_ref().unwrap()))?
+        )),
+        config::TransportMode::H2 => None,
+    };
+
     for n in &cfg.nodes {
         if n.id == cfg.self_id {
             // Local node — register every local disk.
@@ -321,38 +331,42 @@ async fn run_runtime(
             }
             lock_peer_by_node.insert(n.id, local_lock_peer.clone());
         } else {
-            // Peer node — one shared `PeerClient`, then one
-            // `RemoteBackend` per disk on that peer. The `PeerClient`
-            // wraps a `cyper::Client`; its hyper-util pool keeps a
-            // single multiplexed h2 connection per (runtime, peer)
-            // pair, so concurrent disk RPCs ride h2 streams instead
-            // of fresh TCP dials.
-            //
-            // The cluster CA's leaf certs must include the peer's IP
-            // (or DNS name reachable via the cyper URL parser) in
-            // their SubjectAltName for verification to pass — same
-            // requirement the legacy raw-rustls path had.
-            //
-            // Multi-node clusters require `rpc_tls` (validated in
-            // `Config::from_toml`); the `expect` here exists only to
-            // turn a config-validation oversight into an immediate
-            // panic rather than silent plaintext fallback.
-            let connector = rpc_connector.clone()
-                .expect("multi-node cluster requires rpc_tls (config validation)");
-            let peer = Rc::new(PeerClient::new(n.rpc_addr, connector));
-            for disk_idx in 0..n.disk_count {
-                let rb = Rc::new(RemoteBackend::new(peer.clone(), disk_idx));
-                backends.insert(
-                    DiskAddr { node_id: n.id, disk_idx },
-                    rb as Rc<dyn StorageBackend>,
-                );
-            }
-            // Lock plane: any RemoteBackend on this peer talks to
-            // the same LockServer, so we only need one. Pick
-            // disk_idx=0; its disk_idx field is unused by the
-            // lock-plane RPCs (they don't carry disk_idx).
-            let lock_rb = Rc::new(RemoteBackend::new(peer, 0));
+            // `rpc_connector` is `Some` when rpc_tls is configured, `None`
+            // for plaintext h2c clusters. PeerClient handles both.
+            let peer = Rc::new(PeerClient::new(n.rpc_addr, rpc_connector.clone()));
+
+            let lock_rb = Rc::new(RemoteBackend::new(peer.clone(), 0));
             lock_peer_by_node.insert(n.id, lock_rb as Rc<dyn LockPeer>);
+
+            // Data plane backends: pick per transport.
+            match cfg.transport {
+                config::TransportMode::H2 => {
+                    for disk_idx in 0..n.disk_count {
+                        let rb = Rc::new(RemoteBackend::new(peer.clone(), disk_idx));
+                        backends.insert(
+                            DiskAddr { node_id: n.id, disk_idx },
+                            rb as Rc<dyn StorageBackend>,
+                        );
+                    }
+                }
+                #[cfg(all(feature = "rdma", target_os = "linux"))]
+                config::TransportMode::Rdma => {
+                    let node = rdma_node.as_ref().expect("rdma node built in rdma mode").clone();
+                    for disk_idx in 0..n.disk_count {
+                        let rb = Rc::new(phenomenal_io::rdma_backend::RdmaBackend::new(
+                            node.clone(), n.id, disk_idx,
+                        ));
+                        backends.insert(
+                            DiskAddr { node_id: n.id, disk_idx },
+                            rb as Rc<dyn StorageBackend>,
+                        );
+                    }
+                }
+                #[cfg(not(all(feature = "rdma", target_os = "linux")))]
+                config::TransportMode::Rdma => {
+                    anyhow::bail!("rdma transport selected but build lacks rdma feature");
+                }
+            }
         }
     }
 
@@ -387,6 +401,21 @@ async fn run_runtime(
             tracing::error!(runtime_id, "rpc serve error: {e:#}");
         }
     });
+
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
+    let _rdma_task = match cfg.transport {
+        config::TransportMode::Rdma => {
+            let node   = rdma_node.as_ref().expect("rdma node built in rdma mode").clone();
+            let disks  = Rc::new(local_disks.clone());
+            let locks  = lock_server.clone();
+            Some(compio::runtime::spawn(async move {
+                if let Err(e) = rdma_server::serve(node, disks, locks).await {
+                    tracing::error!(runtime_id, "rdma serve error: {e:#}");
+                }
+            }))
+        }
+        config::TransportMode::H2 => None,
+    };
 
     let deployment_id: Uuid = if runtime_id == 0 {
         let mut local_b   : Vec<Rc<dyn StorageBackend>> = Vec::new();
@@ -464,4 +493,23 @@ async fn run_runtime(
     let _ = s3_task.await;
     let _ = rpc_task.await;
     Ok(())
+}
+
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+fn build_rdma_config(t: &config::RdmaToml) -> phenomenal_io::rdma::RdmaConfig {
+    phenomenal_io::rdma::RdmaConfig {
+        self_node_id: t.self_node_id,
+        dev_name:     t.dev_name.clone(),
+        dc_key:       t.dc_key,
+        qos: phenomenal_io::rdma::RdmaQos {
+            traffic_class: t.qos.traffic_class,
+            service_level: t.qos.service_level,
+        },
+        peers: t.peers.iter().map(|p| phenomenal_io::rdma::PeerEndpoint {
+            node_id: p.node_id,
+            gid:     p.gid,
+            dct_num: p.dct_num,
+            dc_key:  p.dc_key,
+        }).collect(),
+    }
 }
