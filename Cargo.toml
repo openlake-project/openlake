@@ -168,3 +168,16 @@ debug         = 1
 lto           = "thin"
 codegen-units = 1
 debug         = 1
+
+# Vendored forks (see vendor/PATCHES.md for the exact delta vs upstream).
+# cyper 0.8.3 + http2_prior_knowledge() so PeerClient can speak h2c on a
+#   plaintext (http://) inter-node connection when rpc_tls is absent.
+# h2 0.4.14 with DEFAULT_REMOTE_RESET_STREAM_MAX / DEFAULT_LOCAL_RESET_COUNT_MAX
+#   raised 20/1024 -> 16384 to absorb the late-END_STREAM RST cascade between
+#   nodes. (These two are also reachable via h2's Builder setters, so this fork
+#   can later be replaced by builder calls plumbed through the cyper fork.)
+# The patch redirects every graph reference (including cyper-axum -> cyper and
+# hyper/hyper-util -> h2) to the fork; only one copy of each is compiled.
+[patch.crates-io]
+cyper = { path = "vendor/cyper" }
+h2    = { path = "vendor/h2" }
