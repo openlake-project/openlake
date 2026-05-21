@@ -13,7 +13,7 @@ use crate::lock_server::LockServer;
 use crate::rpc_server::dispatch;
 
 pub async fn serve(
-    node:  Arc<RdmaNode>,
+    node:  Rc<RdmaNode>,
     disks: Rc<Vec<Rc<dyn StorageBackend>>>,
     locks: Arc<LockServer>,
 ) -> anyhow::Result<()> {
@@ -32,7 +32,7 @@ pub async fn serve(
 }
 
 async fn handle(
-    node:  &Arc<RdmaNode>,
+    node:  &Rc<RdmaNode>,
     disks: &Rc<Vec<Rc<dyn StorageBackend>>>,
     locks: &Arc<LockServer>,
     bytes: &[u8],
@@ -71,7 +71,7 @@ async fn handle(
                 tracing::warn!("rdma_server: bad response magic {:#x}", magic);
                 return;
             }
-            if let Some(tx) = node.pending_responses.lock().unwrap().remove(&request_id) {
+            if let Some(tx) = node.pending_responses.borrow_mut().remove(&request_id) {
                 let _ = tx.send(payload);
             } else {
                 tracing::warn!("rdma_server: unmatched response request_id {request_id}");

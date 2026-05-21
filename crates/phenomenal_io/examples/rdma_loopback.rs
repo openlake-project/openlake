@@ -11,7 +11,6 @@
 #![cfg(all(feature = "rdma", target_os = "linux"))]
 
 use std::rc::Rc;
-use std::sync::Arc;
 
 use phenomenal_io::rdma::{
     PeerEndpoint, RdmaConfig, RdmaNode, RdmaQos, BUF_SIZE,
@@ -61,7 +60,7 @@ async fn run() -> anyhow::Result<()> {
         }],
     };
 
-    let node = Arc::new(RdmaNode::start(cfg).context("RdmaNode::start")?);
+    let node = Rc::new(RdmaNode::start(cfg).context("RdmaNode::start")?);
     eprintln!(
         "RdmaNode up: self_dct_num={} gid={:02x?}",
         node.sock.self_dct_identifier(), node.dev.gid_bytes(),
@@ -88,7 +87,7 @@ async fn run() -> anyhow::Result<()> {
 }
 
 async fn dispatch_loop(
-    node:  Arc<RdmaNode>,
+    node:  Rc<RdmaNode>,
     disks: Rc<Vec<Rc<dyn StorageBackend>>>,
 ) -> anyhow::Result<()> {
     let mut rx = node.pump.take_recv_rx()
@@ -105,7 +104,7 @@ async fn dispatch_loop(
 }
 
 async fn handle_envelope(
-    node:  &Arc<RdmaNode>,
+    node:  &Rc<RdmaNode>,
     disks: &Rc<Vec<Rc<dyn StorageBackend>>>,
     bytes: &[u8],
 ) {
@@ -155,7 +154,7 @@ async fn handle_envelope(
         }
         Envelope::Rsp { magic, request_id, payload } => {
             if magic != ENVELOPE_MAGIC { eprintln!("bad rsp magic"); return; }
-            if let Some(tx) = node.pending_responses.lock().unwrap().remove(&request_id) {
+            if let Some(tx) = node.pending_responses.borrow_mut().remove(&request_id) {
                 let _ = tx.send(payload);
             } else {
                 eprintln!("unmatched rsp request_id {request_id}");

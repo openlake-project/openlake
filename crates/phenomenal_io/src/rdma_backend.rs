@@ -1,6 +1,5 @@
 use std::io;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use async_trait::async_trait;
 use futures::channel::oneshot;
@@ -25,13 +24,13 @@ pub enum Envelope {
 }
 
 pub struct RdmaBackend {
-    node:     Arc<RdmaNode>,
+    node:     Rc<RdmaNode>,
     peer_id:  u16,
     disk_idx: u16,
 }
 
 impl RdmaBackend {
-    pub fn new(node: Arc<RdmaNode>, peer_id: u16, disk_idx: u16) -> Self {
+    pub fn new(node: Rc<RdmaNode>, peer_id: u16, disk_idx: u16) -> Self {
         Self { node, peer_id, disk_idx }
     }
 
@@ -43,9 +42,13 @@ impl RdmaBackend {
             .clone();
         let ah = self.node.ah_cache.get_or_create(&peer).map_err(IoError::Io)?;
 
-        let request_id = self.node.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request_id = {
+            let id = self.node.next_request_id.get();
+            self.node.next_request_id.set(id + 1);
+            id
+        };
         let (tx, rx) = oneshot::channel();
-        self.node.pending_responses.lock().unwrap().insert(request_id, tx);
+        self.node.pending_responses.borrow_mut().insert(request_id, tx);
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
@@ -55,7 +58,7 @@ impl RdmaBackend {
         };
         let body = encode(&env)?;
         if let Err(e) = self.node.sock.send(&body, ah, peer.dct_num, peer.dc_key) {
-            self.node.pending_responses.lock().unwrap().remove(&request_id);
+            self.node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
 

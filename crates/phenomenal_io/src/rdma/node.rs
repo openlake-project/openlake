@@ -1,7 +1,7 @@
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 
 use futures::channel::oneshot;
 use serde::{Deserialize, Serialize};
@@ -45,20 +45,20 @@ pub struct RdmaConfig {
 
 pub struct RdmaNode {
     pub self_id:           u16,
-    pub dev:               Arc<IbDevice>,
-    pub sock:              Arc<IbSocket>,
-    pub ah_cache:          Arc<AhCache>,
+    pub dev:               Rc<IbDevice>,
+    pub sock:              Rc<IbSocket>,
+    pub ah_cache:          Rc<AhCache>,
     pub peers:             HashMap<u16, PeerEndpoint>,
     pub pump:              CqPump,
-    pub next_request_id:   AtomicU64,
-    pub pending_responses: Mutex<HashMap<u64, oneshot::Sender<Response>>>,
+    pub next_request_id:   Cell<u64>,
+    pub pending_responses: RefCell<HashMap<u64, oneshot::Sender<Response>>>,
 }
 
 impl RdmaNode {
     pub fn start(cfg: RdmaConfig) -> io::Result<Self> {
-        let dev      = Arc::new(IbDevice::open(&cfg.dev_name)?);
-        let sock     = Arc::new(IbSocket::new(dev.clone(), cfg.dc_key, cfg.qos)?);
-        let ah_cache = Arc::new(AhCache::new(dev.pd.as_ptr(), cfg.qos, dev.gid_index, dev.port_attr.lid));
+        let dev      = Rc::new(IbDevice::open(&cfg.dev_name)?);
+        let sock     = Rc::new(IbSocket::new(dev.clone(), cfg.dc_key, cfg.qos)?);
+        let ah_cache = Rc::new(AhCache::new(dev.pd.as_ptr(), cfg.qos, dev.gid_index, dev.port_attr.lid));
         let pump     = CqPump::start(sock.clone())?;
         let self_dct_identifier = sock.self_dct_identifier;
         let my_gid     = dev.gid;
@@ -76,8 +76,8 @@ impl RdmaNode {
         }
         Ok(RdmaNode {
             self_id: cfg.self_node_id, dev, sock, ah_cache, peers, pump,
-            next_request_id:   AtomicU64::new(1),
-            pending_responses: Mutex::new(HashMap::new()),
+            next_request_id:   Cell::new(1),
+            pending_responses: RefCell::new(HashMap::new()),
         })
     }
 

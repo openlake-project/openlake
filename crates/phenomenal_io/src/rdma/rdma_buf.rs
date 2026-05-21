@@ -1,7 +1,7 @@
 use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::cell::RefCell;
 use std::io;
 use std::ptr::NonNull;
-use std::sync::Mutex;
 
 use rdma_mummy_sys::{
     ibv_access_flags, ibv_dereg_mr, ibv_mr, ibv_pd, ibv_reg_mr,
@@ -68,15 +68,15 @@ pub struct RdmaRemoteBuf {
 }
 
 pub struct RdmaBufPool {
-    free: Mutex<Vec<RdmaBuf>>,
+    free: RefCell<Vec<RdmaBuf>>,
 }
 
 impl RdmaBufPool {
     pub fn new(pd: *mut ibv_pd, count: usize, capacity: usize) -> io::Result<Self> {
         let mut v = Vec::with_capacity(count);
         for _ in 0..count { v.push(RdmaBuf::new(pd, capacity)?); }
-        Ok(RdmaBufPool { free: Mutex::new(v) })
+        Ok(RdmaBufPool { free: RefCell::new(v) })
     }
-    pub fn acquire(&self) -> Option<RdmaBuf> { self.free.lock().unwrap().pop() }
-    pub fn release(&self, buf: RdmaBuf)      { self.free.lock().unwrap().push(buf); }
+    pub fn acquire(&self) -> Option<RdmaBuf> { self.free.borrow_mut().pop() }
+    pub fn release(&self, buf: RdmaBuf)      { self.free.borrow_mut().push(buf); }
 }
