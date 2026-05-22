@@ -1,6 +1,5 @@
 use std::io;
 use std::rc::Rc;
-use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -45,9 +44,13 @@ impl RdmaBackend {
             .clone();
         let ah = self.node.ah_cache.get_or_create(&peer).map_err(IoError::Io)?;
 
-        let request_id = self.node.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request_id = {
+            let id = self.node.next_request_id.get();
+            self.node.next_request_id.set(id + 1);
+            id
+        };
         let (tx, rx) = oneshot::channel();
-        self.node.pending_responses.lock().unwrap().insert(request_id, tx);
+        self.node.pending_responses.borrow_mut().insert(request_id, tx);
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
@@ -57,7 +60,7 @@ impl RdmaBackend {
         };
         let body = encode(&env)?;
         if let Err(e) = self.node.sock.send(&body, ah, peer.dct_num, peer.dc_key) {
-            self.node.pending_responses.lock().unwrap().remove(&request_id);
+            self.node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
 
@@ -78,9 +81,13 @@ impl RdmaBackend {
         let buf    = node.bulk_pool.acquire().await.map_err(IoError::Io)?;
         let target = buf.as_remote(length);
 
-        let request_id = node.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request_id = {
+            let id = node.next_request_id.get();
+            node.next_request_id.set(id + 1);
+            id
+        };
         let (resp_tx, resp_rx) = oneshot::channel();
-        node.pending_responses.lock().unwrap().insert(request_id, resp_tx);
+        node.pending_responses.borrow_mut().insert(request_id, resp_tx);
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
@@ -97,7 +104,7 @@ impl RdmaBackend {
         };
         let body = encode(&env)?;
         if let Err(e) = node.sock.send(&body, ah, peer.dct_num, peer.dc_key) {
-            node.pending_responses.lock().unwrap().remove(&request_id);
+            node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
 

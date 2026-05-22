@@ -306,8 +306,7 @@ async fn handle_received_envelope(
             }
             if let Some(sender) = rdma_node
                 .pending_responses
-                .lock()
-                .unwrap()
+                .borrow_mut()
                 .remove(&request_id)
             {
                 let _ = sender.send(payload);

@@ -1,9 +1,8 @@
 use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 
 use rdma_mummy_sys::{
     ibv_access_flags, ibv_dereg_mr, ibv_mr, ibv_pd, ibv_reg_mr,
@@ -73,44 +72,44 @@ impl Buffers {
 
 pub struct SendBuffers {
     base:  Buffers,
-    front: AtomicU64,
-    tail:  AtomicU64,
+    front: Cell<u64>,
+    tail:  Cell<u64>,
 }
 
 impl SendBuffers {
     pub fn new(pd: *mut ibv_pd, buf_cnt: usize, buf_size: usize) -> io::Result<Self> {
         Ok(SendBuffers {
             base:  Buffers::new(pd, buf_cnt, buf_size)?,
-            front: AtomicU64::new(0),
-            tail:  AtomicU64::new(buf_cnt as u64),
+            front: Cell::new(0),
+            tail:  Cell::new(buf_cnt as u64),
         })
     }
     pub fn empty(&self) -> bool {
-        self.front.load(Ordering::Acquire) >= self.tail.load(Ordering::Acquire)
+        self.front.get() >= self.tail.get()
     }
     pub fn try_pop(&self) -> Option<usize> {
-        let f = self.front.load(Ordering::Acquire);
-        if f >= self.tail.load(Ordering::Acquire) { return None; }
-        self.front.fetch_add(1, Ordering::AcqRel);
+        let f = self.front.get();
+        if f >= self.tail.get() { return None; }
+        self.front.set(f + 1);
         Some((f as usize) % self.base.buf_cnt())
     }
-    pub fn push(&self, n: u64) { self.tail.fetch_add(n, Ordering::AcqRel); }
+    pub fn push(&self, n: u64) { self.tail.set(self.tail.get() + n); }
     pub fn base(&self) -> &Buffers { &self.base }
 }
 
 pub struct RecvBuffers {
     base:  Buffers,
-    queue: Mutex<VecDeque<(u32, u32)>>,
+    queue: RefCell<VecDeque<(u32, u32)>>,
 }
 
 impl RecvBuffers {
     pub fn new(pd: *mut ibv_pd, buf_cnt: usize, buf_size: usize) -> io::Result<Self> {
         Ok(RecvBuffers {
             base:  Buffers::new(pd, buf_cnt, buf_size)?,
-            queue: Mutex::new(VecDeque::with_capacity(buf_cnt)),
+            queue: RefCell::new(VecDeque::with_capacity(buf_cnt)),
         })
     }
-    pub fn push(&self, idx: u32, len: u32) { self.queue.lock().unwrap().push_back((idx, len)); }
-    pub fn pop(&self) -> Option<(u32, u32)> { self.queue.lock().unwrap().pop_front() }
+    pub fn push(&self, idx: u32, len: u32) { self.queue.borrow_mut().push_back((idx, len)); }
+    pub fn pop(&self) -> Option<(u32, u32)> { self.queue.borrow_mut().pop_front() }
     pub fn base(&self) -> &Buffers { &self.base }
 }

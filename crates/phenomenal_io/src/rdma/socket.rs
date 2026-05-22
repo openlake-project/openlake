@@ -1,9 +1,9 @@
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io;
 use std::mem;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 
 use futures::channel::{mpsc, oneshot};
 
@@ -39,7 +39,7 @@ const QP_TIMEOUT:      u8  = 14;
 const QP_RETRY_CNT:    u8  = 7;
 
 pub struct IbSocket {
-    pub(super) dev:          Arc<IbDevice>,
+    pub(super) dev:          Rc<IbDevice>,
     pub(super) cq:           NonNull<ibv_cq>,
     pub(super) comp_channel: NonNull<ibv_comp_channel>,
     pub(super) srq:          NonNull<ibv_srq>,
@@ -50,27 +50,22 @@ pub struct IbSocket {
     pub(super) dc_key:       u64,
     pub(super) self_dct_identifier:   u32,
 
-    // Credit accounting, mutated by the CQ pump.
-    pub(super) send_signaled:     AtomicU64,
-    pub(super) send_acked:        AtomicU64,
-    pub(super) send_not_signaled: AtomicU32,
-    pub(super) recv_not_acked:    AtomicU32,
-
-    // Serialize ibv_wr_start..ibv_wr_complete on the DCI.
-    pub(super) post_mu: Mutex<()>,
+    // Credit accounting, mutated by the CQ pump task.
+    // Cell, not Atomic: only one task at a time (single-threaded runtime).
+    pub(super) send_signaled:     Cell<u64>,
+    pub(super) send_acked:        Cell<u64>,
+    pub(super) send_not_signaled: Cell<u32>,
+    pub(super) recv_not_acked:    Cell<u32>,
 
     // Per-wr_id completion waiters for one-sided RDMA WRITE/READ.
-    pub(super) completion: Mutex<HashMap<u64, oneshot::Sender<i32>>>,
-    pub(super) next_wr_id: AtomicU64,
+    pub(super) completion: RefCell<HashMap<u64, oneshot::Sender<i32>>>,
+    pub(super) next_wr_id: Cell<u64>,
 }
-
-unsafe impl Send for IbSocket {}
-unsafe impl Sync for IbSocket {}
 
 impl IbSocket {
     pub fn self_dct_identifier(&self) -> u32 { self.self_dct_identifier }
 
-    pub fn new(dev: Arc<IbDevice>, dc_key: u64, qos: RdmaQos) -> io::Result<Self> {
+    pub fn new(dev: Rc<IbDevice>, dc_key: u64, qos: RdmaQos) -> io::Result<Self> {
         unsafe {
             let comp_channel = ibv_create_comp_channel(dev.ctx.as_ptr());
             let comp_channel = NonNull::new(comp_channel)
@@ -114,13 +109,12 @@ impl IbSocket {
             let sock = IbSocket {
                 dev, cq, comp_channel, srq, dct, dci,
                 send_bufs, recv_bufs, dc_key, self_dct_identifier,
-                send_signaled:     AtomicU64::new(0),
-                send_acked:        AtomicU64::new(0),
-                send_not_signaled: AtomicU32::new(0),
-                recv_not_acked:    AtomicU32::new(0),
-                post_mu:           Mutex::new(()),
-                completion:        Mutex::new(HashMap::new()),
-                next_wr_id:        AtomicU64::new(1),
+                send_signaled:     Cell::new(0),
+                send_acked:        Cell::new(0),
+                send_not_signaled: Cell::new(0),
+                recv_not_acked:    Cell::new(0),
+                completion:        RefCell::new(HashMap::new()),
+                next_wr_id:        Cell::new(1),
             };
             for i in 0..SEND_BUF_CNT { sock.post_recv(i as u32)?; }
             Ok(sock)
@@ -183,9 +177,10 @@ impl IbSocket {
             }
             out = &mut out[n..];
             total += n;
-            let prev = self.recv_not_acked.fetch_add(1, Ordering::Relaxed) + 1;
+            let prev = self.recv_not_acked.get() + 1;
+            self.recv_not_acked.set(prev);
             if prev >= BUF_ACK_BATCH {
-                self.recv_not_acked.store(0, Ordering::Relaxed);
+                self.recv_not_acked.set(0);
                 self.post_ack(ah, peer_dct_num, peer_dc_key)?;
             }
         }
@@ -198,25 +193,25 @@ impl IbSocket {
         remote_addr: u64, remote_rkey: u32,
         ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
     ) -> io::Result<()> {
-        let wr_id = self.next_wr_id.fetch_add(1, Ordering::Relaxed);
+        let wr_id = { let id = self.next_wr_id.get(); self.next_wr_id.set(id + 1); id };
         let (tx, rx) = oneshot::channel();
-        self.completion.lock().unwrap().insert(wr_id, tx);
-        {
-            let _g = self.post_mu.lock().unwrap();
-            unsafe {
-                let qpx  = ibv_qp_to_qp_ex(self.dci.as_ptr());
-                let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
-                ibv_wr_start(qpx);
-                (*qpx).wr_id    = wr_id;
-                (*qpx).wr_flags = ibv_send_flags::IBV_SEND_SIGNALED.0 as u32;
-                ibv_wr_rdma_write(qpx, remote_rkey, remote_addr);
-                ibv_wr_set_sge(qpx, local_lkey, local_addr, local_len);
-                ((*mqpx).wr_set_dc_addr.expect("wr_set_dc_addr"))(mqpx, ah, peer_dct_num, peer_dc_key);
-                let rc = ibv_wr_complete(qpx);
-                if rc != 0 {
-                    self.completion.lock().unwrap().remove(&wr_id);
-                    return Err(io::Error::from_raw_os_error(rc));
-                }
+        self.completion.borrow_mut().insert(wr_id, tx);
+        // ibv_wr_start..ibv_wr_complete is a contiguous synchronous block.
+        // No .await between them, so on a single-threaded runtime no other
+        // task can interleave; we don't need an explicit lock.
+        unsafe {
+            let qpx  = ibv_qp_to_qp_ex(self.dci.as_ptr());
+            let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
+            ibv_wr_start(qpx);
+            (*qpx).wr_id    = wr_id;
+            (*qpx).wr_flags = ibv_send_flags::IBV_SEND_SIGNALED.0 as u32;
+            ibv_wr_rdma_write(qpx, remote_rkey, remote_addr);
+            ibv_wr_set_sge(qpx, local_lkey, local_addr, local_len);
+            ((*mqpx).wr_set_dc_addr.expect("wr_set_dc_addr"))(mqpx, ah, peer_dct_num, peer_dc_key);
+            let rc = ibv_wr_complete(qpx);
+            if rc != 0 {
+                self.completion.borrow_mut().remove(&wr_id);
+                return Err(io::Error::from_raw_os_error(rc));
             }
         }
         let status = rx.await.map_err(|_| io::Error::other("pump dropped"))?;
@@ -230,25 +225,22 @@ impl IbSocket {
         remote_addr: u64, remote_rkey: u32,
         ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
     ) -> io::Result<()> {
-        let wr_id = self.next_wr_id.fetch_add(1, Ordering::Relaxed);
+        let wr_id = { let id = self.next_wr_id.get(); self.next_wr_id.set(id + 1); id };
         let (tx, rx) = oneshot::channel();
-        self.completion.lock().unwrap().insert(wr_id, tx);
-        {
-            let _g = self.post_mu.lock().unwrap();
-            unsafe {
-                let qpx  = ibv_qp_to_qp_ex(self.dci.as_ptr());
-                let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
-                ibv_wr_start(qpx);
-                (*qpx).wr_id    = wr_id;
-                (*qpx).wr_flags = ibv_send_flags::IBV_SEND_SIGNALED.0 as u32;
-                ibv_wr_rdma_read(qpx, remote_rkey, remote_addr);
-                ibv_wr_set_sge(qpx, local_lkey, local_addr, local_len);
-                ((*mqpx).wr_set_dc_addr.expect("wr_set_dc_addr"))(mqpx, ah, peer_dct_num, peer_dc_key);
-                let rc = ibv_wr_complete(qpx);
-                if rc != 0 {
-                    self.completion.lock().unwrap().remove(&wr_id);
-                    return Err(io::Error::from_raw_os_error(rc));
-                }
+        self.completion.borrow_mut().insert(wr_id, tx);
+        unsafe {
+            let qpx  = ibv_qp_to_qp_ex(self.dci.as_ptr());
+            let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
+            ibv_wr_start(qpx);
+            (*qpx).wr_id    = wr_id;
+            (*qpx).wr_flags = ibv_send_flags::IBV_SEND_SIGNALED.0 as u32;
+            ibv_wr_rdma_read(qpx, remote_rkey, remote_addr);
+            ibv_wr_set_sge(qpx, local_lkey, local_addr, local_len);
+            ((*mqpx).wr_set_dc_addr.expect("wr_set_dc_addr"))(mqpx, ah, peer_dct_num, peer_dc_key);
+            let rc = ibv_wr_complete(qpx);
+            if rc != 0 {
+                self.completion.borrow_mut().remove(&wr_id);
+                return Err(io::Error::from_raw_os_error(rc));
             }
         }
         let status = rx.await.map_err(|_| io::Error::other("pump dropped"))?;
@@ -259,12 +251,12 @@ impl IbSocket {
     pub(super) fn post_send(
         &self, buf_idx: u32, len: u32, ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
     ) -> io::Result<()> {
-        let prev = self.send_not_signaled.fetch_add(1, Ordering::Relaxed) + 1;
+        let prev = self.send_not_signaled.get() + 1;
+        self.send_not_signaled.set(prev);
         let signal = if prev >= BUF_SIGNAL_BATCH {
-            self.send_not_signaled.store(0, Ordering::Relaxed);
+            self.send_not_signaled.set(0);
             prev
         } else { 0 };
-        let _g = self.post_mu.lock().unwrap();
         unsafe {
             let qpx  = ibv_qp_to_qp_ex(self.dci.as_ptr());
             let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
@@ -284,7 +276,6 @@ impl IbSocket {
     pub(super) fn post_ack(
         &self, ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
     ) -> io::Result<()> {
-        let _g = self.post_mu.lock().unwrap();
         unsafe {
             let qpx  = ibv_qp_to_qp_ex(self.dci.as_ptr());
             let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
@@ -413,21 +404,21 @@ unsafe fn transition_dct(qp: *mut ibv_qp, dev: &IbDevice, qos: RdmaQos) -> io::R
 
 pub struct CqPump {
     _task:   compio::runtime::Task<Result<(), Box<dyn std::any::Any + Send>>>,
-    sock:    Arc<IbSocket>,
-    recv_rx: Mutex<Option<mpsc::UnboundedReceiver<()>>>,
+    sock:    Rc<IbSocket>,
+    recv_rx: RefCell<Option<mpsc::UnboundedReceiver<()>>>,
 }
 
 impl CqPump {
-    pub fn start(sock: Arc<IbSocket>) -> io::Result<Self> {
+    pub fn start(sock: Rc<IbSocket>) -> io::Result<Self> {
         let fd = unsafe { (*sock.comp_channel.as_ptr()).fd };
         let (tx, rx) = mpsc::unbounded();
         let s = sock.clone();
         let task = compio::runtime::spawn(async move { run_pump_compio(s, fd, tx).await });
-        Ok(CqPump { _task: task, sock, recv_rx: Mutex::new(Some(rx)) })
+        Ok(CqPump { _task: task, sock, recv_rx: RefCell::new(Some(rx)) })
     }
-    pub fn socket(&self) -> &Arc<IbSocket> { &self.sock }
+    pub fn socket(&self) -> &Rc<IbSocket> { &self.sock }
     pub fn take_recv_rx(&self) -> Option<mpsc::UnboundedReceiver<()>> {
-        self.recv_rx.lock().unwrap().take()
+        self.recv_rx.borrow_mut().take()
     }
 }
 
@@ -440,7 +431,7 @@ impl std::os::fd::AsFd for CompChannelFd {
     }
 }
 
-async fn run_pump_compio(sock: Arc<IbSocket>, fd: std::os::fd::RawFd, recv_tx: mpsc::UnboundedSender<()>) {
+async fn run_pump_compio(sock: Rc<IbSocket>, fd: std::os::fd::RawFd, recv_tx: mpsc::UnboundedSender<()>) {
     let mut wcs: [ibv_wc; WC_BATCH as usize] = unsafe { mem::zeroed() };
     loop {
         let op = compio::driver::op::PollOnce::new(
@@ -474,11 +465,11 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
         ibv_wc_opcode::IBV_WC_SEND => {
             if status_ok && wr.ty() == WrType::Send {
                 let n = wr.signal_count() as u64;
-                if n > 0 { sock.send_signaled.fetch_add(n, Ordering::Relaxed); }
+                if n > 0 { sock.send_signaled.set(sock.send_signaled.get() + n); }
             }
         }
         ibv_wc_opcode::IBV_WC_RDMA_WRITE | ibv_wc_opcode::IBV_WC_RDMA_READ => {
-            if let Some(tx) = sock.completion.lock().unwrap().remove(&wc.wr_id) {
+            if let Some(tx) = sock.completion.borrow_mut().remove(&wc.wr_id) {
                 let _ = tx.send(wc.status as i32);
             }
         }
@@ -490,7 +481,7 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
                     ImmData(u32::from_be(wc.imm_data_invalidated_rkey_union.imm_data))
                 };
                 if imm.ty() == ImmType::Ack {
-                    sock.send_acked.fetch_add(imm.data() as u64, Ordering::Relaxed);
+                    sock.send_acked.set(sock.send_acked.get() + imm.data() as u64);
                 }
             } else {
                 sock.recv_bufs.push(buf_idx, wc.byte_len);
@@ -503,12 +494,12 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
 }
 
 fn reconcile_credit(sock: &IbSocket) {
-    let signaled = sock.send_signaled.load(Ordering::Relaxed);
-    let acked    = sock.send_acked.load(Ordering::Relaxed);
+    let signaled = sock.send_signaled.get();
+    let acked    = sock.send_acked.get();
     let avail    = signaled.min(acked);
     if avail > 0 {
-        sock.send_signaled.fetch_sub(avail, Ordering::Relaxed);
-        sock.send_acked   .fetch_sub(avail, Ordering::Relaxed);
+        sock.send_signaled.set(signaled - avail);
+        sock.send_acked   .set(acked    - avail);
         sock.send_bufs.push(avail);
     }
 }

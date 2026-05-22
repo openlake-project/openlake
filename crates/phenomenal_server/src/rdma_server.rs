@@ -82,7 +82,7 @@ async fn handle(
                 tracing::warn!("rdma_server: bad response magic {:#x}", magic);
                 return;
             }
-            if let Some(tx) = node.pending_responses.lock().unwrap().remove(&request_id) {
+            if let Some(tx) = node.pending_responses.borrow_mut().remove(&request_id) {
                 let _ = tx.send(payload);
             } else {
                 tracing::warn!("rdma_server: unmatched response request_id {request_id}");

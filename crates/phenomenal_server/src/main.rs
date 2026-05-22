@@ -313,8 +313,8 @@ async fn run_runtime(
         Rc::new(LocalLockPeer::new(lock_server.clone()));
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
-    let rdma_node: Option<std::sync::Arc<phenomenal_io::rdma::RdmaNode>> = match cfg.transport {
-        config::TransportMode::Rdma => Some(std::sync::Arc::new(
+    let rdma_node: Option<std::rc::Rc<phenomenal_io::rdma::RdmaNode>> = match cfg.transport {
+        config::TransportMode::Rdma => Some(std::rc::Rc::new(
             phenomenal_io::rdma::RdmaNode::start(build_rdma_config(cfg.rdma.as_ref().unwrap()))?
         )),
         config::TransportMode::H2 => None,
