@@ -511,5 +511,7 @@ fn build_rdma_config(t: &config::RdmaToml) -> phenomenal_io::rdma::RdmaConfig {
             dct_num: p.dct_num,
             dc_key:  p.dc_key,
         }).collect(),
+        bulk_buf_size: t.bulk_buf_size,
+        bulk_pool_cap: t.bulk_pool_cap,
     }
 }

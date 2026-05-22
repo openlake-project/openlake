@@ -12,5 +12,7 @@ pub use ah_cache::AhCache;
 pub use buffers::BUF_SIZE;
 pub use device::IbDevice;
 pub use node::{PeerEndpoint, RdmaConfig, RdmaNode, RdmaQos};
-pub use rdma_buf::{RdmaBuf, RdmaBufPool, RdmaRemoteBuf};
+pub use rdma_buf::{RdmaBuf, RdmaBufPool};
 pub use socket::{CqPump, IbSocket};
+
+pub type RawAddressHandle = *mut rdma_mummy_sys::ibv_ah;

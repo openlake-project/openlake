@@ -300,6 +300,10 @@ impl ByteStream for RemoteReadStream {
             ))),
         }
     }
+
+    async fn read_buffer(&mut self, _: &mut [u8]) -> IoResult<usize> {
+        unimplemented!("not implemented")
+    }
 }
 
 // -----------------------------------------------------------------------------

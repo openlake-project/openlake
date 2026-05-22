@@ -143,11 +143,13 @@ pub enum TransportMode {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RdmaToml {
-    pub self_node_id: u16,
-    pub dev_name:     String,
-    pub dc_key:       u64,
-    pub qos:          RdmaQosToml,
-    pub peers:        Vec<RdmaPeerToml>,
+    pub self_node_id:  u16,
+    pub dev_name:      String,
+    pub dc_key:        u64,
+    pub qos:           RdmaQosToml,
+    pub peers:         Vec<RdmaPeerToml>,
+    pub bulk_buf_size: usize,
+    pub bulk_pool_cap: usize,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

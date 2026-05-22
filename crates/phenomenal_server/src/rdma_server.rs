@@ -4,16 +4,18 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use futures::stream::StreamExt;
-use phenomenal_io::rdma::{BUF_SIZE, RdmaNode};
+use phenomenal_io::error::IoError;
+use phenomenal_io::rdma::{BUF_SIZE, RawAddressHandle, RdmaNode};
 use phenomenal_io::rdma_backend::{Envelope, ENVELOPE_MAGIC};
-use phenomenal_io::rpc::{decode, encode};
+use phenomenal_io::rpc::{decode, encode, RdmaRemoteBuf, Request, Response, WireError};
+use phenomenal_io::stream::ByteStream;
 use phenomenal_io::StorageBackend;
 
 use crate::lock_server::LockServer;
-use crate::rpc_server::dispatch;
+use crate::rpc_server::{disk_at, dispatch};
 
 pub async fn serve(
-    node:  Arc<RdmaNode>,
+    node:  Rc<RdmaNode>,
     disks: Rc<Vec<Rc<dyn StorageBackend>>>,
     locks: Arc<LockServer>,
 ) -> anyhow::Result<()> {
@@ -32,7 +34,7 @@ pub async fn serve(
 }
 
 async fn handle(
-    node:  &Arc<RdmaNode>,
+    node:  &Rc<RdmaNode>,
     disks: &Rc<Vec<Rc<dyn StorageBackend>>>,
     locks: &Arc<LockServer>,
     bytes: &[u8],
@@ -55,7 +57,16 @@ async fn handle(
                 Ok(ah) => ah,
                 Err(e) => { tracing::warn!("rdma_server: ah for {}: {e}", from_node_id); return; }
             };
-            let resp = dispatch(disks, locks, payload).await;
+
+            let resp = match payload {
+                Request::ReadFileChunk { disk_idx, volume, path, offset, length, target } =>
+                    handle_read_file_chunk(
+                        node, disks, sender_ah,
+                        sender.dct_num, sender.dc_key,
+                        disk_idx, volume, path, offset, length, target,
+                    ).await,
+                other => dispatch(disks, locks, other).await,
+            };
             let body = match encode(&Envelope::Rsp {
                 magic: ENVELOPE_MAGIC, request_id, payload: resp,
             }) {
@@ -78,4 +89,69 @@ async fn handle(
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_read_file_chunk(
+    node:         &Rc<RdmaNode>,
+    disks:        &Rc<Vec<Rc<dyn StorageBackend>>>,
+    sender_ah:    RawAddressHandle,
+    peer_dct_num: u32,
+    peer_dc_key:  u64,
+    disk_idx:     u16,
+    volume:       String,
+    path:         String,
+    offset:       u64,
+    length:       u32,
+    target:       RdmaRemoteBuf,
+) -> Response {
+    let server_cap = node.bulk_pool.buf_size();
+    if length as usize > server_cap {
+        return Response::Err(WireError::Other(format!(
+            "read_file_chunk length {} exceeds server bulk_buf_size {}",
+            length, server_cap
+        )));
+    }
+    if length > target.len {
+        return Response::Err(WireError::Other(format!(
+            "read_file_chunk length {} exceeds client target.len {}",
+            length, target.len
+        )));
+    }
+
+    let disk = match disk_at(disks, disk_idx) {
+        Ok(d)  => d.clone(),
+        Err(e) => return Response::Err(e.into()),
+    };
+
+    let mut buf = match node.bulk_pool.acquire().await {
+        Ok(b)  => b,
+        Err(e) => return Response::Err(IoError::Io(e).into()),
+    };
+
+    let bytes_filled = {
+        let mut stream = match disk.read_file_stream(&volume, &path, offset, length as u64).await {
+            Ok(s)  => s,
+            Err(e) => return Response::Err(e.into()),
+        };
+        let dst = &mut buf.as_slice_mut()[..length as usize];
+        match stream.read_buffer(dst).await {
+            Ok(n)  => n,
+            Err(e) => return Response::Err(e.into()),
+        }
+    };
+
+    if bytes_filled == 0 {
+        return Response::ChunkReady { bytes_written: 0 };
+    }
+
+    if let Err(e) = node.sock.rdma_write(
+        buf.addr(), bytes_filled as u32, buf.lkey(),
+        target.addr, target.rkey,
+        sender_ah, peer_dct_num, peer_dc_key,
+    ).await {
+        return Response::Err(IoError::Io(e).into());
+    }
+
+    Response::ChunkReady { bytes_written: bytes_filled as u32 }
 }

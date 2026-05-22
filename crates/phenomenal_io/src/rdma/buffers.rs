@@ -44,6 +44,7 @@ impl BufferMem {
         }
     }
     pub fn lkey(&self) -> u32 { unsafe { (*self.mr.as_ptr()).lkey } }
+    pub fn rkey(&self) -> u32 { unsafe { (*self.mr.as_ptr()).rkey } }
     pub fn ptr(&self)  -> *mut u8 { self.base.as_ptr() }
 }
 

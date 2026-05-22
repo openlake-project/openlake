@@ -699,6 +699,10 @@ impl<S: ByteStream> ByteStream for Sha256VerifyStream<S> {
         }
         Ok(bytes::Bytes::new())
     }
+
+    async fn read_buffer(&mut self, _: &mut [u8]) -> IoResult<usize> {
+        unimplemented!("not implemented")
+    }
 }
 
 pub(crate) fn find_crlf(buf: &[u8]) -> Option<usize> {

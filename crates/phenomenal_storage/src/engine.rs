@@ -1514,11 +1514,7 @@ struct EcReadStream {
 }
 
 impl EcReadStream {
-    /// Pull one shard's worth of bytes (`unit`) from every surviving
-    /// source, run the SIMD decoder, and stage the D data shards in
-    /// `self.decoded`. The caller's `read()` then walks them in order
-    /// without copying — each yielded `Bytes` is a refcounted slice
-    /// of one of the decoded shards.
+    /// todo @arnav refill is poorly implemented seeking unbounded bytes, revisit this can be improved.
     async fn refill(&mut self) -> phenomenal_io::IoResult<()> {
         let n    = self.sources.len();
         let unit = self.stripe_unit;
@@ -1744,6 +1740,10 @@ impl ByteStream for MultiPartEcStream {
             self.current = None;
         }
     }
+
+    async fn read_buffer(&mut self, _: &mut [u8]) -> phenomenal_io::IoResult<usize> {
+        unimplemented!("not implemented")
+    }
 }
 
 #[async_trait(?Send)]
@@ -1775,6 +1775,10 @@ impl ByteStream for EcReadStream {
             self.shard_pos = 0;
         }
         Ok(frame)
+    }
+
+    async fn read_buffer(&mut self, _: &mut [u8]) -> phenomenal_io::IoResult<usize> {
+        unimplemented!("not implemented")
     }
 }
 

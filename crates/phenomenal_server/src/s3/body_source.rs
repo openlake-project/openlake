@@ -83,6 +83,10 @@ impl ByteStream for AxumBodyStream {
             }
         }
     }
+
+    async fn read_buffer(&mut self, _: &mut [u8]) -> IoResult<usize> {
+        unimplemented!("not implemented")
+    }
 }
 
 /// aws-chunked body decoder.
@@ -248,6 +252,10 @@ impl ByteStream for ChunkedBodyStream {
         self.chunk_pos += avail;
         Ok(payload)
     }
+
+    async fn read_buffer(&mut self, _: &mut [u8]) -> IoResult<usize> {
+        unimplemented!("not implemented")
+    }
 }
 
 /// One of the three SigV4 body-verification modes, dispatched on
@@ -302,5 +310,9 @@ impl ByteStream for BodySource {
             BodySource::HexSha(s)  => s.read().await,
             BodySource::Chunked(s) => s.read().await,
         }
+    }
+
+    async fn read_buffer(&mut self, _: &mut [u8]) -> IoResult<usize> {
+        unimplemented!("not implemented")
     }
 }

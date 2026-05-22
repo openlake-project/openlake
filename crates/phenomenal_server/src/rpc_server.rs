@@ -487,7 +487,7 @@ pub(crate) async fn dispatch(
         // Streaming variants land on dedicated routes; if one
         // arrives here the client is misrouting and we surface a
         // clear error rather than silently doing nothing.
-        CreateFileStream { .. } | ReadFileStream { .. } =>
+        CreateFileStream { .. } | ReadFileStream { .. } | ReadFileChunk { .. } =>
             RpcResponse::Err(IoError::InvalidArgument(
                 "streaming variant routed through unary dispatch".into()
             ).into()),

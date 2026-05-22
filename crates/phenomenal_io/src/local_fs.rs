@@ -254,9 +254,6 @@ impl ByteStream for LocalFileStream {
         if want == 0 {
             return Ok(bytes::Bytes::new());
         }
-        // Fresh PooledBuffer per read — kernel writes into it, then
-        // we `freeze()` to hand ownership to a refcounted `Bytes`.
-        // The pool slot is recycled when the Bytes refcount drops.
         let buf = PooledBuffer::with_capacity(want);
         let slice = buf.slice(0..want);
         let BufResult(res, slice_back) = (&self.file).read_at(slice, self.pos).await;
@@ -266,19 +263,76 @@ impl ByteStream for LocalFileStream {
         buf.truncate(n);
         Ok(buf.freeze())
     }
+
+    async fn read_buffer(&mut self, dst: &mut [u8]) -> IoResult<usize> {
+        let mut filled = 0;
+        while filled < dst.len() {
+            let remaining_in_range = (self.end - self.pos) as usize;
+            if remaining_in_range == 0 {
+                break;
+            }
+            let want = (dst.len() - filled).min(remaining_in_range);
+            let wrapper = unsafe {
+                BorrowedSliceMut::from_slice(&mut dst[filled..filled + want])
+            };
+            let BufResult(res, _wrapper_back) =
+                (&self.file).read_at(wrapper, self.pos).await;
+            let n = res.map_err(IoError::Io)?;
+            if n == 0 {
+                break;
+            }
+            self.pos += n as u64;
+            filled   += n;
+        }
+        Ok(filled)
+    }
+}
+
+struct BorrowedSliceMut {
+    ptr:  std::ptr::NonNull<u8>,
+    len:  usize,
+    init: usize,
+}
+
+unsafe impl Send for BorrowedSliceMut {}
+
+impl BorrowedSliceMut {
+    unsafe fn from_slice(dst: &mut [u8]) -> Self {
+        let len = dst.len();
+        let ptr = std::ptr::NonNull::new(dst.as_mut_ptr())
+            .expect("BorrowedSliceMut: slice ptr is non-null");
+        Self { ptr, len, init: 0 }
+    }
+}
+
+impl compio::buf::SetLen for BorrowedSliceMut {
+    unsafe fn set_len(&mut self, len: usize) {
+        self.init = len;
+    }
+}
+
+impl compio::buf::IoBuf for BorrowedSliceMut {
+    fn as_init(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.init) }
+    }
+}
+
+impl compio::buf::IoBufMut for BorrowedSliceMut {
+    fn as_uninit(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.ptr.as_ptr().cast::<std::mem::MaybeUninit<u8>>(),
+                self.len,
+            )
+        }
+    }
 }
 
 impl Drop for LocalFileStream {
     fn drop(&mut self) {
-        // compio's `File` closes on drop via its Drop impl. No explicit
-        // close needed here.
     }
 }
 
-/// `ByteSink` over an open compio `File`. Each `write_all` does one or
-/// more `write_at` calls at the running offset; `finish` `fsync`s and
-/// closes the file. The scratch Vec is recycled across writes so the
-/// hot path never re-allocates.
 struct LocalFileSink {
     file:    Option<File>,
     pos:     u64,
@@ -436,7 +490,15 @@ impl StorageBackend for LocalFsBackend {
         length: u64,
     ) -> IoResult<Box<dyn ByteStream>> {
         self.require_vol(volume).await?;
-        let file = File::open(self.file_path(volume, path))
+        let mut opts = OpenOptions::new();
+        opts.read(true);
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_DIRECT);
+        }
+        let file = opts
+            .open(self.file_path(volume, path))
             .await
             .map_err(|e| map_open_err(e, volume, path))?;
         Ok(Box::new(LocalFileStream {
