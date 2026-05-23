@@ -284,9 +284,9 @@ async fn run_runtime(
     // disk_idx the cluster topology and other peers reference.
     let self_node = cfg.nodes.iter().find(|n| n.id == cfg.self_id)
         .expect("config validation guarantees self_id is in nodes");
-    let local_disks: Vec<Rc<dyn StorageBackend>> = cfg.data_dirs.iter()
+    let local_fs_disks: Vec<Rc<LocalFsBackend>> = cfg.data_dirs.iter()
         .enumerate()
-        .map(|(i, dir)| -> anyhow::Result<Rc<dyn StorageBackend>> {
+        .map(|(i, dir)| -> anyhow::Result<Rc<LocalFsBackend>> {
             Ok(Rc::new(
                 LocalFsBackend::new(dir)
                     .with_context(|| format!(
@@ -296,6 +296,10 @@ async fn run_runtime(
             ))
         })
         .collect::<anyhow::Result<_>>()?;
+    let local_disks: Vec<Rc<dyn StorageBackend>> = local_fs_disks
+        .iter()
+        .map(|rc| rc.clone() as Rc<dyn StorageBackend>)
+        .collect();
     debug_assert_eq!(local_disks.len(), self_node.disk_count as usize);
 
     // Build storage backends keyed by `DiskAddr`, plus a per-node
@@ -407,11 +411,12 @@ async fn run_runtime(
     #[cfg(all(feature = "rdma", target_os = "linux"))]
     let _rdma_task = match cfg.transport {
         config::TransportMode::Rdma => {
-            let node   = rdma_node.as_ref().expect("rdma node built in rdma mode").clone();
-            let disks  = Rc::new(local_disks.clone());
-            let locks  = lock_server.clone();
+            let node        = rdma_node.as_ref().expect("rdma node built in rdma mode").clone();
+            let disks       = Rc::new(local_disks.clone());
+            let local_disks = Rc::new(local_fs_disks.clone());
+            let locks       = lock_server.clone();
             Some(compio::runtime::spawn(async move {
-                if let Err(e) = rdma_server::serve(node, disks, locks).await {
+                if let Err(e) = rdma_server::serve(node, disks, local_disks, locks).await {
                     tracing::error!(runtime_id, "rdma serve error: {e:#}");
                 }
             }))
@@ -513,7 +518,7 @@ fn build_rdma_config(t: &config::RdmaToml) -> phenomenal_io::rdma::RdmaConfig {
             dct_num: p.dct_num,
             dc_key:  p.dc_key,
         }).collect(),
-        bulk_buf_size: t.bulk_buf_size,
+        bulk_buf_size: phenomenal_storage::DEFAULT_EC_PER_SHARD_BYTES,
         bulk_pool_cap: t.bulk_pool_cap,
     }
 }

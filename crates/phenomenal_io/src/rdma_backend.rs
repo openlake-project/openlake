@@ -4,25 +4,16 @@ use std::rc::Rc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::channel::oneshot;
-use serde::{Deserialize, Serialize};
-
 use crate::backend::StorageBackend;
 use crate::error::{IoError, IoResult};
+use crate::rdma::wire::{Envelope, ENVELOPE_MAGIC, RdmaRemoteBuf, RdmaRequest, RdmaResponse};
 use crate::rdma::RdmaNode;
-use crate::rpc::{encode, RdmaRemoteBuf, Request, Response};
+use crate::rpc::{encode, Request, Response};
 use crate::stream::{ByteSink, ByteStream};
 use crate::types::{
     DeleteOptions, DiskInfo, FileInfo, FormatJson, RenameDataResp, RenameOptions,
     UpdateMetadataOpts, VolInfo,
 };
-
-pub const ENVELOPE_MAGIC: u32 = 0x52444D31; // "RDM1"
-
-#[derive(Serialize, Deserialize)]
-pub enum Envelope {
-    Req { magic: u32, from_node_id: u16, request_id: u64, payload: Request  },
-    Rsp { magic: u32, request_id: u64,                   payload: Response },
-}
 
 #[derive(Clone)]
 pub struct RdmaBackend {
@@ -63,7 +54,7 @@ impl RdmaBackend {
             magic: ENVELOPE_MAGIC,
             from_node_id: self.node.self_id,
             request_id,
-            payload,
+            payload: RdmaRequest::Generic(payload),
         };
         let body = encode(&env)?;
         if let Err(e) = self.node.sock.send(&body, ah, peer.dct_num, peer.dc_key) {
@@ -71,7 +62,11 @@ impl RdmaBackend {
             return Err(IoError::Io(e));
         }
 
-        rx.await.map_err(|_| IoError::Io(io::Error::other("dispatcher dropped waiter")))
+        match rx.await {
+            Ok(RdmaResponse::Generic(resp)) => Ok(resp),
+            Ok(other) => Err(IoError::Decode(format!("unary expected Generic, got {other:?}"))),
+            Err(_)    => Err(IoError::Io(io::Error::other("dispatcher dropped waiter"))),
+        }
     }
 
     async fn read_single_chunk(
@@ -100,7 +95,7 @@ impl RdmaBackend {
             magic: ENVELOPE_MAGIC,
             from_node_id: node.self_id,
             request_id,
-            payload: Request::ReadFileChunk {
+            payload: RdmaRequest::ReadFileChunk {
                 disk_idx: self.disk_idx,
                 volume:   volume.into(),
                 path:     path.into(),
@@ -118,10 +113,10 @@ impl RdmaBackend {
         let (bytes_tx, bytes_rx) = oneshot::channel::<IoResult<Bytes>>();
         compio::runtime::spawn(async move {
             let result: IoResult<Bytes> = match resp_rx.await {
-                Ok(Response::ChunkReady { bytes_written }) => {
+                Ok(RdmaResponse::ChunkReady { bytes_written }) => {
                     Ok(buf.into_bytes(bytes_written as usize))
                 }
-                Ok(Response::Err(e)) => {
+                Ok(RdmaResponse::Generic(Response::Err(e))) => {
                     drop(buf);
                     Err(IoError::from(e))
                 }
@@ -141,6 +136,87 @@ impl RdmaBackend {
             Ok(r)  => r,
             Err(_) => Err(IoError::Io(io::Error::other(
                 "chunk completion task dropped before producing bytes"
+            ))),
+        }
+    }
+
+    async fn write_single_chunk(
+        &self, volume: &str, path: &str, offset: u64, data: Bytes,
+    ) -> IoResult<()> {
+        let node = self.node.clone();
+        let peer = node.peer(self.peer_id)
+            .ok_or_else(|| IoError::Io(io::Error::other(
+                format!("rdma peer {} not in registry", self.peer_id)
+            )))?
+            .clone();
+        let ah = node.ah_cache.get_or_create(&peer).map_err(IoError::Io)?;
+
+        let len = data.len();
+        if len > u32::MAX as usize {
+            return Err(IoError::InvalidArgument(format!("write chunk too large: {len}")));
+        }
+        let mut buf = node.bulk_pool.acquire().await.map_err(IoError::Io)?;
+        // todo: @arnav this can be avoided.
+        buf.as_slice_mut()[..len].copy_from_slice(&data);
+        let source = buf.as_remote(len as u32);
+
+        let request_id = {
+            let id = node.next_request_id.get();
+            node.next_request_id.set(id + 1);
+            id
+        };
+        let (resp_tx, resp_rx) = oneshot::channel();
+        node.pending_responses.borrow_mut().insert(request_id, resp_tx);
+
+        let env = Envelope::Req {
+            magic: ENVELOPE_MAGIC,
+            from_node_id: node.self_id,
+            request_id,
+            payload: RdmaRequest::WriteFileChunk {
+                disk_idx: self.disk_idx,
+                volume:   volume.into(),
+                path:     path.into(),
+                offset,
+                length:   len as u32,
+                source,
+            },
+        };
+        let body = encode(&env)?;
+        if let Err(e) = node.sock.send(&body, ah, peer.dct_num, peer.dc_key) {
+            node.pending_responses.borrow_mut().remove(&request_id);
+            return Err(IoError::Io(e));
+        }
+
+        let (done_tx, done_rx) = oneshot::channel::<IoResult<()>>();
+        compio::runtime::spawn(async move {
+            let result: IoResult<()> = match resp_rx.await {
+                Ok(RdmaResponse::ChunkWritten { bytes_written }) => {
+                    drop(buf);
+                    if (bytes_written as usize) != len {
+                        Err(IoError::Io(io::Error::other(format!(
+                            "short write: server wrote {bytes_written}/{len}"
+                        ))))
+                    } else {
+                        Ok(())
+                    }
+                }
+                Ok(RdmaResponse::Generic(Response::Err(e))) => { drop(buf); Err(IoError::from(e)) }
+                Ok(other) => {
+                    drop(buf);
+                    Err(IoError::Decode(format!("expected ChunkWritten, got {other:?}")))
+                }
+                Err(_) => {
+                    drop(buf);
+                    Err(IoError::Io(io::Error::other("dispatcher dropped chunk waiter")))
+                }
+            };
+            let _ = done_tx.send(result);
+        }).detach();
+
+        match done_rx.await {
+            Ok(r)  => r,
+            Err(_) => Err(IoError::Io(io::Error::other(
+                "write completion task dropped"
             ))),
         }
     }
@@ -187,6 +263,21 @@ rdma_backend_storage_impl! {
                 chunk_size,
             }))
         }
+
+        async fn create_file_writer(
+            &self, volume: &str, path: &str, size: u64,
+        ) -> IoResult<Box<dyn ByteSink>> {
+            let chunk_size = self.node.bulk_pool.buf_size() as u32;
+            Ok(Box::new(RdmaWriteSink {
+                backend:    self.clone(),
+                volume:     volume.into(),
+                path:       path.into(),
+                cursor:     0,
+                expected:   size,
+                chunk_size,
+                finished:   false,
+            }))
+        }
     }
     via_rpc {
         async fn disk_info(&self) -> IoResult<DiskInfo>;
@@ -194,7 +285,6 @@ rdma_backend_storage_impl! {
         async fn list_vols(&self) -> IoResult<Vec<VolInfo>>;
         async fn delete_vol(&self, volume: &str, force: bool) -> IoResult<()>;
         async fn list_dir(&self, volume: &str, dir: &str, count: usize) -> IoResult<Vec<String>>;
-        async fn create_file_writer(&self, volume: &str, path: &str, size: u64) -> IoResult<Box<dyn ByteSink>>;
         async fn rename_file(&self, src_volume: &str, src_path: &str, dst_volume: &str, dst_path: &str) -> IoResult<()>;
         async fn check_file(&self, volume: &str, path: &str) -> IoResult<()>;
         async fn delete(&self, volume: &str, path: &str, recursive: bool) -> IoResult<()>;
@@ -244,5 +334,47 @@ impl ByteStream for RdmaReadStream {
 
     async fn read_buffer(&mut self, _: &mut [u8]) -> IoResult<usize> {
         unimplemented!("not implemented")
+    }
+}
+
+struct RdmaWriteSink {
+    backend:    RdmaBackend,
+    volume:     String,
+    path:       String,
+    cursor:     u64,
+    expected:   u64,
+    chunk_size: u32,
+    finished:   bool,
+}
+
+#[async_trait(?Send)]
+impl ByteSink for RdmaWriteSink {
+    async fn write_all(&mut self, buf: Bytes) -> IoResult<()> {
+        if self.finished {
+            return Err(IoError::Io(io::Error::other("write after finish")));
+        }
+        let chunk_size = self.chunk_size as usize;
+        let mut remaining = buf;
+        while !remaining.is_empty() {
+            let take = remaining.len().min(chunk_size);
+            let piece = remaining.slice(..take);
+            remaining = remaining.slice(take..);
+            let offset = self.cursor;
+            self.cursor += take as u64;
+            self.backend.write_single_chunk(&self.volume, &self.path, offset, piece).await?;
+        }
+        Ok(())
+    }
+
+    async fn finish(&mut self) -> IoResult<()> {
+        if self.finished { return Ok(()); }
+        if self.cursor != self.expected {
+            return Err(IoError::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("rdma create_file_writer: wrote {}/{}", self.cursor, self.expected),
+            )));
+        }
+        self.finished = true;
+        Ok(())
     }
 }

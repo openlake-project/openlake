@@ -32,13 +32,6 @@ use crate::types::{DiskInfo, FileInfo, FormatJson, RenameDataResp, VolInfo};
 /// travels in the envelope.
 pub type DiskIdx = u16;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct RdmaRemoteBuf {
-    pub addr: u64,
-    pub len:  u32,
-    pub rkey: u32,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     // ---- Disk-targeted variants (carry `disk_idx`). ----
@@ -68,9 +61,6 @@ pub enum Request {
     /// exactly `length` raw bytes (sanity-checked against the
     /// `x-phenomenal-length` response header).
     ReadFileStream   { disk_idx: DiskIdx, volume: String, path: String, offset: u64, length: u64 },
-
-    ReadFileChunk    { disk_idx: DiskIdx, volume: String, path: String,
-                       offset: u64, length: u32, target: RdmaRemoteBuf },
 
     RenameFile { disk_idx: DiskIdx, src_volume: String, src_path: String, dst_volume: String, dst_path: String },
     CheckFile  { disk_idx: DiskIdx, volume: String, path: String },
@@ -125,7 +115,6 @@ pub enum Response {
     LockDenied,
     LockRefreshed,
     LockNotFound,
-    ChunkReady { bytes_written: u32 },
     Err(WireError),
 }
 

@@ -72,9 +72,83 @@ fn is_system_vol(volume: &str) -> bool {
     volume == STAGING_VOL || volume == MULTIPART_VOL || volume == SYSTEM_BUCKET
 }
 
+const HANDLE_CACHE_CAPACITY: usize = 4096;
+const O_DIRECT_ALIGN: usize = 512;
+
+#[cfg(target_os = "linux")]
+mod open_flags {
+    pub const DIRECT_FLAG: libc::c_int = libc::O_DIRECT;
+    pub const SYNC_FLAG:   libc::c_int = libc::O_SYNC;
+}
+#[cfg(not(target_os = "linux"))]
+mod open_flags {
+    pub const DIRECT_FLAG: libc::c_int = 0;
+    pub const SYNC_FLAG:   libc::c_int = 0;
+}
+use open_flags::{DIRECT_FLAG, SYNC_FLAG};
+
+pub struct CachedFile {
+    pub direct: File,
+    pub normal: File,
+}
+
+impl CachedFile {
+    pub fn pick_write_fd(&self, buf_ptr: *const u8, len: usize, file_offset: u64) -> &File {
+        let aligned = (len % O_DIRECT_ALIGN == 0)
+                   && (file_offset as usize % O_DIRECT_ALIGN == 0)
+                   && (buf_ptr as usize % O_DIRECT_ALIGN == 0);
+        if aligned { &self.direct } else { &self.normal }
+    }
+
+    pub fn read_fd(&self) -> &File { &self.direct }
+}
+
+pub struct FileHandleCache {
+    inner: std::cell::RefCell<lru::LruCache<PathBuf, std::rc::Rc<CachedFile>>>,
+}
+
+impl FileHandleCache {
+    pub fn new(capacity: usize) -> Self {
+        let cap = std::num::NonZeroUsize::new(capacity).expect("cache capacity must be > 0");
+        Self { inner: std::cell::RefCell::new(lru::LruCache::new(cap)) }
+    }
+
+    pub fn get(&self, path: &Path) -> Option<std::rc::Rc<CachedFile>> {
+        self.inner.borrow_mut().get(path).cloned()
+    }
+
+    pub async fn get_or_open(&self, path: &Path, create: bool) -> std::io::Result<std::rc::Rc<CachedFile>> {
+        if let Some(file) = self.inner.borrow_mut().get(path) {
+            return Ok(file.clone());
+        }
+        let direct = Self::open_with_flag(path, create, DIRECT_FLAG).await?;
+        let normal = Self::open_with_flag(path, create, SYNC_FLAG).await?;
+        let cached = std::rc::Rc::new(CachedFile { direct, normal });
+        self.inner.borrow_mut().put(path.to_path_buf(), cached.clone());
+        Ok(cached)
+    }
+
+    async fn open_with_flag(path: &Path, create: bool, _extra_flag: libc::c_int) -> std::io::Result<File> {
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true);
+        if create { opts.create(true); }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(_extra_flag);
+        }
+        opts.open(path).await
+    }
+
+    pub fn evict(&self, path: &Path) {
+        self.inner.borrow_mut().pop(path);
+    }
+}
+
 pub struct LocalFsBackend {
     root:  PathBuf,
     trash: PathBuf,
+    fd_cache: FileHandleCache,
 }
 
 impl LocalFsBackend {
@@ -91,8 +165,10 @@ impl LocalFsBackend {
         std::fs::create_dir_all(root.join(SYSTEM_BUCKET))?;
         crate::purge::init_purge_worker();
         crate::purge::register_drive(&trash);
-        Ok(Self { root, trash })
+        Ok(Self { root, trash, fd_cache: FileHandleCache::new(HANDLE_CACHE_CAPACITY) })
     }
+
+    pub fn fd_cache(&self) -> &FileHandleCache { &self.fd_cache }
 
     /// Sweep `STAGING_VOL` (and `MULTIPART_VOL` later) for orphan
     /// `{staging_id}/` dirs older than `min_age`. Each entry is the
@@ -137,6 +213,54 @@ impl LocalFsBackend {
             }
         }
         Ok(purged)
+    }
+
+    pub async fn write_chunk_at(
+        &self,
+        volume: &str,
+        path:   &str,
+        offset: u64,
+        data:   bytes::Bytes,
+    ) -> IoResult<()> {
+        self.require_vol(volume).await?;
+        let p = self.file_path(volume, path);
+        if let Some(parent) = p.parent() {
+            compio::fs::create_dir_all(parent).await.map_err(IoError::Io)?;
+        }
+        let cached = self.fd_cache
+            .get_or_open(&p, true).await
+            .map_err(|e| map_open_err(e, volume, path))?;
+        let mut fd: &File = cached.pick_write_fd(data.as_ptr(), data.len(), offset);
+        let BufResult(res, _) = fd.write_all_at(data, offset).await;
+        res.map_err(IoError::Io)
+    }
+
+    pub async fn read_chunk_at(
+        &self,
+        volume: &str,
+        path:   &str,
+        offset: u64,
+        dst:    &mut [u8],
+    ) -> IoResult<usize> {
+        self.require_vol(volume).await?;
+        let p = self.file_path(volume, path);
+        let cached = match self.fd_cache.get_or_open(&p, false).await {
+            Ok(c)  => c,
+            Err(e) => return Err(map_open_err(e, volume, path)),
+        };
+        let len = dst.len();
+        debug_assert!(dst.as_ptr() as usize % O_DIRECT_ALIGN == 0,
+            "read_chunk_at dst not {O_DIRECT_ALIGN}-aligned");
+        debug_assert!(len % O_DIRECT_ALIGN == 0,
+            "read_chunk_at len {len} not {O_DIRECT_ALIGN}-aligned");
+        debug_assert!(offset as usize % O_DIRECT_ALIGN == 0,
+            "read_chunk_at offset {offset} not {O_DIRECT_ALIGN}-aligned");
+        let fd: &File = cached.read_fd();
+        let borrowed = unsafe { BorrowedSliceMut::from_slice(dst) };
+        let BufResult(res, _) = fd.read_at(borrowed, offset).await;
+        let filled = res.map_err(IoError::Io)?;
+        debug_assert!(filled <= len);
+        Ok(filled)
     }
 
     fn vol_path(&self, volume: &str) -> PathBuf { self.root.join(volume) }
@@ -328,10 +452,6 @@ impl compio::buf::IoBufMut for BorrowedSliceMut {
     }
 }
 
-impl Drop for LocalFileStream {
-    fn drop(&mut self) {
-    }
-}
 
 struct LocalFileSink {
     file:    Option<File>,
@@ -915,10 +1035,6 @@ async fn write_xl_meta_vectored(
     res.map_err(IoError::Io)
 }
 
-/// Write a `Bytes` at `base_offset` in full. compio's `write_all_at`
-/// loops on partial writes internally; we just unwrap the result.
-/// `Bytes` impls `IoBuf`, so the kernel writes from the same
-/// allocation we hand in — no userspace memcpy.
 async fn write_all_bytes_at(mut file: &File, buf: bytes::Bytes, base_offset: u64) -> IoResult<()> {
     let BufResult(res, _) = file.write_all_at(buf, base_offset).await;
     res.map_err(IoError::Io)

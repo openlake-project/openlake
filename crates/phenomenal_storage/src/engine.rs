@@ -29,7 +29,7 @@ use crate::object::{MultipartInit, ObjectInfo, StorageClass};
 
 pub const DEFAULT_INLINE_THRESHOLD: usize = 128 * 1024;
 
-const DEFAULT_EC_PER_SHARD_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_EC_PER_SHARD_BYTES: usize = 1024 * 1024;
 
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 

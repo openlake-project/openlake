@@ -40,6 +40,7 @@ xxhash-rust  = { version = "0.8", features = ["xxh64"] }
 crc32c       = { workspace = true }
 rustls       = { workspace = true }
 socket2      = "0.6"
+lru          = "0.12"
 
 # Buffer pool deps — see workspace Cargo.toml.
 aligned-vec     = { workspace = true }
