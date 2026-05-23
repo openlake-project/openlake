@@ -6,6 +6,7 @@ mod mlx5dv_sys;
 mod node;
 mod rdma_buf;
 mod socket;
+pub mod wire;
 mod wr;
 
 pub use ah_cache::AhCache;

@@ -10,7 +10,7 @@ use super::ah_cache::AhCache;
 use super::device::IbDevice;
 use super::rdma_buf::RdmaBufPool;
 use super::socket::{CqPump, IbSocket};
-use crate::rpc::Response;
+use super::wire::RdmaResponse;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PeerEndpoint {
@@ -54,7 +54,7 @@ pub struct RdmaNode {
     pub peers:             HashMap<u16, PeerEndpoint>,
     pub pump:              CqPump,
     pub next_request_id:   Cell<u64>,
-    pub pending_responses: RefCell<HashMap<u64, oneshot::Sender<Response>>>,
+    pub pending_responses: RefCell<HashMap<u64, oneshot::Sender<RdmaResponse>>>,
     pub bulk_pool:         Rc<RdmaBufPool>,
 }
 

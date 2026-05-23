@@ -148,9 +148,11 @@ pub struct RdmaToml {
     pub dc_key:        u64,
     pub qos:           RdmaQosToml,
     pub peers:         Vec<RdmaPeerToml>,
-    pub bulk_buf_size: usize,
+    #[serde(default = "default_bulk_pool_cap")]
     pub bulk_pool_cap: usize,
 }
+
+fn default_bulk_pool_cap() -> usize { 64 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct RdmaQosToml {

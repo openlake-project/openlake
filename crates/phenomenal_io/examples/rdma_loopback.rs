@@ -15,12 +15,15 @@ mod linux {
     use anyhow::Context;
     use futures::stream::StreamExt;
 
+    use phenomenal_io::rdma::wire::{
+        Envelope, ENVELOPE_MAGIC, RdmaRemoteBuf, RdmaRequest, RdmaResponse,
+    };
     use phenomenal_io::rdma::{
         PeerEndpoint, RdmaConfig, RdmaNode, RdmaQos, RawAddressHandle, BUF_SIZE,
     };
-    use phenomenal_io::rdma_backend::{Envelope, RdmaBackend, ENVELOPE_MAGIC};
-    use phenomenal_io::rpc::{decode, encode, RdmaRemoteBuf, Request, Response, WireError};
-    use phenomenal_io::stream::ByteStream;
+    use phenomenal_io::rdma_backend::RdmaBackend;
+    use phenomenal_io::rpc::{decode, encode, Request, Response, WireError};
+    use phenomenal_io::stream::{ByteSink, ByteStream};
     use phenomenal_io::{IoError, LocalFsBackend, StorageBackend};
 
     const DEFAULT_RDMA_DEVICE:           &str = "mlx5_0";
@@ -189,6 +192,36 @@ mod linux {
             gibibytes_per_sec, gigabits_per_sec,
         );
 
+        const PUT_OBJECT_PATH: &str = "loopback-uploaded/data";
+        eprintln!(
+            "rdma_loopback: [3/3] WriteFileChunk roundtrip ({} bytes via RdmaWriteSink) ...",
+            object_size_bytes,
+        );
+        {
+            let mut sink = rdma_backend
+                .create_file_writer(LOOPBACK_VOLUME_NAME, PUT_OBJECT_PATH, object_size_bytes as u64)
+                .await?;
+            let bytes = bytes::Bytes::from(payload.clone());
+            sink.write_all(bytes).await?;
+            sink.finish().await?;
+        }
+        let echoed = local_storage_backend
+            .read_file(LOOPBACK_VOLUME_NAME, PUT_OBJECT_PATH)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("WriteFileChunk: uploaded file not present on disk"))?;
+        if echoed != payload {
+            let bad_offset = echoed
+                .iter()
+                .zip(payload.iter())
+                .position(|(actual, expected)| actual != expected)
+                .unwrap_or(0);
+            anyhow::bail!("WriteFileChunk: content mismatch at offset {bad_offset}");
+        }
+        eprintln!(
+            "rdma_loopback:        WriteFileChunk succeeded: {} bytes pushed and verified on disk",
+            object_size_bytes,
+        );
+
         drop(dispatcher_task);
         Ok(())
     }
@@ -253,9 +286,9 @@ mod linux {
                     }
                 };
 
-                let response = match payload {
-                    Request::StatVol { disk_idx, volume } => {
-                        match local_disks.get(disk_idx as usize) {
+                let response: RdmaResponse = match payload {
+                    RdmaRequest::Generic(Request::StatVol { disk_idx, volume }) => {
+                        let inner = match local_disks.get(disk_idx as usize) {
                             Some(disk) => match disk.stat_vol(&volume).await {
                                 Ok(info)   => Response::Vol(info),
                                 Err(error) => Response::Err(error.into()),
@@ -263,9 +296,10 @@ mod linux {
                             None => Response::Err(WireError::from(IoError::Io(
                                 std::io::Error::other(format!("disk_idx {disk_idx} out of range")),
                             ))),
-                        }
+                        };
+                        RdmaResponse::Generic(inner)
                     }
-                    Request::ReadFileChunk { disk_idx, volume, path, offset, length, target } => {
+                    RdmaRequest::ReadFileChunk { disk_idx, volume, path, offset, length, target } => {
                         handle_read_file_chunk(
                             rdma_node,
                             local_disks,
@@ -343,15 +377,16 @@ mod linux {
         offset:        u64,
         length:        u32,
         target:        RdmaRemoteBuf,
-    ) -> Response {
+    ) -> RdmaResponse {
+        let err = |e: WireError| RdmaResponse::Generic(Response::Err(e));
         let server_buffer_size = rdma_node.bulk_pool.buf_size();
         if length as usize > server_buffer_size {
-            return Response::Err(WireError::Other(format!(
+            return err(WireError::Other(format!(
                 "read_file_chunk length {length} exceeds server bulk_buf_size {server_buffer_size}",
             )));
         }
         if length > target.len {
-            return Response::Err(WireError::Other(format!(
+            return err(WireError::Other(format!(
                 "read_file_chunk length {length} exceeds client target.len {}",
                 target.len,
             )));
@@ -360,7 +395,7 @@ mod linux {
         let disk = match local_disks.get(disk_idx as usize) {
             Some(disk) => disk.clone(),
             None => {
-                return Response::Err(WireError::from(IoError::Io(std::io::Error::other(
+                return err(WireError::from(IoError::Io(std::io::Error::other(
                     format!("disk_idx {disk_idx} out of range"),
                 ))));
             }
@@ -368,23 +403,23 @@ mod linux {
 
         let mut bounce_buffer = match rdma_node.bulk_pool.acquire().await {
             Ok(buffer) => buffer,
-            Err(error) => return Response::Err(IoError::Io(error).into()),
+            Err(error) => return err(IoError::Io(error).into()),
         };
 
         let bytes_filled = {
             let mut stream = match disk.read_file_stream(&volume, &path, offset, length as u64).await {
                 Ok(stream) => stream,
-                Err(error) => return Response::Err(error.into()),
+                Err(error) => return err(error.into()),
             };
             let destination_slice = &mut bounce_buffer.as_slice_mut()[..length as usize];
             match stream.read_buffer(destination_slice).await {
                 Ok(count)  => count,
-                Err(error) => return Response::Err(error.into()),
+                Err(error) => return err(error.into()),
             }
         };
 
         if bytes_filled == 0 {
-            return Response::ChunkReady { bytes_written: 0 };
+            return RdmaResponse::ChunkReady { bytes_written: 0 };
         }
 
         if let Err(error) = rdma_node.sock.rdma_write(
@@ -397,9 +432,9 @@ mod linux {
             peer_dct_num,
             peer_dc_key,
         ).await {
-            return Response::Err(IoError::Io(error).into());
+            return err(IoError::Io(error).into());
         }
 
-        Response::ChunkReady { bytes_written: bytes_filled as u32 }
+        RdmaResponse::ChunkReady { bytes_written: bytes_filled as u32 }
     }
 }
