@@ -59,3 +59,7 @@ rdma = ["dep:rdma-mummy-sys", "dep:bindgen"]
 tempfile           = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow             = { workspace = true }
+
+[[example]]
+name              = "rdma_loopback"
+required-features = ["rdma"]

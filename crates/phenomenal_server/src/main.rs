@@ -353,8 +353,10 @@ async fn run_runtime(
                 config::TransportMode::Rdma => {
                     let node = rdma_node.as_ref().expect("rdma node built in rdma mode").clone();
                     for disk_idx in 0..n.disk_count {
+                        let rpc_backend: Rc<dyn StorageBackend> =
+                            Rc::new(RemoteBackend::new(peer.clone(), disk_idx));
                         let rb = Rc::new(phenomenal_io::rdma_backend::RdmaBackend::new(
-                            node.clone(), n.id, disk_idx,
+                            node.clone(), n.id, disk_idx, rpc_backend,
                         ));
                         backends.insert(
                             DiskAddr { node_id: n.id, disk_idx },
