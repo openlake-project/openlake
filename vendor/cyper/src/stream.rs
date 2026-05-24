@@ -68,7 +68,7 @@ impl HttpStream {
                 TcpStream::connect(addrs.as_slice()).await?
             }
         };
-
+        let _ = stream.set_nodelay(true);
         Ok(stream)
     }
 }
