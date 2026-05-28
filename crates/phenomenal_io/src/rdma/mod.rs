@@ -1,4 +1,5 @@
 mod ah_cache;
+mod bootstrap;
 mod buffers;
 mod device;
 #[allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code, improper_ctypes)]
@@ -10,6 +11,7 @@ pub mod wire;
 mod wr;
 
 pub use ah_cache::AhCache;
+pub use bootstrap::{bootstrap, ClusterRoutingTable, LocalEndpoint};
 pub use buffers::BUF_SIZE;
 pub use device::IbDevice;
 pub use node::{PeerEndpoint, RdmaConfig, RdmaNode, RdmaQos};

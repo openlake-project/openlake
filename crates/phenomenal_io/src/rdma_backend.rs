@@ -278,6 +278,24 @@ rdma_backend_storage_impl! {
                 finished:   false,
             }))
         }
+
+        async fn read_version(
+            &self, orig_volume: &str, volume: &str, path: &str,
+            version_id: Option<&str>, read_data: bool,
+        ) -> IoResult<FileInfo> {
+            match self.unary(Request::ReadVersion {
+                disk_idx:    self.disk_idx,
+                orig_volume: orig_volume.into(),
+                volume:      volume.into(),
+                path:        path.into(),
+                version_id:  version_id.map(str::to_owned),
+                read_data,
+            }).await? {
+                Response::File(fi) => Ok(fi),
+                Response::Err(e)   => Err(IoError::from(e)),
+                other              => Err(IoError::Decode(format!("expected File, got {other:?}"))),
+            }
+        }
     }
     via_rpc {
         async fn disk_info(&self) -> IoResult<DiskInfo>;
@@ -291,7 +309,6 @@ rdma_backend_storage_impl! {
         async fn delete_batch(&self, volume: &str, paths: &[&str], recursive: bool) -> IoResult<Vec<IoResult<()>>>;
         async fn walk_dir(&self, volume: &str, base_dir: &str, recursive: bool, prefix: &str, start_after: Option<&str>, max_keys: Option<usize>) -> IoResult<Vec<(String, FileInfo)>>;
         async fn write_metadata(&self, orig_volume: &str, volume: &str, path: &str, fi: &FileInfo) -> IoResult<()>;
-        async fn read_version(&self, orig_volume: &str, volume: &str, path: &str, version_id: Option<&str>, read_data: bool) -> IoResult<FileInfo>;
         async fn update_metadata(&self, volume: &str, path: &str, fi: &FileInfo, opts: &UpdateMetadataOpts) -> IoResult<()>;
         async fn delete_version(&self, volume: &str, path: &str, fi: &FileInfo, force_del_marker: bool, opts: &DeleteOptions) -> IoResult<()>;
         async fn rename_data(&self, src_volume: &str, src_path: &str, fi: &FileInfo, dst_volume: &str, dst_path: &str, opts: &RenameOptions) -> IoResult<RenameDataResp>;
