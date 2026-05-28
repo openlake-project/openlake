@@ -118,8 +118,9 @@ pub struct RpcAppState {
 }
 
 struct RpcAppStateInner {
-    disks: Vec<Rc<dyn StorageBackend>>,
-    locks: Arc<LockServer>,
+    disks:     Vec<Rc<dyn StorageBackend>>,
+    locks:     Arc<LockServer>,
+    endpoints: Arc<std::sync::Mutex<phenomenal_io::rpc::RdmaEndpointsReply>>,
 }
 
 // SAFETY: every `RpcAppState` clone stays on the runtime that
@@ -128,11 +129,18 @@ unsafe impl Send for RpcAppState {}
 unsafe impl Sync for RpcAppState {}
 
 impl RpcAppState {
-    fn new(disks: Vec<Rc<dyn StorageBackend>>, locks: Arc<LockServer>) -> Self {
-        Self { inner: Rc::new(RpcAppStateInner { disks, locks }) }
+    fn new(
+        disks: Vec<Rc<dyn StorageBackend>>,
+        locks: Arc<LockServer>,
+        endpoints: Arc<std::sync::Mutex<phenomenal_io::rpc::RdmaEndpointsReply>>,
+    ) -> Self {
+        Self { inner: Rc::new(RpcAppStateInner { disks, locks, endpoints }) }
     }
     fn disks(&self) -> &[Rc<dyn StorageBackend>] { &self.inner.disks }
     fn locks(&self) -> &Arc<LockServer> { &self.inner.locks }
+    fn endpoints(&self) -> &Arc<std::sync::Mutex<phenomenal_io::rpc::RdmaEndpointsReply>> {
+        &self.inner.endpoints
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -140,12 +148,13 @@ impl RpcAppState {
 // -----------------------------------------------------------------------------
 
 pub async fn serve(
-    listener: TcpListener,
-    disks:    Rc<Vec<Rc<dyn StorageBackend>>>,
-    locks:    Arc<LockServer>,
-    tls:      Option<Rc<TlsAcceptor>>,
+    listener:  TcpListener,
+    disks:     Rc<Vec<Rc<dyn StorageBackend>>>,
+    locks:     Arc<LockServer>,
+    tls:       Option<Rc<TlsAcceptor>>,
+    endpoints: Arc<std::sync::Mutex<phenomenal_io::rpc::RdmaEndpointsReply>>,
 ) -> anyhow::Result<()> {
-    let state = RpcAppState::new(disks.iter().cloned().collect(), locks);
+    let state = RpcAppState::new(disks.iter().cloned().collect(), locks, endpoints);
     let app: Router = Router::new()
         .route("/v1/rpc",              post(handle_unary))
         .route("/v1/rpc/stream-write", put (handle_stream_write))
@@ -212,7 +221,7 @@ async fn handle_unary(
         );
     }
     let resp = SendWrapper::new(async move {
-        dispatch(state.disks(), state.locks(), req).await
+        dispatch(state.disks(), state.locks(), state.endpoints(), req).await
     }).await;
     let body_bytes = rpc::encode(&resp).unwrap_or_default();
     rpc_ok(body_bytes)
@@ -449,9 +458,10 @@ fn disk_at<'a>(
 /// variants are handled by their dedicated routes (and rejected
 /// here as a wire-protocol bug).
 pub(crate) async fn dispatch(
-    disks: &[Rc<dyn StorageBackend>],
-    locks: &Arc<LockServer>,
-    req:   Request,
+    disks:     &[Rc<dyn StorageBackend>],
+    locks:     &Arc<LockServer>,
+    endpoints: &Arc<std::sync::Mutex<phenomenal_io::rpc::RdmaEndpointsReply>>,
+    req:       Request,
 ) -> RpcResponse {
     use phenomenal_io::{DeleteOptions, RenameOptions, UpdateMetadataOpts};
     use Request::*;
@@ -560,6 +570,10 @@ pub(crate) async fn dispatch(
             } else {
                 RpcResponse::LockNotFound
             }
+        }
+
+        GetRdmaEndpoints => {
+            RpcResponse::RdmaEndpoints(endpoints.lock().unwrap().clone())
         }
     }
 }

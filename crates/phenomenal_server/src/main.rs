@@ -111,20 +111,31 @@ fn main() -> anyhow::Result<()> {
 
     let bootstrap_id: Arc<OnceLock<Uuid>> = Arc::new(OnceLock::new());
 
+    let endpoint_registry: Arc<std::sync::Mutex<phenomenal_io::rpc::RdmaEndpointsReply>> =
+        Arc::new(std::sync::Mutex::new(phenomenal_io::rpc::RdmaEndpointsReply {
+            complete:  num_runtimes == 0,
+            endpoints: Vec::with_capacity(num_runtimes),
+        }));
+
     let mut handles = Vec::with_capacity(num_runtimes);
     for (runtime_id, cpu) in cpus.into_iter().enumerate() {
-        let cfg          = cfg.clone();
-        let done_tx      = done_tx.clone();
-        let lock_server  = lock_server.clone();
-        let tls          = tls.clone();
-        let bootstrap_id = bootstrap_id.clone();
-        let handle       = thread::Builder::new()
+        let cfg              = cfg.clone();
+        let done_tx          = done_tx.clone();
+        let lock_server      = lock_server.clone();
+        let tls              = tls.clone();
+        let bootstrap_id     = bootstrap_id.clone();
+        let endpoint_registry = endpoint_registry.clone();
+        let handle           = thread::Builder::new()
             .name(format!("runtime-{runtime_id}"))
             .spawn(move || {
                 let result = (|| -> anyhow::Result<()> {
                     bind_cpu(cpu)?;
                     let rt = create_runtime()?;
-                    rt.block_on(run_runtime(runtime_id, cfg, lock_server, tls, bootstrap_id))
+                    rt.block_on(run_runtime(
+                        runtime_id, num_runtimes,
+                        cfg, lock_server, tls, bootstrap_id,
+                        endpoint_registry,
+                    ))
                 })();
                 if let Err(e) = &result {
                     tracing::error!(runtime_id, cpu, "runtime exited with error: {e:#}");
@@ -136,9 +147,6 @@ fn main() -> anyhow::Result<()> {
     }
     drop(done_tx);
 
-    // Block until every runtime thread exits. If one dies, the others
-    // keep running — operator decides whether to restart the process
-    // (systemd, k8s, etc.). Phenomenald doesn't try to respawn.
     while let Ok((runtime_id, result)) = done_rx.recv() {
         match result {
             Ok(())   => tracing::info!(runtime_id, "runtime exited cleanly"),
@@ -253,11 +261,14 @@ fn create_runtime() -> anyhow::Result<compio::runtime::Runtime> {
 /// Returns only when both accept loops exit (normally: never, until
 /// shutdown).
 async fn run_runtime(
-    runtime_id:   usize,
-    cfg:          Arc<config::Config>,
-    lock_server:  Arc<LockServer>,
-    tls:          TlsMaterial,
-    bootstrap_id: Arc<OnceLock<Uuid>>,
+    runtime_id:        usize,
+    #[cfg_attr(not(all(feature = "rdma", target_os = "linux")), allow(unused_variables))]
+    num_runtimes:      usize,
+    cfg:               Arc<config::Config>,
+    lock_server:       Arc<LockServer>,
+    tls:               TlsMaterial,
+    bootstrap_id:      Arc<OnceLock<Uuid>>,
+    endpoint_registry: Arc<std::sync::Mutex<phenomenal_io::rpc::RdmaEndpointsReply>>,
 ) -> anyhow::Result<()> {
     // Extract the three TLS handles from the shared material.
     //
@@ -316,17 +327,10 @@ async fn run_runtime(
     let local_lock_peer: Rc<dyn LockPeer> =
         Rc::new(LocalLockPeer::new(lock_server.clone()));
 
-    #[cfg(all(feature = "rdma", target_os = "linux"))]
-    let rdma_node: Option<std::rc::Rc<phenomenal_io::rdma::RdmaNode>> = match cfg.transport {
-        config::TransportMode::Rdma => Some(std::rc::Rc::new(
-            phenomenal_io::rdma::RdmaNode::start(build_rdma_config(cfg.rdma.as_ref().unwrap()))?
-        )),
-        config::TransportMode::H2 => None,
-    };
-
+    let mut peer_clients: std::collections::HashMap<phenomenal_storage::cluster::NodeId, Rc<PeerClient>> =
+        std::collections::HashMap::with_capacity(cfg.nodes.len().saturating_sub(1));
     for n in &cfg.nodes {
         if n.id == cfg.self_id {
-            // Local node — register every local disk.
             for (idx, disk_be) in local_disks.iter().enumerate() {
                 backends.insert(
                     DiskAddr { node_id: n.id, disk_idx: idx as u16 },
@@ -335,46 +339,32 @@ async fn run_runtime(
             }
             lock_peer_by_node.insert(n.id, local_lock_peer.clone());
         } else {
-            // `rpc_connector` is `Some` when rpc_tls is configured, `None`
-            // for plaintext h2c clusters. PeerClient handles both.
             let peer = Rc::new(PeerClient::new(n.rpc_addr, rpc_connector.clone()));
-
             let lock_rb = Rc::new(RemoteBackend::new(peer.clone(), 0));
             lock_peer_by_node.insert(n.id, lock_rb as Rc<dyn LockPeer>);
-
-            // Data plane backends: pick per transport.
-            match cfg.transport {
-                config::TransportMode::H2 => {
-                    for disk_idx in 0..n.disk_count {
-                        let rb = Rc::new(RemoteBackend::new(peer.clone(), disk_idx));
-                        backends.insert(
-                            DiskAddr { node_id: n.id, disk_idx },
-                            rb as Rc<dyn StorageBackend>,
-                        );
-                    }
-                }
-                #[cfg(all(feature = "rdma", target_os = "linux"))]
-                config::TransportMode::Rdma => {
-                    let node = rdma_node.as_ref().expect("rdma node built in rdma mode").clone();
-                    for disk_idx in 0..n.disk_count {
-                        let rpc_backend: Rc<dyn StorageBackend> =
-                            Rc::new(RemoteBackend::new(peer.clone(), disk_idx));
-                        let rb = Rc::new(phenomenal_io::rdma_backend::RdmaBackend::new(
-                            node.clone(), n.id, disk_idx, rpc_backend,
-                        ));
-                        backends.insert(
-                            DiskAddr { node_id: n.id, disk_idx },
-                            rb as Rc<dyn StorageBackend>,
-                        );
-                    }
-                }
-                #[cfg(not(all(feature = "rdma", target_os = "linux")))]
-                config::TransportMode::Rdma => {
-                    anyhow::bail!("rdma transport selected but build lacks rdma feature");
-                }
-            }
+            peer_clients.insert(n.id, peer);
         }
     }
+
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
+    let rdma_pending: Option<(phenomenal_io::rdma::RdmaSetup, phenomenal_io::rdma::RdmaConfig)> =
+        match cfg.transport {
+            config::TransportMode::Rdma => {
+                let rdma_cfg = build_rdma_config(
+                    cfg.rdma.as_ref().expect("rdma transport requires [rdma]"),
+                    runtime_id as u16,
+                );
+                let (setup, my_endpoint) = phenomenal_io::rdma::RdmaNode::start_local(&rdma_cfg)
+                    .context("rdma start_local")?;
+                {
+                    let mut reg = endpoint_registry.lock().unwrap();
+                    reg.endpoints.push(my_endpoint);
+                    if reg.endpoints.len() >= num_runtimes { reg.complete = true; }
+                }
+                Some((setup, rdma_cfg))
+            }
+            config::TransportMode::H2 => None,
+        };
 
     let auth_state = Rc::new(auth::AuthState::new(
         cfg.region.clone(),
@@ -402,26 +392,97 @@ async fn run_runtime(
     let rpc_disks      = Rc::new(local_disks.clone());
     let rpc_locks      = lock_server.clone();
     let rpc_acceptor_t = rpc_acceptor.clone();
+    let rpc_endpoints  = endpoint_registry.clone();
     let rpc_task = compio::runtime::spawn(async move {
-        if let Err(e) = rpc_server::serve(rpc_listener, rpc_disks, rpc_locks, rpc_acceptor_t).await {
+        if let Err(e) = rpc_server::serve(rpc_listener, rpc_disks, rpc_locks, rpc_acceptor_t, rpc_endpoints).await {
             tracing::error!(runtime_id, "rpc serve error: {e:#}");
         }
     });
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
-    let _rdma_task = match cfg.transport {
-        config::TransportMode::Rdma => {
-            let node        = rdma_node.as_ref().expect("rdma node built in rdma mode").clone();
+    let rdma_node: Option<Rc<phenomenal_io::rdma::RdmaNode>> = if let Some((setup, rdma_cfg)) = rdma_pending {
+        let mut routing = phenomenal_io::rdma::ClusterRoutingTable::new(cfg.self_id);
+        for ep in endpoint_registry.lock().unwrap().endpoints.iter() {
+            routing.insert(cfg.self_id, ep);
+        }
+        let mut remaining: std::collections::HashSet<phenomenal_storage::cluster::NodeId> =
+            peer_clients.keys().copied().collect();
+        while !remaining.is_empty() {
+            for peer_id in remaining.clone() {
+                let peer = peer_clients.get(&peer_id).expect("peer_id present");
+                let rb = RemoteBackend::new(peer.clone(), 0);
+                match rb.get_rdma_endpoints().await {
+                    Ok(reply) if reply.complete => {
+                        for ep in &reply.endpoints {
+                            routing.insert(peer_id, ep);
+                        }
+                        remaining.remove(&peer_id);
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::debug!(?peer_id, "rdma discover retry: {e}"),
+                }
+            }
+            if !remaining.is_empty() {
+                compio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+        let routing = Arc::new(routing);
+        tracing::info!(runtime_id, entries = routing.len(), "rdma routing table populated");
+        Some(Rc::new(phenomenal_io::rdma::RdmaNode::finalize(&rdma_cfg, setup, routing)))
+    } else {
+        None
+    };
+
+    for n in &cfg.nodes {
+        if n.id == cfg.self_id { continue; }
+        let peer = peer_clients.get(&n.id).expect("peer_id present").clone();
+        match cfg.transport {
+            config::TransportMode::H2 => {
+                for disk_idx in 0..n.disk_count {
+                    let rb = Rc::new(RemoteBackend::new(peer.clone(), disk_idx));
+                    backends.insert(
+                        DiskAddr { node_id: n.id, disk_idx },
+                        rb as Rc<dyn StorageBackend>,
+                    );
+                }
+            }
+            #[cfg(all(feature = "rdma", target_os = "linux"))]
+            config::TransportMode::Rdma => {
+                let node = rdma_node.as_ref().expect("rdma node finalized").clone();
+                for disk_idx in 0..n.disk_count {
+                    let rpc_backend: Rc<dyn StorageBackend> =
+                        Rc::new(RemoteBackend::new(peer.clone(), disk_idx));
+                    let rb = Rc::new(phenomenal_io::rdma_backend::RdmaBackend::new(
+                        node.clone(), n.id, disk_idx, rpc_backend,
+                    ));
+                    backends.insert(
+                        DiskAddr { node_id: n.id, disk_idx },
+                        rb as Rc<dyn StorageBackend>,
+                    );
+                }
+            }
+            #[cfg(not(all(feature = "rdma", target_os = "linux")))]
+            config::TransportMode::Rdma => {
+                anyhow::bail!("rdma transport selected but build lacks rdma feature");
+            }
+        }
+    }
+
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
+    let _rdma_task = match (cfg.transport, rdma_node.as_ref()) {
+        (config::TransportMode::Rdma, Some(node)) => {
+            let node        = node.clone();
             let disks       = Rc::new(local_disks.clone());
             let local_disks = Rc::new(local_fs_disks.clone());
             let locks       = lock_server.clone();
+            let endpoints   = endpoint_registry.clone();
             Some(compio::runtime::spawn(async move {
-                if let Err(e) = rdma_server::serve(node, disks, local_disks, locks).await {
+                if let Err(e) = rdma_server::serve(node, disks, local_disks, locks, endpoints).await {
                     tracing::error!(runtime_id, "rdma serve error: {e:#}");
                 }
             }))
         }
-        config::TransportMode::H2 => None,
+        _ => None,
     };
 
     let deployment_id: Uuid = if runtime_id == 0 {
@@ -503,22 +564,18 @@ async fn run_runtime(
 }
 
 #[cfg(all(feature = "rdma", target_os = "linux"))]
-fn build_rdma_config(t: &config::RdmaToml) -> phenomenal_io::rdma::RdmaConfig {
+fn build_rdma_config(t: &config::RdmaToml, runtime_id: u16) -> phenomenal_io::rdma::RdmaConfig {
     phenomenal_io::rdma::RdmaConfig {
         self_node_id: t.self_node_id,
+        runtime_id,
         dev_name:     t.dev_name.clone(),
         dc_key:       t.dc_key,
         qos: phenomenal_io::rdma::RdmaQos {
             traffic_class: t.qos.traffic_class,
             service_level: t.qos.service_level,
         },
-        peers: t.peers.iter().map(|p| phenomenal_io::rdma::PeerEndpoint {
-            node_id: p.node_id,
-            gid:     p.gid,
-            dct_num: p.dct_num,
-            dc_key:  p.dc_key,
-        }).collect(),
         bulk_buf_size: phenomenal_storage::DEFAULT_EC_PER_SHARD_BYTES,
         bulk_pool_cap: t.bulk_pool_cap,
     }
 }
+

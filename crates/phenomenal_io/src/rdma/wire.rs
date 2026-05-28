@@ -29,6 +29,6 @@ pub enum RdmaResponse {
 
 #[derive(Serialize, Deserialize)]
 pub enum Envelope {
-    Req { magic: u32, from_node_id: u16, request_id: u64, payload: RdmaRequest  },
-    Rsp { magic: u32, request_id: u64,                   payload: RdmaResponse },
+    Req { magic: u32, from_node_id: u16, from_runtime_id: u16, request_id: u64, payload: RdmaRequest  },
+    Rsp { magic: u32, request_id: u64,                                          payload: RdmaResponse },
 }

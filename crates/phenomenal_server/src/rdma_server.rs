@@ -19,16 +19,16 @@ pub async fn serve(
     disks:       Rc<Vec<Rc<dyn StorageBackend>>>,
     local_disks: Rc<Vec<Rc<LocalFsBackend>>>,
     locks:       Arc<LockServer>,
+    endpoints:   Arc<std::sync::Mutex<phenomenal_io::rpc::RdmaEndpointsReply>>,
 ) -> anyhow::Result<()> {
     let mut rx = node.pump.take_recv_rx()
         .ok_or_else(|| anyhow::anyhow!("rdma_server: pump recv_rx already taken"))?;
     let mut buf = Vec::with_capacity(BUF_SIZE);
     loop {
-        // Drain every envelope queued before parking again.
         loop {
             buf.clear();
             if node.sock.attempt_singular_rcv(&mut buf).is_none() { break; }
-            handle(&node, &disks, &local_disks, &locks, &buf).await;
+            handle(&node, &disks, &local_disks, &locks, &endpoints, &buf).await;
         }
         if rx.next().await.is_none() { return Ok(()); }
     }
@@ -39,6 +39,7 @@ async fn handle(
     disks:       &Rc<Vec<Rc<dyn StorageBackend>>>,
     local_disks: &Rc<Vec<Rc<LocalFsBackend>>>,
     locks:       &Arc<LockServer>,
+    endpoints:   &Arc<std::sync::Mutex<phenomenal_io::rpc::RdmaEndpointsReply>>,
     bytes:       &[u8],
 ) {
     let env: Envelope = match decode(bytes) {
@@ -46,14 +47,17 @@ async fn handle(
         Err(e) => { tracing::warn!("rdma_server: decode envelope: {e}"); return; }
     };
     match env {
-        Envelope::Req { magic, from_node_id, request_id, payload } => {
+        Envelope::Req { magic, from_node_id, from_runtime_id, request_id, payload } => {
             if magic != ENVELOPE_MAGIC {
                 tracing::warn!("rdma_server: bad request magic {:#x}", magic);
                 return;
             }
-            let sender = match node.peer(from_node_id) {
+            let sender = match node.peer_at(from_node_id, from_runtime_id) {
                 Some(p) => p.clone(),
-                None    => { tracing::warn!("rdma_server: unknown sender {from_node_id}"); return; }
+                None    => {
+                    tracing::warn!("rdma_server: unknown sender (node={from_node_id}, runtime={from_runtime_id})");
+                    return;
+                }
             };
             let sender_ah = match node.ah_cache.get_or_create(&sender) {
                 Ok(ah) => ah,
@@ -73,7 +77,7 @@ async fn handle(
                         sender.dct_num, sender.dc_key,
                         disk_idx, volume, path, offset, length, source,
                     ).await,
-                RdmaRequest::Generic(req) => RdmaResponse::Generic(dispatch(disks, locks, req).await),
+                RdmaRequest::Generic(req) => RdmaResponse::Generic(dispatch(disks, locks, endpoints, req).await),
             };
             let body = match encode(&Envelope::Rsp {
                 magic: ENVELOPE_MAGIC, request_id, payload: resp,

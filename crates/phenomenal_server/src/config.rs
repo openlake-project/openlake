@@ -147,7 +147,6 @@ pub struct RdmaToml {
     pub dev_name:      String,
     pub dc_key:        u64,
     pub qos:           RdmaQosToml,
-    pub peers:         Vec<RdmaPeerToml>,
     #[serde(default = "default_bulk_pool_cap")]
     pub bulk_pool_cap: usize,
 }
@@ -158,14 +157,6 @@ fn default_bulk_pool_cap() -> usize { 64 }
 pub struct RdmaQosToml {
     pub traffic_class: u8,
     pub service_level: u8,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct RdmaPeerToml {
-    pub node_id: u16,
-    pub gid:     [u8; 16],
-    pub dct_num: u32,
-    pub dc_key:  u64,
 }
 
 /// TOML-friendly mirror of `phenomenal_io::MemoryPoolConfig`. Defaults

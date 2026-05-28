@@ -52,7 +52,8 @@ impl RdmaBackend {
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
-            from_node_id: self.node.self_id,
+            from_node_id:    self.node.self_id,
+            from_runtime_id: self.node.runtime_id,
             request_id,
             payload: RdmaRequest::Generic(payload),
         };
@@ -93,7 +94,8 @@ impl RdmaBackend {
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
-            from_node_id: node.self_id,
+            from_node_id:    node.self_id,
+            from_runtime_id: node.runtime_id,
             request_id,
             payload: RdmaRequest::ReadFileChunk {
                 disk_idx: self.disk_idx,
@@ -170,7 +172,8 @@ impl RdmaBackend {
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
-            from_node_id: node.self_id,
+            from_node_id:    node.self_id,
+            from_runtime_id: node.runtime_id,
             request_id,
             payload: RdmaRequest::WriteFileChunk {
                 disk_idx: self.disk_idx,

@@ -93,6 +93,12 @@ pub enum Request {
     LockRelease { resource: String, uid: String },
     /// Periodic lease refresh. Reply: `LockRefreshed` or `LockNotFound`.
     LockRefresh { resource: String, uid: String },
+
+    /// Cluster-wide RDMA peer-endpoint exchange. Polled by peers
+    /// during startup; reply carries every local runtime's
+    /// `(runtime_id, dct_num, gid, dc_key)`. Until every runtime on
+    /// this node has published, `complete = false` and peers retry.
+    GetRdmaEndpoints,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -115,7 +121,22 @@ pub enum Response {
     LockDenied,
     LockRefreshed,
     LockNotFound,
+    RdmaEndpoints(RdmaEndpointsReply),
     Err(WireError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalRdmaEndpoint {
+    pub runtime_id: u16,
+    pub dct_num:    u32,
+    pub gid:        [u8; 16],
+    pub dc_key:     u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RdmaEndpointsReply {
+    pub complete:  bool,
+    pub endpoints: Vec<LocalRdmaEndpoint>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

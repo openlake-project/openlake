@@ -234,6 +234,14 @@ impl RemoteBackend {
             other                   => Err(unexpected(other)),
         }
     }
+
+    pub async fn get_rdma_endpoints(&self) -> IoResult<rpc::RdmaEndpointsReply> {
+        match self.unary(Request::GetRdmaEndpoints).await? {
+            Response::RdmaEndpoints(r) => Ok(r),
+            Response::Err(e)           => Err(e.into()),
+            other                      => Err(unexpected(other)),
+        }
+    }
 }
 
 // `call_unit!` / `call_typed!` are thin wrappers that the 22-method
