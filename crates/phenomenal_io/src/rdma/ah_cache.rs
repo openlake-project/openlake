@@ -3,23 +3,25 @@ use std::collections::HashMap;
 use std::io;
 use std::mem;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 use rdma_mummy_sys::{ibv_ah, ibv_ah_attr, ibv_create_ah, ibv_destroy_ah, ibv_pd};
 
-use super::device::PORT_NUM;
+use super::device::{IbDevice, PORT_NUM};
 use super::node::{PeerEndpoint, RdmaQos};
 
 pub struct AhCache {
     pd:        *mut ibv_pd,
     qos:       RdmaQos,
     gid_index: u8,
-    local_lid: u16,
     table:     RefCell<HashMap<u16, NonNull<ibv_ah>>>,
+    _dev:      Rc<IbDevice>,
 }
 
 impl AhCache {
-    pub fn new(pd: *mut ibv_pd, qos: RdmaQos, gid_index: u8, local_lid: u16) -> Self {
-        Self { pd, qos, gid_index, local_lid, table: RefCell::new(HashMap::new()) }
+    pub fn new(dev: Rc<IbDevice>, qos: RdmaQos, gid_index: u8, _local_lid: u16) -> Self {
+        let pd = dev.pd.as_ptr();
+        Self { pd, qos, gid_index, table: RefCell::new(HashMap::new()), _dev: dev }
     }
 
     pub fn get_or_create(&self, peer: &PeerEndpoint) -> io::Result<*mut ibv_ah> {
@@ -29,7 +31,7 @@ impl AhCache {
         let ah = unsafe {
             let mut a: ibv_ah_attr = mem::zeroed();
             a.is_global           = 1;
-            a.dlid                = self.local_lid;
+            a.dlid                = peer.lid;
             a.port_num            = PORT_NUM;
             a.sl                  = self.qos.service_level;
             a.grh.dgid.raw        = peer.gid;

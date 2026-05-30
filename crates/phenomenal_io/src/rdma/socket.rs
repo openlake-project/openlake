@@ -103,8 +103,8 @@ impl IbSocket {
             transition_dci(dci.as_ptr(), &dev, qos)
                 .map_err(|e| io::Error::other(format!("transition_dci: {e}")))?;
 
-            let send_bufs = SendBuffers::new(dev.pd.as_ptr(), SEND_BUF_CNT, BUF_SIZE)?;
-            let recv_bufs = RecvBuffers::new(dev.pd.as_ptr(), SEND_BUF_CNT, BUF_SIZE)?;
+            let send_bufs = SendBuffers::new(dev.clone(), SEND_BUF_CNT, BUF_SIZE)?;
+            let recv_bufs = RecvBuffers::new(dev.clone(), SEND_BUF_CNT, BUF_SIZE)?;
 
             let sock = IbSocket {
                 dev, cq, comp_channel, srq, dct, dci,
@@ -130,7 +130,6 @@ impl IbSocket {
             let Some(idx) = self.send_bufs.try_pop() else { break; };
             let n = buf.len().min(bs);
             unsafe {
-                // todo: @arnav revisit memcp here
                 ptr::copy_nonoverlapping(
                     buf.as_ptr(),
                     self.send_bufs.base().slot_ptr(idx),
@@ -251,18 +250,14 @@ impl IbSocket {
     pub(super) fn post_send(
         &self, buf_idx: u32, len: u32, ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
     ) -> io::Result<()> {
-        let prev = self.send_not_signaled.get() + 1;
-        self.send_not_signaled.set(prev);
-        let signal = if prev >= BUF_SIGNAL_BATCH {
-            self.send_not_signaled.set(0);
-            prev
-        } else { 0 };
+        let signal = 1u32;
+        let wr_id = WrId::send(signal).0;
         unsafe {
             let qpx  = ibv_qp_to_qp_ex(self.dci.as_ptr());
             let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
             ibv_wr_start(qpx);
-            (*qpx).wr_id    = WrId::send(signal).0;
-            (*qpx).wr_flags = if signal > 0 { ibv_send_flags::IBV_SEND_SIGNALED.0 as u32 } else { 0 };
+            (*qpx).wr_id    = wr_id;
+            (*qpx).wr_flags = ibv_send_flags::IBV_SEND_SIGNALED.0 as u32;
             ibv_wr_send(qpx);
             ibv_wr_set_sge(qpx, self.send_bufs.base().lkey(),
                            self.send_bufs.base().slot_addr(buf_idx as usize), len);
@@ -465,7 +460,7 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
         ibv_wc_opcode::IBV_WC_SEND => {
             if status_ok && wr.ty() == WrType::Send {
                 let n = wr.signal_count() as u64;
-                if n > 0 { sock.send_signaled.set(sock.send_signaled.get() + n); }
+                if n > 0 { sock.send_bufs.push(n); }
             }
         }
         ibv_wc_opcode::IBV_WC_RDMA_WRITE | ibv_wc_opcode::IBV_WC_RDMA_READ => {

@@ -30,6 +30,8 @@ mod rdma {
             .blocklist_function("mlx5dv_destroy_flow.*")
             .blocklist_function("mlx5dv_dr_.*")
             .blocklist_function("mlx5dv_flow.*")
+            .blocklist_type    ("mlx5dv_context_attr")
+            .blocklist_function("mlx5dv_open_device")
             .layout_tests(false)
             .derive_default(true)
             .generate().expect("bindgen mlx5dv.h")

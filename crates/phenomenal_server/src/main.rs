@@ -243,8 +243,11 @@ fn create_runtime() -> anyhow::Result<compio::runtime::Runtime> {
         .coop_taskrun(false)
         .taskrun_flag(false);
 
+    // Only cyper's HTTP client initialisation uses compio's asyncify pool (for getaddrinfo).
+    // No other flow should land here. Capped at 1.
+    // TODO: route cyper through compio natively and drop this pool entirely.
     #[cfg(not(target_os = "macos"))]
-    proactor.thread_pool_limit(0);
+    proactor.thread_pool_limit(1);
 
     compio::runtime::RuntimeBuilder::new()
         .with_proactor(proactor)
@@ -402,8 +405,16 @@ async fn run_runtime(
     #[cfg(all(feature = "rdma", target_os = "linux"))]
     let rdma_node: Option<Rc<phenomenal_io::rdma::RdmaNode>> = if let Some((setup, rdma_cfg)) = rdma_pending {
         let mut routing = phenomenal_io::rdma::ClusterRoutingTable::new(cfg.self_id);
-        for ep in endpoint_registry.lock().unwrap().endpoints.iter() {
-            routing.insert(cfg.self_id, ep);
+        loop {
+            let reg = endpoint_registry.lock().unwrap();
+            if reg.complete {
+                for ep in reg.endpoints.iter() {
+                    routing.insert(cfg.self_id, ep);
+                }
+                break;
+            }
+            drop(reg);
+            compio::time::sleep(Duration::from_millis(50)).await;
         }
         let mut remaining: std::collections::HashSet<phenomenal_storage::cluster::NodeId> =
             peer_clients.keys().copied().collect();
@@ -419,7 +430,7 @@ async fn run_runtime(
                         remaining.remove(&peer_id);
                     }
                     Ok(_) => {}
-                    Err(e) => tracing::debug!(?peer_id, "rdma discover retry: {e}"),
+                    Err(_) => {}
                 }
             }
             if !remaining.is_empty() {

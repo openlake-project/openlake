@@ -442,7 +442,7 @@ fn error_response(status: StatusCode, e: IoError) -> Response {
 /// backend on success, or an `IoError::InvalidArgument` to surface
 /// in the response body when the peer references a disk this node
 /// doesn't own.
-fn disk_at<'a>(
+pub(crate) fn disk_at<'a>(
     disks:    &'a [Rc<dyn StorageBackend>],
     disk_idx: DiskIdx,
 ) -> Result<&'a Rc<dyn StorageBackend>, IoError> {

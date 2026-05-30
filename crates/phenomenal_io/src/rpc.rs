@@ -131,6 +131,7 @@ pub struct LocalRdmaEndpoint {
     pub dct_num:    u32,
     pub gid:        [u8; 16],
     pub dc_key:     u64,
+    pub lid:        u16,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

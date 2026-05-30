@@ -20,6 +20,7 @@ pub struct PeerEndpoint {
     pub gid:     [u8; 16],
     pub dct_num: u32,
     pub dc_key:  u64,
+    pub lid:     u16,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -66,17 +67,18 @@ impl RdmaNode {
     pub fn start_local(cfg: &RdmaConfig) -> io::Result<(RdmaSetup, LocalEndpoint)> {
         let dev       = Rc::new(IbDevice::open(&cfg.dev_name)?);
         let sock      = Rc::new(IbSocket::new(dev.clone(), cfg.dc_key, cfg.qos)?);
-        let ah_cache  = Rc::new(AhCache::new(dev.pd.as_ptr(), cfg.qos, dev.gid_index, dev.port_attr.lid));
+        let ah_cache  = Rc::new(AhCache::new(dev.clone(), cfg.qos, dev.gid_index, dev.port_attr.lid));
         let pump      = CqPump::start(sock.clone())?;
         let self_dct  = sock.self_dct_identifier;
         let self_gid  = dev.gid;
-        let bulk_pool = RdmaBufPool::new(dev.pd.as_ptr(), cfg.bulk_pool_cap, cfg.bulk_buf_size);
+        let bulk_pool = RdmaBufPool::new(dev.clone(), cfg.bulk_pool_cap, cfg.bulk_buf_size);
         let setup = RdmaSetup { dev, sock, ah_cache, pump, bulk_pool, self_gid, self_dct };
         let endpoint = LocalEndpoint {
             runtime_id: cfg.runtime_id,
             dct_num:    self_dct,
             gid:        self_gid,
             dc_key:     cfg.dc_key,
+            lid:        setup.dev.port_attr.lid,
         };
         Ok((setup, endpoint))
     }

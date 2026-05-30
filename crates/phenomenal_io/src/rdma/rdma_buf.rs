@@ -8,10 +8,11 @@ use std::rc::{Rc, Weak};
 use bytes::Bytes;
 use futures::channel::oneshot;
 use rdma_mummy_sys::{
-    ibv_access_flags, ibv_dereg_mr, ibv_mr, ibv_pd, ibv_reg_mr,
+    ibv_access_flags, ibv_dereg_mr, ibv_mr, ibv_reg_mr,
 };
 
-use crate::rpc::RdmaRemoteBuf;
+use crate::rdma::device::IbDevice;
+use crate::rdma::wire::RdmaRemoteBuf;
 
 const PAGE_ALIGN: usize = 4096;
 
@@ -21,6 +22,7 @@ struct RdmaBufInner {
     mr:       NonNull<ibv_mr>,
     capacity: usize,
     pool:     Weak<RdmaBufPool>,
+    _dev:     Rc<IbDevice>,
 }
 
 // Required by `Bytes::from_owner`. Compio is thread-per-core; RdmaBuf
@@ -28,7 +30,8 @@ struct RdmaBufInner {
 unsafe impl Send for RdmaBufInner {}
 
 impl RdmaBufInner {
-    fn new(pd: *mut ibv_pd, capacity: usize, pool: Weak<RdmaBufPool>) -> io::Result<Self> {
+    fn new(dev: Rc<IbDevice>, capacity: usize, pool: Weak<RdmaBufPool>) -> io::Result<Self> {
+        let pd = dev.pd.as_ptr();
         let layout = Layout::from_size_align(capacity, PAGE_ALIGN)
             .map_err(|e| io::Error::other(format!("layout: {e}")))?;
         unsafe {
@@ -47,7 +50,7 @@ impl RdmaBufInner {
                     return Err(e);
                 }
             };
-            Ok(RdmaBufInner { base, layout, mr, capacity, pool })
+            Ok(RdmaBufInner { base, layout, mr, capacity, pool, _dev: dev })
         }
     }
 }
@@ -114,16 +117,16 @@ struct PoolState {
 }
 
 pub struct RdmaBufPool {
-    pd:       *mut ibv_pd,
+    dev:      Rc<IbDevice>,
     buf_size: usize,
     cap:      usize,
     state:    RefCell<PoolState>,
 }
 
 impl RdmaBufPool {
-    pub fn new(pd: *mut ibv_pd, cap: usize, buf_size: usize) -> Rc<Self> {
+    pub fn new(dev: Rc<IbDevice>, cap: usize, buf_size: usize) -> Rc<Self> {
         Rc::new(Self {
-            pd, buf_size, cap,
+            dev, buf_size, cap,
             state: RefCell::new(PoolState {
                 free:      Vec::new(),
                 waiters:   VecDeque::new(),
@@ -146,7 +149,7 @@ impl RdmaBufPool {
             }
         };
         if needs_alloc {
-            match RdmaBufInner::new(self.pd, self.buf_size, Rc::downgrade(self)) {
+            match RdmaBufInner::new(self.dev.clone(), self.buf_size, Rc::downgrade(self)) {
                 Ok(inner) => return Ok(RdmaBuf { inner: Some(Box::new(inner)) }),
                 Err(e) => {
                     self.state.borrow_mut().allocated -= 1;

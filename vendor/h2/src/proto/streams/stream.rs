@@ -372,10 +372,7 @@ impl Stream {
 
     pub fn notify_recv(&mut self) {
         if let Some(task) = self.recv_task.take() {
-            tracing::warn!(target: "phen_h2", "PHEN_H2_WAKE stream={:?} waker_was_stored=true", self.id);
             task.wake();
-        } else {
-            tracing::warn!(target: "phen_h2", "PHEN_H2_WAKE_MISS stream={:?} no_waker_stored data_may_be_buffered", self.id);
         }
     }
 

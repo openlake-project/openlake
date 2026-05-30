@@ -77,7 +77,9 @@ async fn handle(
                         sender.dct_num, sender.dc_key,
                         disk_idx, volume, path, offset, length, source,
                     ).await,
-                RdmaRequest::Generic(req) => RdmaResponse::Generic(dispatch(disks, locks, endpoints, req).await),
+                RdmaRequest::Generic(req) => {
+                    RdmaResponse::Generic(dispatch(disks, locks, endpoints, req).await)
+                }
             };
             let body = match encode(&Envelope::Rsp {
                 magic: ENVELOPE_MAGIC, request_id, payload: resp,

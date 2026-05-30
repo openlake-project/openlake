@@ -105,6 +105,7 @@ mod linux {
                     gid:     [0u8; 16],
                     dct_num: 0,
                     dc_key:  0,
+                    lid:     0,
                 }],
                 bulk_buf_size: BULK_BUFFER_SIZE_BYTES,
                 bulk_pool_cap: BULK_POOL_CAPACITY,

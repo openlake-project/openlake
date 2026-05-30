@@ -378,7 +378,6 @@ impl Prioritize {
         let span = tracing::trace_span!("assign_connection_capacity", inc);
         let _e = span.enter();
 
-        tracing::warn!(target: "phen_h2", "PHEN_H2_CONN_CREDIT_REFRESH inc={} conn_avail_before={}", inc, self.flow.available().as_size());
         let _res = self.flow.assign_capacity(inc);
         debug_assert!(_res.is_ok());
 
@@ -447,16 +446,12 @@ impl Prioritize {
         }
 
         let conn_available = self.flow.available().as_size();
-        tracing::warn!(target: "phen_h2", "PHEN_H2_TRY_ASSIGN stream={:?} req={} stream_avail={} stream_win={} conn_avail={} additional={}", stream.id, total_requested, stream.send_flow.available().as_size(), stream.send_flow.window_size(), conn_available, additional);
 
         if conn_available > 0 {
             let assign = cmp::min(conn_available, additional);
-            tracing::warn!(target: "phen_h2", "PHEN_H2_ASSIGN stream={:?} assigned={} conn_avail_after={}", stream.id, assign, conn_available - assign);
             stream.assign_capacity(assign, self.max_buffer_size);
             let _res = self.flow.claim_capacity(assign);
             debug_assert!(_res.is_ok());
-        } else {
-            tracing::warn!(target: "phen_h2", "PHEN_H2_STARVED stream={:?} req={} conn_avail=0 STREAM_QUEUED_PENDING_CAPACITY", stream.id, total_requested);
         }
 
         tracing::trace!(
@@ -737,7 +732,6 @@ impl Prioritize {
                             // Zero length data frames always have capacity to
                             // be sent.
                             if sz > 0 && stream_capacity == 0 {
-                                tracing::warn!(target: "phen_h2", "PHEN_H2_SEND_STALL_STREAM_CAP_0 stream={:?} sz={} send_window={} conn_window={}", stream.id, sz, stream.send_flow.window_size(), self.flow.window_size());
                                 tracing::trace!("stream capacity is 0");
 
                                 // Ensure that the stream is waiting for
@@ -770,7 +764,6 @@ impl Prioritize {
                             // scenarios, maybe the window we know is available but the window which
                             // peer knows is not.
                             if len > 0 && len > stream.send_flow.window_size() {
-                                tracing::warn!(target: "phen_h2", "PHEN_H2_SEND_STALL_PEER_WINDOW stream={:?} len={} send_window={}", stream.id, len, stream.send_flow.window_size());
                                 stream.pending_send.push_front(buffer, frame.into());
                                 continue;
                             }

@@ -443,12 +443,9 @@ impl Recv {
         debug_assert!(_res.is_ok());
 
         if self.flow.unclaimed_capacity().is_some() {
-            tracing::warn!(target: "phen_h2", "PHEN_H2_CONN_RELEASE_ENQUEUE cap={} unclaimed={:?} task_present={}", capacity, self.flow.unclaimed_capacity(), task.is_some());
             if let Some(task) = task.take() {
                 task.wake();
             }
-        } else {
-            tracing::warn!(target: "phen_h2", "PHEN_H2_CONN_RELEASE_NO_ENQUEUE cap={}", capacity);
         }
     }
 
@@ -476,14 +473,11 @@ impl Recv {
         debug_assert!(_res.is_ok());
 
         if stream.recv_flow.unclaimed_capacity().is_some() {
-            tracing::warn!(target: "phen_h2", "PHEN_H2_RELEASE_CAP_ENQUEUE stream={:?} cap={} unclaimed={:?} task_present={}", stream.id, capacity, stream.recv_flow.unclaimed_capacity(), task.is_some());
             self.pending_window_updates.push(stream);
 
             if let Some(task) = task.take() {
                 task.wake();
             }
-        } else {
-            tracing::warn!(target: "phen_h2", "PHEN_H2_RELEASE_CAP_NO_ENQUEUE stream={:?} cap={} unclaimed=None", stream.id, capacity);
         }
 
         Ok(())
@@ -750,8 +744,6 @@ impl Recv {
 
         let event = Event::Data(frame.into_payload());
 
-        let payload_len = match &event { Event::Data(p) => p.len(), _ => 0 };
-        tracing::warn!(target: "phen_h2", "PHEN_H2_RECV_DATA stream={:?} len={} pushing_to_pending_recv", stream.id, payload_len);
         stream.pending_recv.push_back(&mut self.buffer, event);
         stream.notify_recv();
 
@@ -1107,9 +1099,7 @@ impl Recv {
         T: AsyncWrite + Unpin,
         B: Buf,
     {
-        tracing::warn!(target: "phen_h2", "PHEN_H2_SCWU_ENTER unclaimed={:?}", self.flow.unclaimed_capacity());
         if let Some(incr) = self.flow.unclaimed_capacity() {
-            tracing::warn!(target: "phen_h2", "PHEN_H2_SEND_CONN_WINDOW_UPDATE incr={}", incr);
             let frame = frame::WindowUpdate::new(StreamId::zero(), incr);
 
             // Ensure the codec has capacity
@@ -1140,18 +1130,13 @@ impl Recv {
         T: AsyncWrite + Unpin,
         B: Buf,
     {
-        let _q_empty = self.pending_window_updates.is_empty();
-        tracing::warn!(target: "phen_h2", "PHEN_H2_SSWU_ENTER queue_empty_before={}", _q_empty);
-        let mut _sent_count = 0u32;
         loop {
             // Ensure the codec has capacity
             match dst.poll_ready(cx) {
                 Poll::Pending => {
-                    tracing::warn!(target: "phen_h2", "PHEN_H2_SSWU_CODEC_PENDING queue_remaining_nonempty={} sent_this_call={}", if self.pending_window_updates.is_empty() { 0u32 } else { 1u32 }, _sent_count);
                     return Poll::Pending;
                 }
                 Poll::Ready(Err(e)) => {
-                    tracing::warn!(target: "phen_h2", "PHEN_H2_SSWU_CODEC_ERR sent_this_call={}", _sent_count);
                     return Poll::Ready(Err(e));
                 }
                 Poll::Ready(Ok(())) => {}
@@ -1161,11 +1146,9 @@ impl Recv {
             let stream = match self.pending_window_updates.pop(store) {
                 Some(stream) => stream,
                 None => {
-                    tracing::warn!(target: "phen_h2", "PHEN_H2_SSWU_DRAINED sent_this_call={}", _sent_count);
                     return Poll::Ready(Ok(()));
                 }
             };
-            _sent_count += 1;
 
             counts.transition(stream, |_, stream| {
                 tracing::trace!("pending_window_updates -- pop; stream={:?}", stream.id);
@@ -1183,7 +1166,6 @@ impl Recv {
 
                 // TODO: de-dup
                 if let Some(incr) = stream.recv_flow.unclaimed_capacity() {
-                    tracing::warn!(target: "phen_h2", "PHEN_H2_SEND_WINDOW_UPDATE stream={:?} incr={}", stream.id, incr);
                     let frame = frame::WindowUpdate::new(stream.id, incr);
                     dst.buffer(frame.into())
                         .expect("invalid WINDOW_UPDATE frame");
@@ -1207,9 +1189,8 @@ impl Recv {
         cx: &Context,
         stream: &mut Stream,
     ) -> Poll<Option<Result<Bytes, proto::Error>>> {
-        tracing::warn!(target: "phen_h2", "PHEN_H2_POLL_DATA_ENTER stream={:?}", stream.id);
         match stream.pending_recv.pop_front(&mut self.buffer) {
-            Some(Event::Data(payload)) => { tracing::warn!(target: "phen_h2", "PHEN_H2_POLL_DATA_GOT stream={:?} len={}", stream.id, payload.len()); Poll::Ready(Some(Ok(payload))) },
+            Some(Event::Data(payload)) => Poll::Ready(Some(Ok(payload))),
             Some(event) => {
                 // Frame is trailer
                 stream.pending_recv.push_front(&mut self.buffer, event);
@@ -1254,11 +1235,9 @@ impl Recv {
         stream: &mut Stream,
     ) -> Poll<Option<Result<T, proto::Error>>> {
         if stream.state.ensure_recv_open()? {
-            tracing::warn!(target: "phen_h2", "PHEN_H2_PARK stream={:?} state={:?} pending_recv_empty=true", stream.id, stream.state);
             stream.recv_task = Some(cx.waker().clone());
             Poll::Pending
         } else {
-            tracing::warn!(target: "phen_h2", "PHEN_H2_PARK_CLOSED stream={:?}", stream.id);
             Poll::Ready(None)
         }
     }
