@@ -5,6 +5,7 @@ use std::io;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use futures::channel::oneshot;
 use rdma_mummy_sys::{
     ibv_access_flags, ibv_dereg_mr, ibv_mr, ibv_reg_mr,
 };
@@ -12,7 +13,7 @@ use rdma_mummy_sys::{
 use super::device::IbDevice;
 
 pub const BUF_SIZE:         usize = 16 * 1024;
-pub const SEND_BUF_CNT:     usize = 64;
+pub const SEND_BUF_CNT:     usize = 4;
 pub const BUF_ACK_BATCH:    u32   = 8;
 pub const BUF_SIGNAL_BATCH: u32   = 8;
 const PAGE_ALIGN:           usize = 4096;
@@ -76,17 +77,19 @@ impl Buffers {
 }
 
 pub struct SendBuffers {
-    base:  Buffers,
-    front: Cell<u64>,
-    tail:  Cell<u64>,
+    base:    Buffers,
+    front:   Cell<u64>,
+    tail:    Cell<u64>,
+    waiters: RefCell<VecDeque<oneshot::Sender<usize>>>,
 }
 
 impl SendBuffers {
     pub fn new(dev: Rc<IbDevice>, buf_cnt: usize, buf_size: usize) -> io::Result<Self> {
         Ok(SendBuffers {
-            base:  Buffers::new(dev, buf_cnt, buf_size)?,
-            front: Cell::new(0),
-            tail:  Cell::new(buf_cnt as u64),
+            base:    Buffers::new(dev, buf_cnt, buf_size)?,
+            front:   Cell::new(0),
+            tail:    Cell::new(buf_cnt as u64),
+            waiters: RefCell::new(VecDeque::new()),
         })
     }
     pub fn empty(&self) -> bool {
@@ -98,7 +101,26 @@ impl SendBuffers {
         self.front.set(f + 1);
         Some((f as usize) % self.base.buf_cnt())
     }
-    pub fn push(&self, n: u64) { self.tail.set(self.tail.get() + n); }
+    pub async fn acquire(&self) -> usize {
+        if let Some(idx) = self.try_pop() { return idx; }
+        let (tx, rx) = oneshot::channel();
+        self.waiters.borrow_mut().push_back(tx);
+        rx.await.expect("send_bufs waiter cancelled before push")
+    }
+    pub fn push(&self, n: u64) {
+        self.tail.set(self.tail.get() + n);
+        let mut waiters = self.waiters.borrow_mut();
+        while !waiters.is_empty() {
+            let f = self.front.get();
+            if f >= self.tail.get() { break; }
+            let tx = waiters.pop_front().unwrap();
+            self.front.set(f + 1);
+            let idx = (f as usize) % self.base.buf_cnt();
+            if tx.send(idx).is_err() {
+                self.front.set(f);
+            }
+        }
+    }
     pub fn base(&self) -> &Buffers { &self.base }
 }
 

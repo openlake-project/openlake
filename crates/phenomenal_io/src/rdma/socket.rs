@@ -121,13 +121,13 @@ impl IbSocket {
         }
     }
 
-    pub fn send(
+    pub async fn send(
         &self, mut buf: &[u8], ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
     ) -> io::Result<usize> {
         let mut total = 0;
         let bs = BUF_SIZE;
         while !buf.is_empty() {
-            let Some(idx) = self.send_bufs.try_pop() else { break; };
+            let idx = self.send_bufs.acquire().await;
             let n = buf.len().min(bs);
             unsafe {
                 ptr::copy_nonoverlapping(
