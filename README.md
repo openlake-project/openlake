@@ -20,7 +20,7 @@ Distributed object storage for GPU workloads. Built on Rust on `io_uring`, OpenL
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](rust-toolchain.toml)
-[![Status](https://img.shields.io/badge/status-development-lime.svg)](#project-status)
+[![Discord](https://img.shields.io/badge/community-discord-5865F2?logo=discord&logoColor=white)](https://discord.gg/TNXqVSnP6x)
 [![Web](https://img.shields.io/badge/web-theopenlake.com-1d4ed8.svg)](https://theopenlake.com)
 
 
