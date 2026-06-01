@@ -86,6 +86,10 @@ OpenLake is an object store for AI infrastructure. Training and inference cluste
   aws --endpoint-url http://10.0.0.10:9000 s3 cp ./checkpoint.safetensors s3://demo/
   aws --endpoint-url http://10.0.0.10:9000 s3 ls s3://demo/
   ```
+## Contributing
+
+We welcome and value any contributions and collaborations.
+Please check out [Contributing to OpenLake](https://github.com/openlake-project/openlake/blob/main/CONTRIBUTING.md) for how to get involved.
 
 ## Contact Us
 
