@@ -30,6 +30,16 @@ use super::mlx5dv_sys::{
 };
 use super::wr::{ImmData, ImmType, WrId, WrType};
 
+extern "C" {
+    fn ibv_wc_status_str(status: u32) -> *const std::os::raw::c_char;
+}
+
+fn wc_status_str(status: i32) -> &'static str {
+    unsafe { std::ffi::CStr::from_ptr(ibv_wc_status_str(status as u32)) }
+        .to_str()
+        .unwrap_or("<utf8 invalid>")
+}
+
 const CQ_DEPTH:        i32 = 4096;
 const MAX_SEND_WR:     u32 = 256;
 const SRQ_DEPTH:       u32 = 64;
@@ -162,7 +172,7 @@ impl IbSocket {
         for rx in waiters {
             let status = rx.await.map_err(|_| io::Error::other("pump dropped"))?;
             if status != ibv_wc_status::IBV_WC_SUCCESS as i32 {
-                return Err(io::Error::other(format!("send wc.status={status} kind={kind:?}")));
+                return Err(io::Error::other(format!("send wc.status={status} ({}) kind={kind:?}", wc_status_str(status))));
             }
         }
         Ok(total)
@@ -239,7 +249,7 @@ impl IbSocket {
             }
         }
         let status = rx.await.map_err(|_| io::Error::other("pump dropped"))?;
-        if status != 0 { return Err(io::Error::other(format!("rdma_write wc.status={status}"))); }
+        if status != 0 { return Err(io::Error::other(format!("rdma_write wc.status={status} ({})", wc_status_str(status)))); }
         Ok(())
     }
 
@@ -268,7 +278,7 @@ impl IbSocket {
             }
         }
         let status = rx.await.map_err(|_| io::Error::other("pump dropped"))?;
-        if status != 0 { return Err(io::Error::other(format!("rdma_read wc.status={status}"))); }
+        if status != 0 { return Err(io::Error::other(format!("rdma_read wc.status={status} ({})", wc_status_str(status)))); }
         Ok(())
     }
 
@@ -488,7 +498,7 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
     let status_ok = wc.status == ibv_wc_status::IBV_WC_SUCCESS;
     let wr = WrId(wc.wr_id);
     let imm_set = (wc.wc_flags & ibv_wc_flags::IBV_WC_WITH_IMM.0) != 0;
-    if !status_ok { tracing::error!(wc_status = wc.status as i32, vendor_err = wc.vendor_err, wc_opcode = wc.opcode as i32, wr_id = wc.wr_id, wr_ty = ?wr.ty(), send_kind = ?wr.send_kind(), "nic_cq_err"); }
+    if !status_ok { tracing::error!(wc_status = wc.status as i32, status_str = wc_status_str(wc.status as i32), vendor_err = wc.vendor_err, wc_opcode = wc.opcode as i32, wr_id = wc.wr_id, wr_ty = ?wr.ty(), send_kind = ?wr.send_kind(), "nic_cq_err"); }
     if !status_ok {
         match wr.ty() {
             WrType::Send => {
