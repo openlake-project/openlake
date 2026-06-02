@@ -122,10 +122,17 @@ impl IbSocket {
     }
 
     pub async fn send(
-        &self, mut buf: &[u8], ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
+        &self, buf: &[u8], ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
+    ) -> io::Result<usize> {
+        self.send_kinded(buf, ah, peer_dct_num, peer_dc_key, super::wr::SendKind::Other).await
+    }
+
+    pub async fn send_kinded(
+        &self, mut buf: &[u8], ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64, kind: super::wr::SendKind,
     ) -> io::Result<usize> {
         let mut total = 0;
         let bs = BUF_SIZE;
+        let mut waiters: Vec<oneshot::Receiver<i32>> = Vec::new();
         while !buf.is_empty() {
             let idx = self.send_bufs.acquire().await;
             let n = buf.len().min(bs);
@@ -136,9 +143,27 @@ impl IbSocket {
                     n,
                 );
             }
-            self.post_send(idx as u32, n as u32, ah, peer_dct_num, peer_dc_key)?;
+            let seq    = { let id = self.next_wr_id.get(); self.next_wr_id.set(id + 1); id };
+            let wr_id  = super::wr::WrId::send_with_kind_seq(seq, kind).0;
+            let (tx, rx) = oneshot::channel();
+            self.completion.borrow_mut().insert(wr_id, tx);
+
+            if let Err(e) = self.post_send_with_id(wr_id, idx as u32, n as u32, ah, peer_dct_num, peer_dc_key) {
+                self.completion.borrow_mut().remove(&wr_id);
+                // Best-effort slot reclaim on local post failure.
+                self.send_bufs.push(1);
+                return Err(e);
+            }
+            waiters.push(rx);
             total += n;
             buf = &buf[n..];
+        }
+
+        for rx in waiters {
+            let status = rx.await.map_err(|_| io::Error::other("pump dropped"))?;
+            if status != ibv_wc_status::IBV_WC_SUCCESS as i32 {
+                return Err(io::Error::other(format!("send wc.status={status} kind={kind:?}")));
+            }
         }
         Ok(total)
     }
@@ -250,8 +275,14 @@ impl IbSocket {
     pub(super) fn post_send(
         &self, buf_idx: u32, len: u32, ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
     ) -> io::Result<()> {
-        let signal = 1u32;
-        let wr_id = WrId::send(signal).0;
+        let seq = { let id = self.next_wr_id.get(); self.next_wr_id.set(id + 1); id };
+        let wr_id = super::wr::WrId::send_with_kind_seq(seq, super::wr::SendKind::Other).0;
+        self.post_send_with_id(wr_id, buf_idx, len, ah, peer_dct_num, peer_dc_key)
+    }
+
+    pub(super) fn post_send_with_id(
+        &self, wr_id: u64, buf_idx: u32, len: u32, ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
+    ) -> io::Result<()> {
         unsafe {
             let qpx  = ibv_qp_to_qp_ex(self.dci.as_ptr());
             let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
@@ -433,6 +464,7 @@ async fn run_pump_compio(sock: Rc<IbSocket>, fd: std::os::fd::RawFd, recv_tx: mp
             CompChannelFd(fd),
             compio::driver::op::Interest::Readable,
         );
+        // todo: @arnav pump silently dies on any verbs or poll error, awaiters can hang forever
         if compio::runtime::submit(op).await.0.is_err() { return; }
         unsafe {
             let mut ev_cq: *mut ibv_cq = ptr::null_mut();
@@ -456,11 +488,34 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
     let status_ok = wc.status == ibv_wc_status::IBV_WC_SUCCESS;
     let wr = WrId(wc.wr_id);
     let imm_set = (wc.wc_flags & ibv_wc_flags::IBV_WC_WITH_IMM.0) != 0;
+    if !status_ok { tracing::error!(wc_status = wc.status as i32, vendor_err = wc.vendor_err, wc_opcode = wc.opcode as i32, wr_id = wc.wr_id, wr_ty = ?wr.ty(), send_kind = ?wr.send_kind(), "nic_cq_err"); }
+    if !status_ok {
+        match wr.ty() {
+            WrType::Send => {
+                sock.send_bufs.push(1);
+                if let Some(tx) = sock.completion.borrow_mut().remove(&wc.wr_id) {
+                    let _ = tx.send(wc.status as i32);
+                }
+            }
+            WrType::Recv => {
+                let buf_idx = wr.buf_idx();
+                let _ = sock.post_recv(buf_idx);
+            }
+            _ => {
+                // RDMA_WRITE / RDMA_READ wr_id (bare counter).
+                if let Some(tx) = sock.completion.borrow_mut().remove(&wc.wr_id) {
+                    let _ = tx.send(wc.status as i32);
+                }
+            }
+        }
+        return;
+    }
     match wc.opcode {
         ibv_wc_opcode::IBV_WC_SEND => {
-            if status_ok && wr.ty() == WrType::Send {
-                let n = wr.signal_count() as u64;
-                if n > 0 { sock.send_bufs.push(n); }
+            // Slot reclaim and completion routing for the SUCCESS case.
+            sock.send_bufs.push(1);
+            if let Some(tx) = sock.completion.borrow_mut().remove(&wc.wr_id) {
+                let _ = tx.send(wc.status as i32);
             }
         }
         ibv_wc_opcode::IBV_WC_RDMA_WRITE | ibv_wc_opcode::IBV_WC_RDMA_READ => {
@@ -537,7 +592,7 @@ unsafe fn transition_dci(qp: *mut ibv_qp, dev: &IbDevice, qos: RdmaQos) -> io::R
     a.sq_psn        = 0;
     a.timeout       = QP_TIMEOUT;
     a.retry_cnt     = QP_RETRY_CNT;
-    a.rnr_retry     = 0;
+    a.rnr_retry     = 7;
     a.max_rd_atomic = MAX_RD_ATOMIC;
     let m = ibv_qp_attr_mask::IBV_QP_STATE.0
           | ibv_qp_attr_mask::IBV_QP_SQ_PSN.0

@@ -58,7 +58,7 @@ impl RdmaBackend {
             payload: RdmaRequest::Generic(payload),
         };
         let body = encode(&env)?;
-        if let Err(e) = self.node.sock.send(&body, ah, peer.dct_num, peer.dc_key).await {
+        if let Err(e) = self.node.sock.send_kinded(&body, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::Unary).await {
             self.node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
@@ -107,7 +107,7 @@ impl RdmaBackend {
             },
         };
         let body = encode(&env)?;
-        if let Err(e) = node.sock.send(&body, ah, peer.dct_num, peer.dc_key).await {
+        if let Err(e) = node.sock.send_kinded(&body, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::ChunkReadReq).await {
             node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
@@ -185,7 +185,7 @@ impl RdmaBackend {
             },
         };
         let body = encode(&env)?;
-        if let Err(e) = node.sock.send(&body, ah, peer.dct_num, peer.dc_key).await {
+        if let Err(e) = node.sock.send_kinded(&body, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::ChunkWriteReq).await {
             node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
