@@ -11,7 +11,7 @@
 The shortest path from NVMe to GPU memory.
 </h3>
 
-Distributed object storage for GPU workloads. Built on Rust on `io_uring`, OpenLake beats state of the art storage systems and delivers 6x higher throughput and million+ iops within 1ms.
+Distributed object storage for GPU workloads. Built on Rust on `io_uring`, OpenLake beats state of the art and delivers 6x higher throughput and million+ iops within 1ms.
 
 
 [Discord](https://discord.gg/TNXqVSnP6x)&nbsp;·&nbsp;[Website](https://theopenlake.com)&nbsp;·&nbsp;[Comparison](https://theopenlake.com/compare.html)&nbsp;·&nbsp;[Architecture](#architecture)&nbsp;·&nbsp;[Quickstart](#quickstart)
