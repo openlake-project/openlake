@@ -8,7 +8,7 @@ mod node;
 mod rdma_buf;
 mod socket;
 pub mod wire;
-mod wr;
+pub mod wr;
 
 pub use ah_cache::AhCache;
 pub use bootstrap::{ClusterRoutingTable, LocalEndpoint};

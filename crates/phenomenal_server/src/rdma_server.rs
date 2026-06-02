@@ -87,7 +87,7 @@ async fn handle(
                 Ok(b)  => b,
                 Err(e) => { tracing::warn!("rdma_server: encode response: {e}"); return; }
             };
-            if let Err(e) = node.sock.send(&body, sender_ah, sender.dct_num, sender.dc_key).await {
+            if let Err(e) = node.sock.send_kinded(&body, sender_ah, sender.dct_num, sender.dc_key, phenomenal_io::rdma::wr::SendKind::Response).await {
                 tracing::warn!("rdma_server: send response: {e}");
             }
         }
