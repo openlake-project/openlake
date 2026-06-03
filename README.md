@@ -11,7 +11,7 @@
 The shortest path from NVMe to GPU memory.
 </h3>
 
-Distributed object storage for GPU workloads. Built on Rust on `io_uring`, OpenLake beats state of the art storage systems and delivers 6x higher throughput and million+ iops within 1ms.
+Distributed object storage for GPU workloads. Built on Rust on `io_uring`, OpenLake is a state of the art storage engine delivering 6x higher throughput and million+ iops within 1ms.
 
 
 [Discord](https://discord.gg/TNXqVSnP6x)&nbsp;·&nbsp;[Website](https://theopenlake.com)&nbsp;·&nbsp;[Comparison](https://theopenlake.com/compare.html)&nbsp;·&nbsp;[Architecture](#architecture)&nbsp;·&nbsp;[Quickstart](#quickstart)
@@ -37,7 +37,7 @@ OpenLake is an object store for AI infrastructure. Training and inference cluste
 - **`io_uring`, thread per core.** Built on the [`compio`](https://github.com/compio-rs/compio) completion based runtime. One runtime per core, pinned, no work stealing. The HTTP frontend and the storage engine run on the *same* thread, so a request never crosses a core boundary on the hot path.
  - **No kernel involvement.** GPUDirect Storage and RDMA, data moves from peer NIC into GPU VRAM zerocopy, eliminating host memory and the page cache. see [Architecture](https://github.com/openlake-project/openlake#quickstart).
  - **Erasure coded.** SIMD Reed Solomon across striped EC. Reduced storage cost for replication, high throughput without the CPU cost of conventional EC.
- - **PacedRDMA.** Novel congestion control algorithm for high throughput RDMA. Credit based memory management to absorb request bursts, minimizing tail latencies.
+ - **PacedRDMA.** Novel congestion control algorithm for high throughput RDMA. Credit based memory management to absorb request bursts, minimizing tail latencies. (Supporting S3 over RDMA)
  <br>
 
   <p align="center">
@@ -67,15 +67,15 @@ OpenLake is an object store for AI infrastructure. Training and inference cluste
 
   ### Benchmark
 
-  The `phenomenal` CLI drives a `LocalFsBackend` directly for diagnostics and microbenchmarks. Not an S3 client, but the quickest way to confirm the build works and see local throughput.
+  The `openlake` CLI drives a `LocalFsBackend` directly for diagnostics and microbenchmarks. Not an S3 client, but the quickest way to confirm the build works and see local throughput.
 
   ```sh
-  ./target/release/phenomenal bench --n 100000 --size 4096 --concurrency 64
+  ./target/release/openlake bench --n 100000 --size 4096 --concurrency 64
   ```
 
   ### Start Cluster
 
-  Write one TOML file per node. The full schema lives at the top of [`crates/phenomenal_server/src/config.rs`](crates/phenomenal_server/src/config.rs).
+  Write one TOML file per node. The full schema lives at the top of [`crates/openlake_server/src/config.rs`](crates/openlake_server/src/config.rs).
 
   Start `openlaked` on each host with its own config, then talk to the cluster with any S3 client.
 
