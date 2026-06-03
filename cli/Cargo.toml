@@ -10,13 +10,13 @@ name = "openlake"
 path = "src/main.rs"
 
 [dependencies]
-openlake_io      = { path = "../openlake_io" }
-openlake_storage = { path = "../openlake_storage" }
+openlake_io      = { path = "../crates/openlake_io" }
+openlake_storage = { path = "../crates/openlake_storage" }
 
-compio             = { workspace = true }
-futures-util       = { workspace = true }
-bytes              = { workspace = true }
 clap               = { workspace = true }
 anyhow             = { workspace = true }
+compio             = { workspace = true }
 tracing-subscriber = { workspace = true }
-uuid               = { version = "1", features = ["v4"] }
+serde              = { workspace = true }
+toml               = { workspace = true }
+futures-util       = { workspace = true }

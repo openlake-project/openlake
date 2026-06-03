@@ -2038,14 +2038,14 @@ name = "openlake_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "clap",
  "compio",
  "futures-util",
  "openlake_io",
  "openlake_storage",
+ "serde",
+ "toml",
  "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
