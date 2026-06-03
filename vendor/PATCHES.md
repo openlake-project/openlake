@@ -13,7 +13,7 @@ ALPN. When `rpc_tls` is absent we connect over plaintext `http://`, where there
 is no ALPN, so the client would otherwise default to HTTP/1.1. `http2_prior_knowledge`
 makes cyper send the HTTP/2 connection preface immediately (h2c). Paired with the
 server serving h2c. Consumed by `PeerClient::new` in
-`crates/phenomenal_io/src/remote_fs.rs` (the `None` arm).
+`crates/openlake_io/src/remote_fs.rs` (the `None` arm).
 
 **Touched:** `vendor/cyper/src/client.rs` (`pub fn http2_prior_knowledge`).
 
