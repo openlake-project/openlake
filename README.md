@@ -67,15 +67,15 @@ OpenLake is an object store for AI infrastructure. Training and inference cluste
 
   ### Benchmark
 
-  The `phenomenal` CLI drives a `LocalFsBackend` directly for diagnostics and microbenchmarks. Not an S3 client, but the quickest way to confirm the build works and see local throughput.
+  The `openlake` CLI drives a `LocalFsBackend` directly for diagnostics and microbenchmarks. Not an S3 client, but the quickest way to confirm the build works and see local throughput.
 
   ```sh
-  ./target/release/phenomenal bench --n 100000 --size 4096 --concurrency 64
+  ./target/release/openlake bench --n 100000 --size 4096 --concurrency 64
   ```
 
   ### Start Cluster
 
-  Write one TOML file per node. The full schema lives at the top of [`crates/phenomenal_server/src/config.rs`](crates/phenomenal_server/src/config.rs).
+  Write one TOML file per node. The full schema lives at the top of [`crates/openlake_server/src/config.rs`](crates/openlake_server/src/config.rs).
 
   Start `openlaked` on each host with its own config, then talk to the cluster with any S3 client.
 
