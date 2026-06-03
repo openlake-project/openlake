@@ -1,0 +1,22 @@
+[package]
+name                   = "openlake_cli"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+[[bin]]
+name = "openlake"
+path = "src/main.rs"
+
+[dependencies]
+openlake_io      = { path = "../openlake_io" }
+openlake_storage = { path = "../openlake_storage" }
+
+compio             = { workspace = true }
+futures-util       = { workspace = true }
+bytes              = { workspace = true }
+clap               = { workspace = true }
+anyhow             = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid               = { version = "1", features = ["v4"] }
