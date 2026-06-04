@@ -20,27 +20,32 @@ use std::time::{Duration, Instant};
 use openlake_io::{IoResult, LockPeer};
 
 /// Validity window for a held entry. MinIO's `lockValidityDuration`.
-pub const DEFAULT_VALIDITY:       Duration = Duration::from_secs(60);
+pub const DEFAULT_VALIDITY: Duration = Duration::from_secs(60);
 /// Background sweep cadence. MinIO's `lockMaintenanceInterval`.
 pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
 struct LockEntry {
-    uid:          String,
+    uid: String,
     last_refresh: Instant,
 }
 
 /// Per-node lock state. Wrap in an `Arc` and share across runtimes.
 pub struct LockServer {
-    locks:    Mutex<HashMap<String, LockEntry>>,
+    locks: Mutex<HashMap<String, LockEntry>>,
     validity: Duration,
 }
 
 impl LockServer {
-    pub fn new() -> Self { Self::with_validity(DEFAULT_VALIDITY) }
+    pub fn new() -> Self {
+        Self::with_validity(DEFAULT_VALIDITY)
+    }
 
     pub fn with_validity(validity: Duration) -> Self {
-        Self { locks: Mutex::new(HashMap::new()), validity }
+        Self {
+            locks: Mutex::new(HashMap::new()),
+            validity,
+        }
     }
 
     /// Grant if free or existing entry is past validity. `_ttl_ms` is
@@ -51,7 +56,13 @@ impl LockServer {
         match map.get(resource) {
             Some(e) if now.saturating_duration_since(e.last_refresh) < self.validity => false,
             _ => {
-                map.insert(resource.to_owned(), LockEntry { uid: uid.to_owned(), last_refresh: now });
+                map.insert(
+                    resource.to_owned(),
+                    LockEntry {
+                        uid: uid.to_owned(),
+                        last_refresh: now,
+                    },
+                );
                 true
             }
         }
@@ -61,7 +72,10 @@ impl LockServer {
     pub fn refresh(&self, resource: &str, uid: &str) -> bool {
         let mut map = self.locks.lock().expect("lock map poisoned");
         match map.get_mut(resource) {
-            Some(e) if e.uid == uid => { e.last_refresh = Instant::now(); true }
+            Some(e) if e.uid == uid => {
+                e.last_refresh = Instant::now();
+                true
+            }
             _ => false,
         }
     }
@@ -85,11 +99,15 @@ impl LockServer {
     }
 
     #[cfg(test)]
-    pub(crate) fn len(&self) -> usize { self.locks.lock().unwrap().len() }
+    pub(crate) fn len(&self) -> usize {
+        self.locks.lock().unwrap().len()
+    }
 }
 
 impl Default for LockServer {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Sweeper loop. Spawn once per process. Cancel by dropping the task.
@@ -109,13 +127,17 @@ pub struct LocalLockPeer {
 }
 
 impl LocalLockPeer {
-    pub fn new(server: Arc<LockServer>) -> Self { Self { inner: server } }
+    pub fn new(server: Arc<LockServer>) -> Self {
+        Self { inner: server }
+    }
 }
 
 #[async_trait::async_trait(?Send)]
 impl LockPeer for LocalLockPeer {
     async fn lock_acquire(&self, resource: &str, uid: &str, ttl_ms: u32) -> IoResult<bool> {
-        Ok(self.inner.acquire(resource, uid, Duration::from_millis(ttl_ms as u64)))
+        Ok(self
+            .inner
+            .acquire(resource, uid, Duration::from_millis(ttl_ms as u64)))
     }
     async fn lock_release(&self, resource: &str, uid: &str) -> IoResult<()> {
         self.inner.release(resource, uid);
@@ -140,7 +162,7 @@ mod tests {
     #[test]
     fn acquire_grants_when_free_and_denies_when_held() {
         let s = LockServer::new();
-        assert!( s.acquire("k", "u1", NO_TTL));
+        assert!(s.acquire("k", "u1", NO_TTL));
         assert!(!s.acquire("k", "u2", NO_TTL));
     }
 
@@ -148,10 +170,10 @@ mod tests {
     fn release_only_drops_matching_uid() {
         let s = LockServer::new();
         assert!(s.acquire("k", "u1", NO_TTL));
-        s.release("k", "u2");                       // wrong uid, no effect
+        s.release("k", "u2"); // wrong uid, no effect
         assert!(!s.acquire("k", "u3", NO_TTL));
-        s.release("k", "u1");                       // correct uid, drops
-        assert!( s.acquire("k", "u3", NO_TTL));
+        s.release("k", "u1"); // correct uid, drops
+        assert!(s.acquire("k", "u3", NO_TTL));
     }
 
     #[test]
@@ -202,7 +224,7 @@ mod tests {
         let s = LockServer::new();
         assert!(s.acquire("k", "u1", NO_TTL));
         assert!(!s.refresh("k", "u2"));
-        assert!( s.refresh("k", "u1"));
+        assert!(s.refresh("k", "u1"));
     }
 
     #[test]

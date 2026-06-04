@@ -13,7 +13,7 @@ pub enum Cmd {
 
 pub async fn dispatch(cmd: Cmd) -> Result<()> {
     match cmd {
-    Cmd::Cluster(a) => cluster::run(a).await,
-    Cmd::Disk(a) => disk::run(a).await,
+        Cmd::Cluster(a) => cluster::run(a).await,
+        Cmd::Disk(a) => disk::run(a).await,
     }
 }

@@ -31,11 +31,11 @@
 
 mod auth;
 mod config;
-mod s3;
 mod lock_server;
-mod rpc_server;
 #[cfg(all(feature = "rdma", target_os = "linux"))]
 mod rdma_server;
+mod rpc_server;
+mod s3;
 mod tls_material;
 
 use std::path::PathBuf;
@@ -49,8 +49,8 @@ use clap::Parser;
 
 use compio::tls::TlsAcceptor;
 use openlake_io::{LocalFsBackend, LockPeer, PeerClient, RemoteBackend, StorageBackend};
-use rustls::ClientConfig;
 use openlake_storage::{bootstrap_format, ClusterConfig, DiskAddr, DsyncClient, Engine};
+use rustls::ClientConfig;
 use uuid::Uuid;
 
 use crate::lock_server::{LocalLockPeer, LockServer};
@@ -111,29 +111,34 @@ fn main() -> anyhow::Result<()> {
 
     let bootstrap_id: Arc<OnceLock<Uuid>> = Arc::new(OnceLock::new());
 
-    let endpoint_registry: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>> =
-        Arc::new(std::sync::Mutex::new(openlake_io::rpc::RdmaEndpointsReply {
-            complete:  num_runtimes == 0,
+    let endpoint_registry: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>> = Arc::new(
+        std::sync::Mutex::new(openlake_io::rpc::RdmaEndpointsReply {
+            complete: num_runtimes == 0,
             endpoints: Vec::with_capacity(num_runtimes),
-        }));
+        }),
+    );
 
     let mut handles = Vec::with_capacity(num_runtimes);
     for (runtime_id, cpu) in cpus.into_iter().enumerate() {
-        let cfg              = cfg.clone();
-        let done_tx          = done_tx.clone();
-        let lock_server      = lock_server.clone();
-        let tls              = tls.clone();
-        let bootstrap_id     = bootstrap_id.clone();
+        let cfg = cfg.clone();
+        let done_tx = done_tx.clone();
+        let lock_server = lock_server.clone();
+        let tls = tls.clone();
+        let bootstrap_id = bootstrap_id.clone();
         let endpoint_registry = endpoint_registry.clone();
-        let handle           = thread::Builder::new()
+        let handle = thread::Builder::new()
             .name(format!("runtime-{runtime_id}"))
             .spawn(move || {
                 let result = (|| -> anyhow::Result<()> {
                     bind_cpu(cpu)?;
                     let rt = create_runtime()?;
                     rt.block_on(run_runtime(
-                        runtime_id, num_runtimes,
-                        cfg, lock_server, tls, bootstrap_id,
+                        runtime_id,
+                        num_runtimes,
+                        cfg,
+                        lock_server,
+                        tls,
+                        bootstrap_id,
                         endpoint_registry,
                     ))
                 })();
@@ -149,8 +154,8 @@ fn main() -> anyhow::Result<()> {
 
     while let Ok((runtime_id, result)) = done_rx.recv() {
         match result {
-            Ok(())   => tracing::info!(runtime_id, "runtime exited cleanly"),
-            Err(e)   => tracing::error!(runtime_id, "runtime exited: {e:#}"),
+            Ok(()) => tracing::info!(runtime_id, "runtime exited cleanly"),
+            Err(e) => tracing::error!(runtime_id, "runtime exited: {e:#}"),
         }
     }
     for h in handles {
@@ -177,8 +182,7 @@ fn physical_cores() -> anyhow::Result<Vec<usize>> {
     use hwlocality::object::types::ObjectType;
     use hwlocality::Topology;
 
-    let topology = Topology::new()
-        .map_err(|e| anyhow::anyhow!("hwloc topology init: {e}"))?;
+    let topology = Topology::new().map_err(|e| anyhow::anyhow!("hwloc topology init: {e}"))?;
 
     let mut cpus: Vec<usize> = Vec::new();
     for core in topology.objects_with_type(ObjectType::Core) {
@@ -213,8 +217,7 @@ fn bind_cpu(cpu: usize) -> anyhow::Result<()> {
         use nix::unistd::Pid;
         let mut cpuset = CpuSet::new();
         cpuset.set(cpu).context("cpu id out of range for CpuSet")?;
-        sched_setaffinity(Pid::from_raw(0), &cpuset)
-            .context("sched_setaffinity failed")?;
+        sched_setaffinity(Pid::from_raw(0), &cpuset).context("sched_setaffinity failed")?;
         tracing::info!(cpu, "thread pinned to cpu");
     }
     #[cfg(not(target_os = "linux"))]
@@ -264,13 +267,16 @@ fn create_runtime() -> anyhow::Result<compio::runtime::Runtime> {
 /// Returns only when both accept loops exit (normally: never, until
 /// shutdown).
 async fn run_runtime(
-    runtime_id:        usize,
-    #[cfg_attr(not(all(feature = "rdma", target_os = "linux")), allow(unused_variables))]
-    num_runtimes:      usize,
-    cfg:               Arc<config::Config>,
-    lock_server:       Arc<LockServer>,
-    tls:               TlsMaterial,
-    bootstrap_id:      Arc<OnceLock<Uuid>>,
+    runtime_id: usize,
+    #[cfg_attr(
+        not(all(feature = "rdma", target_os = "linux")),
+        allow(unused_variables)
+    )]
+    num_runtimes: usize,
+    cfg: Arc<config::Config>,
+    lock_server: Arc<LockServer>,
+    tls: TlsMaterial,
+    bootstrap_id: Arc<OnceLock<Uuid>>,
     endpoint_registry: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
 ) -> anyhow::Result<()> {
     // Extract the three TLS handles from the shared material.
@@ -283,9 +289,9 @@ async fn run_runtime(
     // RPC connector is a bare `Arc<ClientConfig>` because cyper takes
     // it directly via `ClientBuilder::use_rustls(Arc<ClientConfig>)`.
     // No further wrapping is needed — clone the `Arc` per peer.
-    let s3_acceptor:   Option<Rc<TlsAcceptor>>     = tls.s3_acceptor()  .map(Rc::new);
-    let rpc_acceptor:  Option<Rc<TlsAcceptor>>     = tls.rpc_acceptor() .map(Rc::new);
-    let rpc_connector: Option<Arc<ClientConfig>>   = tls.rpc_connector();
+    let s3_acceptor: Option<Rc<TlsAcceptor>> = tls.s3_acceptor().map(Rc::new);
+    let rpc_acceptor: Option<Rc<TlsAcceptor>> = tls.rpc_acceptor().map(Rc::new);
+    let rpc_connector: Option<Arc<ClientConfig>> = tls.rpc_connector();
 
     // Each runtime opens its own handle to every local disk. The
     // underlying filesystems are shared across the OS, the kernel
@@ -296,18 +302,22 @@ async fn run_runtime(
     // `local_disks[i]` is the backend for `disk_idx = i` on this
     // node. Order matches `cfg.data_dirs`, which on the wire is the
     // disk_idx the cluster topology and other peers reference.
-    let self_node = cfg.nodes.iter().find(|n| n.id == cfg.self_id)
+    let self_node = cfg
+        .nodes
+        .iter()
+        .find(|n| n.id == cfg.self_id)
         .expect("config validation guarantees self_id is in nodes");
-    let local_fs_disks: Vec<Rc<LocalFsBackend>> = cfg.data_dirs.iter()
+    let local_fs_disks: Vec<Rc<LocalFsBackend>> = cfg
+        .data_dirs
+        .iter()
         .enumerate()
         .map(|(i, dir)| -> anyhow::Result<Rc<LocalFsBackend>> {
-            Ok(Rc::new(
-                LocalFsBackend::new(dir)
-                    .with_context(|| format!(
-                        "runtime {runtime_id}: init local disk {i} at {}",
-                        dir.display()
-                    ))?,
-            ))
+            Ok(Rc::new(LocalFsBackend::new(dir).with_context(|| {
+                format!(
+                    "runtime {runtime_id}: init local disk {i} at {}",
+                    dir.display()
+                )
+            })?))
         })
         .collect::<anyhow::Result<_>>()?;
     let local_disks: Vec<Rc<dyn StorageBackend>> = local_fs_disks
@@ -323,20 +333,28 @@ async fn run_runtime(
     // peer lists by `set_node_ids`. Per-peer `PeerClient` is shared
     // across every `RemoteBackend` targeting the same peer so they
     // ride a single multiplexed h2 connection.
-    let mut backends:   std::collections::HashMap<DiskAddr, Rc<dyn StorageBackend>> =
-        std::collections::HashMap::with_capacity(cfg.nodes.iter().map(|n| n.disk_count as usize).sum());
-    let mut lock_peer_by_node: std::collections::HashMap<openlake_storage::cluster::NodeId, Rc<dyn LockPeer>> =
-        std::collections::HashMap::with_capacity(cfg.nodes.len());
-    let local_lock_peer: Rc<dyn LockPeer> =
-        Rc::new(LocalLockPeer::new(lock_server.clone()));
+    let mut backends: std::collections::HashMap<DiskAddr, Rc<dyn StorageBackend>> =
+        std::collections::HashMap::with_capacity(
+            cfg.nodes.iter().map(|n| n.disk_count as usize).sum(),
+        );
+    let mut lock_peer_by_node: std::collections::HashMap<
+        openlake_storage::cluster::NodeId,
+        Rc<dyn LockPeer>,
+    > = std::collections::HashMap::with_capacity(cfg.nodes.len());
+    let local_lock_peer: Rc<dyn LockPeer> = Rc::new(LocalLockPeer::new(lock_server.clone()));
 
-    let mut peer_clients: std::collections::HashMap<openlake_storage::cluster::NodeId, Rc<PeerClient>> =
-        std::collections::HashMap::with_capacity(cfg.nodes.len().saturating_sub(1));
+    let mut peer_clients: std::collections::HashMap<
+        openlake_storage::cluster::NodeId,
+        Rc<PeerClient>,
+    > = std::collections::HashMap::with_capacity(cfg.nodes.len().saturating_sub(1));
     for n in &cfg.nodes {
         if n.id == cfg.self_id {
             for (idx, disk_be) in local_disks.iter().enumerate() {
                 backends.insert(
-                    DiskAddr { node_id: n.id, disk_idx: idx as u16 },
+                    DiskAddr {
+                        node_id: n.id,
+                        disk_idx: idx as u16,
+                    },
                     disk_be.clone(),
                 );
             }
@@ -362,19 +380,18 @@ async fn run_runtime(
                 {
                     let mut reg = endpoint_registry.lock().unwrap();
                     reg.endpoints.push(my_endpoint);
-                    if reg.endpoints.len() >= num_runtimes { reg.complete = true; }
+                    if reg.endpoints.len() >= num_runtimes {
+                        reg.complete = true;
+                    }
                 }
                 Some((setup, rdma_cfg))
             }
             config::TransportMode::H2 => None,
         };
 
-    let auth_state = Rc::new(auth::AuthState::new(
-        cfg.region.clone(),
-        &cfg.credentials,
-    ));
+    let auth_state = Rc::new(auth::AuthState::new(cfg.region.clone(), &cfg.credentials));
 
-    let s3_listener  = s3::listener::bind_reuseport(cfg.s3_addr)
+    let s3_listener = s3::listener::bind_reuseport(cfg.s3_addr)
         .with_context(|| format!("runtime {runtime_id}: bind s3 on {}", cfg.s3_addr))?;
     let rpc_listener = rpc_server::bind_reuseport(cfg.rpc_addr)
         .with_context(|| format!("runtime {runtime_id}: bind rpc on {}", cfg.rpc_addr))?;
@@ -388,71 +405,93 @@ async fn run_runtime(
             crate::lock_server::run_sweeper(
                 sweep_target,
                 crate::lock_server::DEFAULT_SWEEP_INTERVAL,
-            ).await;
-        }).detach();
+            )
+            .await;
+        })
+        .detach();
     }
 
-    let rpc_disks      = Rc::new(local_disks.clone());
-    let rpc_locks      = lock_server.clone();
+    let rpc_disks = Rc::new(local_disks.clone());
+    let rpc_locks = lock_server.clone();
     let rpc_acceptor_t = rpc_acceptor.clone();
-    let rpc_endpoints  = endpoint_registry.clone();
+    let rpc_endpoints = endpoint_registry.clone();
     let rpc_task = compio::runtime::spawn(async move {
-        if let Err(e) = rpc_server::serve(rpc_listener, rpc_disks, rpc_locks, rpc_acceptor_t, rpc_endpoints).await {
+        if let Err(e) = rpc_server::serve(
+            rpc_listener,
+            rpc_disks,
+            rpc_locks,
+            rpc_acceptor_t,
+            rpc_endpoints,
+        )
+        .await
+        {
             tracing::error!(runtime_id, "rpc serve error: {e:#}");
         }
     });
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
-    let rdma_node: Option<Rc<openlake_io::rdma::RdmaNode>> = if let Some((setup, rdma_cfg)) = rdma_pending {
-        let mut routing = openlake_io::rdma::ClusterRoutingTable::new(cfg.self_id);
-        loop {
-            let reg = endpoint_registry.lock().unwrap();
-            if reg.complete {
-                for ep in reg.endpoints.iter() {
-                    routing.insert(cfg.self_id, ep);
-                }
-                break;
-            }
-            drop(reg);
-            compio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let mut remaining: std::collections::HashSet<openlake_storage::cluster::NodeId> =
-            peer_clients.keys().copied().collect();
-        while !remaining.is_empty() {
-            for peer_id in remaining.clone() {
-                let peer = peer_clients.get(&peer_id).expect("peer_id present");
-                let rb = RemoteBackend::new(peer.clone(), 0);
-                match rb.get_rdma_endpoints().await {
-                    Ok(reply) if reply.complete => {
-                        for ep in &reply.endpoints {
-                            routing.insert(peer_id, ep);
-                        }
-                        remaining.remove(&peer_id);
+    let rdma_node: Option<Rc<openlake_io::rdma::RdmaNode>> =
+        if let Some((setup, rdma_cfg)) = rdma_pending {
+            let mut routing = openlake_io::rdma::ClusterRoutingTable::new(cfg.self_id);
+            loop {
+                let reg = endpoint_registry.lock().unwrap();
+                if reg.complete {
+                    for ep in reg.endpoints.iter() {
+                        routing.insert(cfg.self_id, ep);
                     }
-                    Ok(_) => {}
-                    Err(_) => {}
+                    break;
+                }
+                drop(reg);
+                compio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let mut remaining: std::collections::HashSet<openlake_storage::cluster::NodeId> =
+                peer_clients.keys().copied().collect();
+            while !remaining.is_empty() {
+                for peer_id in remaining.clone() {
+                    let peer = peer_clients.get(&peer_id).expect("peer_id present");
+                    let rb = RemoteBackend::new(peer.clone(), 0);
+                    match rb.get_rdma_endpoints().await {
+                        Ok(reply) if reply.complete => {
+                            for ep in &reply.endpoints {
+                                routing.insert(peer_id, ep);
+                            }
+                            remaining.remove(&peer_id);
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+                if !remaining.is_empty() {
+                    compio::time::sleep(Duration::from_millis(200)).await;
                 }
             }
-            if !remaining.is_empty() {
-                compio::time::sleep(Duration::from_millis(200)).await;
-            }
-        }
-        let routing = Arc::new(routing);
-        tracing::info!(runtime_id, entries = routing.len(), "rdma routing table populated");
-        Some(Rc::new(openlake_io::rdma::RdmaNode::finalize(&rdma_cfg, setup, routing)))
-    } else {
-        None
-    };
+            let routing = Arc::new(routing);
+            tracing::info!(
+                runtime_id,
+                entries = routing.len(),
+                "rdma routing table populated"
+            );
+            Some(Rc::new(openlake_io::rdma::RdmaNode::finalize(
+                &rdma_cfg, setup, routing,
+            )))
+        } else {
+            None
+        };
 
     for n in &cfg.nodes {
-        if n.id == cfg.self_id { continue; }
+        if n.id == cfg.self_id {
+            continue;
+        }
         let peer = peer_clients.get(&n.id).expect("peer_id present").clone();
         match cfg.transport {
             config::TransportMode::H2 => {
                 for disk_idx in 0..n.disk_count {
                     let rb = Rc::new(RemoteBackend::new(peer.clone(), disk_idx));
                     backends.insert(
-                        DiskAddr { node_id: n.id, disk_idx },
+                        DiskAddr {
+                            node_id: n.id,
+                            disk_idx,
+                        },
                         rb as Rc<dyn StorageBackend>,
                     );
                 }
@@ -464,10 +503,16 @@ async fn run_runtime(
                     let rpc_backend: Rc<dyn StorageBackend> =
                         Rc::new(RemoteBackend::new(peer.clone(), disk_idx));
                     let rb = Rc::new(openlake_io::rdma_backend::RdmaBackend::new(
-                        node.clone(), n.id, disk_idx, rpc_backend,
+                        node.clone(),
+                        n.id,
+                        disk_idx,
+                        rpc_backend,
                     ));
                     backends.insert(
-                        DiskAddr { node_id: n.id, disk_idx },
+                        DiskAddr {
+                            node_id: n.id,
+                            disk_idx,
+                        },
                         rb as Rc<dyn StorageBackend>,
                     );
                 }
@@ -482,13 +527,14 @@ async fn run_runtime(
     #[cfg(all(feature = "rdma", target_os = "linux"))]
     let _rdma_task = match (cfg.transport, rdma_node.as_ref()) {
         (config::TransportMode::Rdma, Some(node)) => {
-            let node        = node.clone();
-            let disks       = Rc::new(local_disks.clone());
+            let node = node.clone();
+            let disks = Rc::new(local_disks.clone());
             let local_disks = Rc::new(local_fs_disks.clone());
-            let locks       = lock_server.clone();
-            let endpoints   = endpoint_registry.clone();
+            let locks = lock_server.clone();
+            let endpoints = endpoint_registry.clone();
             Some(compio::runtime::spawn(async move {
-                if let Err(e) = rdma_server::serve(node, disks, local_disks, locks, endpoints).await {
+                if let Err(e) = rdma_server::serve(node, disks, local_disks, locks, endpoints).await
+                {
                     tracing::error!(runtime_id, "rdma serve error: {e:#}");
                 }
             }))
@@ -497,15 +543,18 @@ async fn run_runtime(
     };
 
     let deployment_id: Uuid = if runtime_id == 0 {
-        let mut local_b   : Vec<Rc<dyn StorageBackend>> = Vec::new();
-        let mut local_off : Vec<u32>                    = Vec::new();
-        let mut peer_b    : Vec<Rc<dyn StorageBackend>> = Vec::new();
-        let mut peer_off  : Vec<u32>                    = Vec::new();
-        let mut flat_idx  : u32                         = 0;
+        let mut local_b: Vec<Rc<dyn StorageBackend>> = Vec::new();
+        let mut local_off: Vec<u32> = Vec::new();
+        let mut peer_b: Vec<Rc<dyn StorageBackend>> = Vec::new();
+        let mut peer_off: Vec<u32> = Vec::new();
+        let mut flat_idx: u32 = 0;
         for n in &cfg.nodes {
             for d in 0..n.disk_count {
                 flat_idx += 1; // 1-based per FormatJson contract
-                let addr = DiskAddr { node_id: n.id, disk_idx: d };
+                let addr = DiskAddr {
+                    node_id: n.id,
+                    disk_idx: d,
+                };
                 let be = backends.get(&addr).expect("backend for every disk").clone();
                 if n.id == cfg.self_id {
                     local_b.push(be);
@@ -519,25 +568,35 @@ async fn run_runtime(
         let mut node_ids: Vec<u16> = cfg.nodes.iter().map(|n| n.id).collect();
         node_ids.sort_unstable();
         let id = bootstrap_format(
-            &local_b, &peer_b, &local_off, &peer_off,
-            cfg.self_id, &node_ids, cfg.set_drive_count,
-            Duration::from_secs(1),    
-            Duration::from_secs(300), 
-        ).await
-            .with_context(|| format!("runtime {runtime_id}: cluster format bootstrap"))?;
-        bootstrap_id.set(id).expect("only runtime 0 sets bootstrap_id");
+            &local_b,
+            &peer_b,
+            &local_off,
+            &peer_off,
+            cfg.self_id,
+            &node_ids,
+            cfg.set_drive_count,
+            Duration::from_secs(1),
+            Duration::from_secs(300),
+        )
+        .await
+        .with_context(|| format!("runtime {runtime_id}: cluster format bootstrap"))?;
+        bootstrap_id
+            .set(id)
+            .expect("only runtime 0 sets bootstrap_id");
         tracing::info!(deployment_id = %id, "cluster bootstrap complete");
         id
     } else {
         loop {
-            if let Some(&id) = bootstrap_id.get() { break id; }
+            if let Some(&id) = bootstrap_id.get() {
+                break id;
+            }
             compio::time::sleep(Duration::from_millis(50)).await;
         }
     };
 
     let cluster = ClusterConfig {
-        nodes:                cfg.nodes.clone(),
-        set_drive_count:      cfg.set_drive_count,
+        nodes: cfg.nodes.clone(),
+        set_drive_count: cfg.set_drive_count,
         default_parity_count: cfg.default_parity_count,
         deployment_id,
     };
@@ -551,18 +610,22 @@ async fn run_runtime(
     let mut dsync_by_set: Vec<Rc<DsyncClient>> = Vec::with_capacity(num_sets);
     for set_idx in 0..num_sets {
         let node_ids = cluster.set_node_ids(set_idx);
-        let peers: Vec<Rc<dyn LockPeer>> = node_ids.iter()
-            .map(|id| lock_peer_by_node.get(id)
-                .expect("every NodeId in set_node_ids must have a LockPeer")
-                .clone())
+        let peers: Vec<Rc<dyn LockPeer>> = node_ids
+            .iter()
+            .map(|id| {
+                lock_peer_by_node
+                    .get(id)
+                    .expect("every NodeId in set_node_ids must have a LockPeer")
+                    .clone()
+            })
             .collect();
         dsync_by_set.push(Rc::new(DsyncClient::new(peers)));
     }
     let engine = Rc::new(Engine::new(cluster, backends, dsync_by_set, cfg.self_id));
 
-    let s3_engine     = engine.clone();
-    let s3_auth       = auth_state.clone();
-    let s3_acceptor   = s3_acceptor.clone();
+    let s3_engine = engine.clone();
+    let s3_auth = auth_state.clone();
+    let s3_acceptor = s3_acceptor.clone();
     let s3_task = compio::runtime::spawn(async move {
         let app_state = s3::state::AppState::new(s3_engine, s3_auth);
         let _ = s3::app::serve(s3_listener, app_state, s3_acceptor).await;
@@ -579,8 +642,8 @@ fn build_rdma_config(t: &config::RdmaToml, runtime_id: u16) -> openlake_io::rdma
     openlake_io::rdma::RdmaConfig {
         self_node_id: t.self_node_id,
         runtime_id,
-        dev_name:     t.dev_name.clone(),
-        dc_key:       t.dc_key,
+        dev_name: t.dev_name.clone(),
+        dc_key: t.dc_key,
         qos: openlake_io::rdma::RdmaQos {
             traffic_class: t.qos.traffic_class,
             service_level: t.qos.service_level,
@@ -589,4 +652,3 @@ fn build_rdma_config(t: &config::RdmaToml, runtime_id: u16) -> openlake_io::rdma
         bulk_pool_cap: t.bulk_pool_cap,
     }
 }
-

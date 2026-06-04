@@ -22,10 +22,18 @@ pub enum IoError {
     FileAlreadyExists { volume: String, path: String },
 
     #[error("file version not found: {volume}/{path}@{version_id}")]
-    FileVersionNotFound { volume: String, path: String, version_id: String },
+    FileVersionNotFound {
+        volume: String,
+        path: String,
+        version_id: String,
+    },
 
     #[error("corrupt xl.meta at {volume}/{path}: {msg}")]
-    CorruptMetadata { volume: String, path: String, msg: String },
+    CorruptMetadata {
+        volume: String,
+        path: String,
+        msg: String,
+    },
 
     #[error("unsupported xl.meta version {found} (max {max})")]
     UnsupportedMetadataVersion { found: u32, max: u32 },

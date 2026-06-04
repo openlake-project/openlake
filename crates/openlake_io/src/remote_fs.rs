@@ -37,8 +37,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use bytes::Bytes;
 use compio::runtime::JoinHandle;
 use futures::SinkExt;
@@ -65,15 +65,15 @@ use crate::types::{
 
 /// URL path for unary RPCs. Bincode-encoded `Request` in the request
 /// body, bincode-encoded `Response` in the reply body.
-const URL_RPC:    &str = "v1/rpc";
+const URL_RPC: &str = "v1/rpc";
 /// URL path for `create_file_writer`. The `Request::CreateFileStream`
 /// envelope rides in `HDR_RPC`; the request body is the streamed
 /// object bytes.
-const URL_WRITE:  &str = "v1/rpc/stream-write";
+const URL_WRITE: &str = "v1/rpc/stream-write";
 /// URL path for `read_file_stream`. The `Request::ReadFileStream`
 /// envelope rides in the request body; the response body is the
 /// streamed object bytes.
-const URL_READ:   &str = "v1/rpc/stream-read";
+const URL_READ: &str = "v1/rpc/stream-read";
 
 /// Header carrying the URL-safe-base64 bincode-encoded `Request`
 /// envelope on the streaming-write route. We use a header rather than
@@ -120,7 +120,7 @@ pub struct PeerClient {
     /// `https://host:port` — cyper's URL parser concatenates the path
     /// suffix at call time. Stored as `String` because `http::Uri`
     /// doesn't support trivially appending path segments.
-    base:   String,
+    base: String,
     client: cyper::Client,
 }
 
@@ -133,9 +133,12 @@ impl PeerClient {
         let builder = cyper::Client::builder();
         let (client, scheme) = match tls {
             Some(cfg) => (builder.use_rustls(cfg).build(), "https"),
-            None      => (builder.http2_prior_knowledge().build(), "http"),
+            None => (builder.http2_prior_knowledge().build(), "http"),
         };
-        Self { base: format!("{scheme}://{addr}"), client }
+        Self {
+            base: format!("{scheme}://{addr}"),
+            client,
+        }
     }
 
     fn url(&self, suffix: &str) -> String {
@@ -157,7 +160,7 @@ impl PeerClient {
 /// `PeerClient` (and therefore one h2 connection on first use), so
 /// connection cost is `O(peers)` not `O(peers × disks)`.
 pub struct RemoteBackend {
-    peer:     Rc<PeerClient>,
+    peer: Rc<PeerClient>,
     disk_idx: DiskIdx,
 }
 
@@ -166,7 +169,9 @@ impl RemoteBackend {
         Self { peer, disk_idx }
     }
 
-    pub fn disk_idx(&self) -> DiskIdx { self.disk_idx }
+    pub fn disk_idx(&self) -> DiskIdx {
+        self.disk_idx
+    }
 
     /// Send one unary RPC and decode the reply.
     ///
@@ -178,21 +183,23 @@ impl RemoteBackend {
     async fn unary(&self, req: Request) -> IoResult<Response> {
         let body = rpc::encode(&req)?;
         let resp = self
-            .peer.client
+            .peer
+            .client
             .post(self.peer.url(URL_RPC))
             .map_err(map_http)?
             .body(body)
-            .send().await
+            .send()
+            .await
             .map_err(map_http)?;
         let status = resp.status();
-        let bytes  = resp.bytes().await.map_err(map_http)?;
+        let bytes = resp.bytes().await.map_err(map_http)?;
         if !status.is_success() {
             if let Ok(Response::Err(e)) = rpc::decode::<Response>(&bytes) {
                 return Err(e.into());
             }
-            return Err(IoError::Io(std::io::Error::other(
-                format!("rpc http status: {status}")
-            )));
+            return Err(IoError::Io(std::io::Error::other(format!(
+                "rpc http status: {status}"
+            ))));
         }
         rpc::decode::<Response>(&bytes)
     }
@@ -201,45 +208,58 @@ impl RemoteBackend {
     /// as every other call — the lock plane gets no special wire
     /// treatment.
     pub async fn lock_acquire(&self, resource: &str, uid: &str, ttl_ms: u32) -> IoResult<bool> {
-        match self.unary(Request::LockAcquire {
-            resource: resource.into(), uid: uid.into(), ttl_ms,
-        }).await? {
+        match self
+            .unary(Request::LockAcquire {
+                resource: resource.into(),
+                uid: uid.into(),
+                ttl_ms,
+            })
+            .await?
+        {
             Response::LockGranted => Ok(true),
-            Response::LockDenied  => Ok(false),
-            Response::Err(e)      => Err(e.into()),
-            other                 => Err(unexpected(other)),
+            Response::LockDenied => Ok(false),
+            Response::Err(e) => Err(e.into()),
+            other => Err(unexpected(other)),
         }
     }
 
     /// Lock-plane: release.
     pub async fn lock_release(&self, resource: &str, uid: &str) -> IoResult<()> {
-        match self.unary(Request::LockRelease {
-            resource: resource.into(), uid: uid.into(),
-        }).await? {
-            Response::Ok     => Ok(()),
+        match self
+            .unary(Request::LockRelease {
+                resource: resource.into(),
+                uid: uid.into(),
+            })
+            .await?
+        {
+            Response::Ok => Ok(()),
             Response::Err(e) => Err(e.into()),
-            other            => Err(unexpected(other)),
+            other => Err(unexpected(other)),
         }
     }
 
     /// Lock plane: refresh. `Ok(true)` entry stamped, `Ok(false)` entry
     /// gone, `Err` network failure (caller counts as offline).
     pub async fn lock_refresh(&self, resource: &str, uid: &str) -> IoResult<bool> {
-        match self.unary(Request::LockRefresh {
-            resource: resource.into(), uid: uid.into(),
-        }).await? {
+        match self
+            .unary(Request::LockRefresh {
+                resource: resource.into(),
+                uid: uid.into(),
+            })
+            .await?
+        {
             Response::LockRefreshed => Ok(true),
-            Response::LockNotFound  => Ok(false),
-            Response::Err(e)        => Err(e.into()),
-            other                   => Err(unexpected(other)),
+            Response::LockNotFound => Ok(false),
+            Response::Err(e) => Err(e.into()),
+            other => Err(unexpected(other)),
         }
     }
 
     pub async fn get_rdma_endpoints(&self) -> IoResult<rpc::RdmaEndpointsReply> {
         match self.unary(Request::GetRdmaEndpoints).await? {
             Response::RdmaEndpoints(r) => Ok(r),
-            Response::Err(e)           => Err(e.into()),
-            other                      => Err(unexpected(other)),
+            Response::Err(e) => Err(e.into()),
+            other => Err(unexpected(other)),
         }
     }
 }
@@ -251,9 +271,9 @@ impl RemoteBackend {
 macro_rules! call_unit {
     ($self:expr, $req:expr) => {
         match $self.unary($req).await? {
-            Response::Ok     => Ok(()),
+            Response::Ok => Ok(()),
             Response::Err(e) => Err(e.into()),
-            other            => Err(unexpected(other)),
+            other => Err(unexpected(other)),
         }
     };
 }
@@ -261,8 +281,8 @@ macro_rules! call_typed {
     ($self:expr, $req:expr, $variant:ident) => {
         match $self.unary($req).await? {
             Response::$variant(v) => Ok(v),
-            Response::Err(e)      => Err(e.into()),
-            other                 => Err(unexpected(other)),
+            Response::Err(e) => Err(e.into()),
+            other => Err(unexpected(other)),
         }
     };
 }
@@ -272,7 +292,7 @@ macro_rules! call_typed {
 // -----------------------------------------------------------------------------
 
 pub struct RemoteReadStream {
-    inner:     ResponseStream,
+    inner: ResponseStream,
     /// Bytes still expected from the peer body. Reaching zero is the
     /// normal EOF path; reaching `None` from `inner` before zero
     /// surfaces as `UnexpectedEof`.
@@ -294,9 +314,10 @@ impl ByteStream for RemoteReadStream {
                 }
                 let n = buf.len() as u64;
                 if n > self.remaining {
-                    return Err(IoError::Io(std::io::Error::other(
-                        format!("remote read overran by {} bytes", n - self.remaining)
-                    )));
+                    return Err(IoError::Io(std::io::Error::other(format!(
+                        "remote read overran by {} bytes",
+                        n - self.remaining
+                    ))));
                 }
                 self.remaining -= n;
                 Ok(buf)
@@ -324,12 +345,12 @@ impl ByteStream for RemoteReadStream {
 pub struct RemoteWriteSink {
     /// Sender side of the body channel. Dropped on `finish()` so
     /// cyper's body stream sees clean EOF.
-    tx:       Option<futures::channel::mpsc::Sender<cyper::Result<Bytes>>>,
+    tx: Option<futures::channel::mpsc::Sender<cyper::Result<Bytes>>>,
     /// Pending request future. Resolved by `finish()` once the body
     /// has been fully fed.
-    handle:   Option<JoinHandle<cyper::Result<cyper::Response>>>,
+    handle: Option<JoinHandle<cyper::Result<cyper::Response>>>,
     expected: u64,
-    written:  u64,
+    written: u64,
     finished: bool,
 }
 
@@ -343,40 +364,51 @@ impl ByteSink for RemoteWriteSink {
             return Ok(());
         }
         let len = buf.len() as u64;
-        let tx = self.tx.as_mut()
+        let tx = self
+            .tx
+            .as_mut()
             .ok_or_else(|| IoError::Io(std::io::Error::other("sink already closed")))?;
         // Channel back-pressure naturally throttles the engine when
         // the network is slower than the writer: mpsc::send awaits
         // until there's slot space (bounded by PUT_CHANNEL_DEPTH).
-        tx.send(Ok(buf)).await
+        tx.send(Ok(buf))
+            .await
             .map_err(|_| IoError::Io(std::io::Error::other("peer body channel closed")))?;
         self.written += len;
         Ok(())
     }
 
     async fn finish(&mut self) -> IoResult<()> {
-        if self.finished { return Ok(()); }
+        if self.finished {
+            return Ok(());
+        }
         self.finished = true;
         if self.written != self.expected {
             return Err(IoError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                format!("create_file_writer: wrote {}/{}", self.written, self.expected),
+                format!(
+                    "create_file_writer: wrote {}/{}",
+                    self.written, self.expected
+                ),
             )));
         }
         // EOF the body channel — cyper's body stream resolves to
         // `None` next, completing the h2 DATA frames with END_STREAM.
         self.tx.take();
 
-        let handle = self.handle.take()
+        let handle = self
+            .handle
+            .take()
             .ok_or_else(|| IoError::Io(std::io::Error::other("missing request future")))?;
         // `JoinHandle::await` yields `Result<T, Box<dyn Any + Send>>`
         // where the outer error is a runtime panic. Map both layers.
-        let resp = handle.await
+        let resp = handle
+            .await
             .map_err(|_| IoError::Io(std::io::Error::other("rpc body task panicked")))?
             .map_err(map_http)?;
 
         let status = resp.status();
-        let bytes  = resp.bytes().await.map_err(map_http)?;
+        let bytes = resp.bytes().await.map_err(map_http)?;
         if !status.is_success() {
             return Err(match rpc::decode::<Response>(&bytes) {
                 Ok(Response::Err(e)) => e.into(),
@@ -384,9 +416,9 @@ impl ByteSink for RemoteWriteSink {
             });
         }
         match rpc::decode::<Response>(&bytes)? {
-            Response::Ok     => Ok(()),
+            Response::Ok => Ok(()),
             Response::Err(e) => Err(e.into()),
-            other            => Err(unexpected(other)),
+            other => Err(unexpected(other)),
         }
     }
 }
@@ -404,47 +436,93 @@ impl StorageBackend for RemoteBackend {
     }
 
     async fn disk_info(&self) -> IoResult<DiskInfo> {
-        call_typed!(self, Request::DiskInfo { disk_idx: self.disk_idx }, Disk)
+        call_typed!(
+            self,
+            Request::DiskInfo {
+                disk_idx: self.disk_idx
+            },
+            Disk
+        )
     }
 
     async fn make_vol(&self, volume: &str) -> IoResult<()> {
-        call_unit!(self, Request::MakeVol { disk_idx: self.disk_idx, volume: volume.into() })
+        call_unit!(
+            self,
+            Request::MakeVol {
+                disk_idx: self.disk_idx,
+                volume: volume.into()
+            }
+        )
     }
 
     async fn list_vols(&self) -> IoResult<Vec<VolInfo>> {
-        call_typed!(self, Request::ListVols { disk_idx: self.disk_idx }, Vols)
+        call_typed!(
+            self,
+            Request::ListVols {
+                disk_idx: self.disk_idx
+            },
+            Vols
+        )
     }
 
     async fn stat_vol(&self, volume: &str) -> IoResult<VolInfo> {
-        call_typed!(self, Request::StatVol { disk_idx: self.disk_idx, volume: volume.into() }, Vol)
+        call_typed!(
+            self,
+            Request::StatVol {
+                disk_idx: self.disk_idx,
+                volume: volume.into()
+            },
+            Vol
+        )
     }
 
     async fn delete_vol(&self, volume: &str, force_delete: bool) -> IoResult<()> {
-        call_unit!(self, Request::DeleteVol { disk_idx: self.disk_idx, volume: volume.into(), force_delete })
+        call_unit!(
+            self,
+            Request::DeleteVol {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                force_delete
+            }
+        )
     }
 
     async fn list_dir(&self, volume: &str, dir_path: &str, count: usize) -> IoResult<Vec<String>> {
         call_typed!(
             self,
-            Request::ListDir { disk_idx: self.disk_idx, volume: volume.into(), dir_path: dir_path.into(), count: count as u32 },
+            Request::ListDir {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                dir_path: dir_path.into(),
+                count: count as u32
+            },
             Strings
         )
     }
 
     async fn read_file_stream(
-        &self, volume: &str, path: &str, offset: u64, length: u64,
+        &self,
+        volume: &str,
+        path: &str,
+        offset: u64,
+        length: u64,
     ) -> IoResult<Box<dyn ByteStream>> {
         let req = Request::ReadFileStream {
             disk_idx: self.disk_idx,
-            volume: volume.into(), path: path.into(), offset, length,
+            volume: volume.into(),
+            path: path.into(),
+            offset,
+            length,
         };
         let body = rpc::encode(&req)?;
         let resp = self
-            .peer.client
+            .peer
+            .client
             .post(self.peer.url(URL_READ))
             .map_err(map_http)?
             .body(body)
-            .send().await
+            .send()
+            .await
             .map_err(map_http)?;
         let status = resp.status();
         if !status.is_success() {
@@ -453,20 +531,28 @@ impl StorageBackend for RemoteBackend {
             if let Ok(Response::Err(e)) = rpc::decode::<Response>(&bytes) {
                 return Err(e.into());
             }
-            return Err(IoError::Io(std::io::Error::other(
-                format!("read_file_stream http {status}")
-            )));
+            return Err(IoError::Io(std::io::Error::other(format!(
+                "read_file_stream http {status}"
+            ))));
         }
         let inner: ResponseStream = Box::pin(resp.bytes_stream());
-        Ok(Box::new(RemoteReadStream { inner, remaining: length }))
+        Ok(Box::new(RemoteReadStream {
+            inner,
+            remaining: length,
+        }))
     }
 
     async fn create_file_writer(
-        &self, volume: &str, path: &str, size: u64,
+        &self,
+        volume: &str,
+        path: &str,
+        size: u64,
     ) -> IoResult<Box<dyn ByteSink>> {
         let env = Request::CreateFileStream {
             disk_idx: self.disk_idx,
-            volume: volume.into(), path: path.into(), size,
+            volume: volume.into(),
+            path: path.into(),
+            size,
         };
         let env_b64 = URL_SAFE_NO_PAD.encode(rpc::encode(&env)?);
 
@@ -478,7 +564,7 @@ impl StorageBackend for RemoteBackend {
         // cooperatively. Spawning is mandatory: if we held the
         // future and only awaited it inside `finish()`, the body
         // channel would deadlock waiting for a reader.
-        let url    = self.peer.url(URL_WRITE);
+        let url = self.peer.url(URL_WRITE);
         let client = self.peer.client.clone();
         let handle = compio::runtime::spawn(async move {
             client
@@ -486,34 +572,59 @@ impl StorageBackend for RemoteBackend {
                 .header(HDR_RPC, env_b64.as_str())?
                 .header(http::header::CONTENT_LENGTH, size)?
                 .body(body)
-                .send().await
+                .send()
+                .await
         });
 
         Ok(Box::new(RemoteWriteSink {
-            tx:       Some(tx),
-            handle:   Some(handle),
+            tx: Some(tx),
+            handle: Some(handle),
             expected: size,
-            written:  0,
+            written: 0,
             finished: false,
         }))
     }
 
     async fn rename_file(
-        &self, src_volume: &str, src_path: &str, dst_volume: &str, dst_path: &str,
+        &self,
+        src_volume: &str,
+        src_path: &str,
+        dst_volume: &str,
+        dst_path: &str,
     ) -> IoResult<()> {
-        call_unit!(self, Request::RenameFile {
-            disk_idx: self.disk_idx,
-            src_volume: src_volume.into(), src_path: src_path.into(),
-            dst_volume: dst_volume.into(), dst_path: dst_path.into(),
-        })
+        call_unit!(
+            self,
+            Request::RenameFile {
+                disk_idx: self.disk_idx,
+                src_volume: src_volume.into(),
+                src_path: src_path.into(),
+                dst_volume: dst_volume.into(),
+                dst_path: dst_path.into(),
+            }
+        )
     }
 
     async fn check_file(&self, volume: &str, path: &str) -> IoResult<()> {
-        call_unit!(self, Request::CheckFile { disk_idx: self.disk_idx, volume: volume.into(), path: path.into() })
+        call_unit!(
+            self,
+            Request::CheckFile {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                path: path.into()
+            }
+        )
     }
 
     async fn delete(&self, volume: &str, path: &str, recursive: bool) -> IoResult<()> {
-        call_unit!(self, Request::Delete { disk_idx: self.disk_idx, volume: volume.into(), path: path.into(), recursive })
+        call_unit!(
+            self,
+            Request::Delete {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                path: path.into(),
+                recursive
+            }
+        )
     }
 
     async fn delete_batch(
@@ -531,37 +642,51 @@ impl StorageBackend for RemoteBackend {
             recursive,
         };
         match self.unary(req).await? {
-            Response::DeleteBatchResult(per_key) => {
-                Ok(per_key.into_iter().map(|opt| match opt {
-                    None    => Ok(()),
+            Response::DeleteBatchResult(per_key) => Ok(per_key
+                .into_iter()
+                .map(|opt| match opt {
+                    None => Ok(()),
                     Some(e) => Err(e.into()),
-                }).collect())
-            }
+                })
+                .collect()),
             other => Err(unexpected(other)),
         }
     }
 
     async fn write_metadata(
-        &self, orig_volume: &str, volume: &str, path: &str, fi: &FileInfo,
+        &self,
+        orig_volume: &str,
+        volume: &str,
+        path: &str,
+        fi: &FileInfo,
     ) -> IoResult<()> {
-        call_unit!(self, Request::WriteMetadata {
-            disk_idx: self.disk_idx,
-            orig_volume: orig_volume.into(),
-            volume: volume.into(), path: path.into(),
-            fi: fi.clone(),
-        })
+        call_unit!(
+            self,
+            Request::WriteMetadata {
+                disk_idx: self.disk_idx,
+                orig_volume: orig_volume.into(),
+                volume: volume.into(),
+                path: path.into(),
+                fi: fi.clone(),
+            }
+        )
     }
 
     async fn read_version(
-        &self, orig_volume: &str, volume: &str, path: &str,
-        version_id: Option<&str>, read_data: bool,
+        &self,
+        orig_volume: &str,
+        volume: &str,
+        path: &str,
+        version_id: Option<&str>,
+        read_data: bool,
     ) -> IoResult<FileInfo> {
         call_typed!(
             self,
             Request::ReadVersion {
                 disk_idx: self.disk_idx,
                 orig_volume: orig_volume.into(),
-                volume: volume.into(), path: path.into(),
+                volume: volume.into(),
+                path: path.into(),
                 version_id: version_id.map(str::to_owned),
                 read_data,
             },
@@ -594,89 +719,139 @@ impl StorageBackend for RemoteBackend {
     }
 
     async fn update_metadata(
-        &self, volume: &str, path: &str, fi: &FileInfo, opts: &UpdateMetadataOpts,
+        &self,
+        volume: &str,
+        path: &str,
+        fi: &FileInfo,
+        opts: &UpdateMetadataOpts,
     ) -> IoResult<()> {
-        call_unit!(self, Request::UpdateMetadata {
-            disk_idx: self.disk_idx,
-            volume: volume.into(), path: path.into(),
-            fi: fi.clone(), no_persistence: opts.no_persistence,
-        })
+        call_unit!(
+            self,
+            Request::UpdateMetadata {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                path: path.into(),
+                fi: fi.clone(),
+                no_persistence: opts.no_persistence,
+            }
+        )
     }
 
     async fn delete_version(
-        &self, volume: &str, path: &str, fi: &FileInfo,
-        force_del_marker: bool, opts: &DeleteOptions,
+        &self,
+        volume: &str,
+        path: &str,
+        fi: &FileInfo,
+        force_del_marker: bool,
+        opts: &DeleteOptions,
     ) -> IoResult<()> {
-        call_unit!(self, Request::DeleteVersion {
-            disk_idx: self.disk_idx,
-            volume: volume.into(), path: path.into(),
-            fi: fi.clone(),
-            force_del_marker,
-            undo_write: opts.undo_write,
-        })
+        call_unit!(
+            self,
+            Request::DeleteVersion {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                path: path.into(),
+                fi: fi.clone(),
+                force_del_marker,
+                undo_write: opts.undo_write,
+            }
+        )
     }
 
     async fn rename_data(
-        &self, src_volume: &str, src_path: &str, fi: &FileInfo,
-        dst_volume: &str, dst_path: &str, _opts: &RenameOptions,
+        &self,
+        src_volume: &str,
+        src_path: &str,
+        fi: &FileInfo,
+        dst_volume: &str,
+        dst_path: &str,
+        _opts: &RenameOptions,
     ) -> IoResult<RenameDataResp> {
-        call_typed!(self, Request::RenameData {
-            disk_idx: self.disk_idx,
-            src_volume: src_volume.into(), src_path: src_path.into(),
-            fi: fi.clone(),
-            dst_volume: dst_volume.into(), dst_path: dst_path.into(),
-        }, Renamed)
+        call_typed!(
+            self,
+            Request::RenameData {
+                disk_idx: self.disk_idx,
+                src_volume: src_volume.into(),
+                src_path: src_path.into(),
+                fi: fi.clone(),
+                dst_volume: dst_volume.into(),
+                dst_path: dst_path.into(),
+            },
+            Renamed
+        )
     }
 
     async fn verify_file(&self, volume: &str, path: &str, fi: &FileInfo) -> IoResult<()> {
-        call_unit!(self, Request::VerifyFile {
-            disk_idx: self.disk_idx,
-            volume: volume.into(), path: path.into(), fi: fi.clone(),
-        })
+        call_unit!(
+            self,
+            Request::VerifyFile {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                path: path.into(),
+                fi: fi.clone(),
+            }
+        )
     }
 
     async fn read_format(&self) -> IoResult<Option<FormatJson>> {
-        match self.unary(Request::ReadFormat { disk_idx: self.disk_idx }).await? {
+        match self
+            .unary(Request::ReadFormat {
+                disk_idx: self.disk_idx,
+            })
+            .await?
+        {
             Response::FormatOpt(opt) => Ok(opt),
-            Response::Err(e)         => Err(e.into()),
-            other                    => Err(unexpected(other)),
+            Response::Err(e) => Err(e.into()),
+            other => Err(unexpected(other)),
         }
     }
 
     async fn write_format(&self, fmt: &FormatJson) -> IoResult<()> {
-        call_unit!(self, Request::WriteFormat {
-            disk_idx: self.disk_idx,
-            fmt: fmt.clone(),
-        })
+        call_unit!(
+            self,
+            Request::WriteFormat {
+                disk_idx: self.disk_idx,
+                fmt: fmt.clone(),
+            }
+        )
     }
 
     async fn write_file(&self, volume: &str, path: &str, bytes: Vec<u8>) -> IoResult<()> {
-        call_unit!(self, Request::WriteFile {
-            disk_idx: self.disk_idx,
-            volume:   volume.into(),
-            path:     path.into(),
-            bytes,
-        })
+        call_unit!(
+            self,
+            Request::WriteFile {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                path: path.into(),
+                bytes,
+            }
+        )
     }
 
     async fn read_file(&self, volume: &str, path: &str) -> IoResult<Option<Vec<u8>>> {
-        match self.unary(Request::ReadFile {
-            disk_idx: self.disk_idx,
-            volume:   volume.into(),
-            path:     path.into(),
-        }).await? {
+        match self
+            .unary(Request::ReadFile {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                path: path.into(),
+            })
+            .await?
+        {
             Response::FileBytes(opt) => Ok(opt),
-            Response::Err(e)         => Err(e.into()),
-            other                    => Err(unexpected(other)),
+            Response::Err(e) => Err(e.into()),
+            other => Err(unexpected(other)),
         }
     }
 
     async fn make_dir_all(&self, volume: &str, path: &str) -> IoResult<()> {
-        call_unit!(self, Request::MakeDirAll {
-            disk_idx: self.disk_idx,
-            volume:   volume.into(),
-            path:     path.into(),
-        })
+        call_unit!(
+            self,
+            Request::MakeDirAll {
+                disk_idx: self.disk_idx,
+                volume: volume.into(),
+                path: path.into(),
+            }
+        )
     }
 }
 

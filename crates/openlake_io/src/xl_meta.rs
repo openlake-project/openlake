@@ -45,7 +45,9 @@ use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh64::xxh64;
 
 use crate::error::{IoError, IoResult};
-use crate::types::{ChecksumInfo, ErasureInfo, FileInfo, ObjectPartInfo, VersionType, VersioningStatus};
+use crate::types::{
+    ChecksumInfo, ErasureInfo, FileInfo, ObjectPartInfo, VersionType, VersioningStatus,
+};
 
 /// Decoded record, ready for the caller to splice in its own bucket
 /// and key context. We split decode from `FileInfo` construction so
@@ -54,17 +56,17 @@ use crate::types::{ChecksumInfo, ErasureInfo, FileInfo, ObjectPartInfo, VersionT
 /// the file itself.
 #[derive(Debug, Clone)]
 pub struct DecodedRecord {
-    pub version_id:       String,
-    pub data_dir:         String,
-    pub deleted:          bool,
-    pub size:             i64,
-    pub mod_time_ms:      u64,
-    pub metadata:         BTreeMap<String, String>,
-    pub meta_sys:         BTreeMap<String, Vec<u8>>,
-    pub erasure:          ErasureInfo,
-    pub parts:            Vec<ObjectPartInfo>,
-    pub inline:           Option<Vec<Bytes>>,
-    pub num_versions:     i32,
+    pub version_id: String,
+    pub data_dir: String,
+    pub deleted: bool,
+    pub size: i64,
+    pub mod_time_ms: u64,
+    pub metadata: BTreeMap<String, String>,
+    pub meta_sys: BTreeMap<String, Vec<u8>>,
+    pub erasure: ErasureInfo,
+    pub parts: Vec<ObjectPartInfo>,
+    pub inline: Option<Vec<Bytes>>,
+    pub num_versions: i32,
 }
 
 /// Encoded xl.meta as a **head** + a **rope of inline tail frames**.
@@ -90,7 +92,9 @@ impl EncodedXlMeta {
         self.head.len() + self.tail.iter().map(|t| t.len()).sum::<usize>()
     }
 
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     /// Concatenate head and tail into one `Vec<u8>`. Used by tests
     /// and by the in-memory decode round-trip; production writes never
@@ -105,15 +109,15 @@ impl EncodedXlMeta {
     }
 }
 
-pub const MAGIC:        [u8; 4] = *b"XL2 ";
-pub const FORMAT_MAJOR: u16     = 1;
-pub const FORMAT_MINOR: u16     = 3;
+pub const MAGIC: [u8; 4] = *b"XL2 ";
+pub const FORMAT_MAJOR: u16 = 1;
+pub const FORMAT_MINOR: u16 = 3;
 
-const HEADER_LEN:       usize = 8;
-const BIN32_TAG:        u8    = 0xc6;
-const BIN32_HEADER_LEN: usize = 5;          // 0xc6 + u32 BE length
-const CRC_TAG:          u8    = 0xce;
-const CRC_LEN:          usize = 5;          // 0xce + u32 BE digest
+const HEADER_LEN: usize = 8;
+const BIN32_TAG: u8 = 0xc6;
+const BIN32_HEADER_LEN: usize = 5; // 0xc6 + u32 BE length
+const CRC_TAG: u8 = 0xce;
+const CRC_LEN: usize = 5; // 0xce + u32 BE digest
 
 /// Top-level on-disk structure. A list of versions, sorted newest-first
 /// by `mod_time` (sort-on-insert at write time). Today we always emit
@@ -194,7 +198,9 @@ struct VersionRecord {
     inline_length: u64,
 }
 
-fn is_zero_u64(v: &u64) -> bool { *v == 0 }
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct ErasureBlock {
@@ -262,7 +268,9 @@ pub fn encode(fi: &FileInfo) -> IoResult<EncodedXlMeta> {
 /// the caller built an invalid record — never silently coerces.
 pub fn encode_versions(versions: &[FileInfo]) -> IoResult<EncodedXlMeta> {
     if versions.is_empty() {
-        return Err(IoError::Encode("encode_versions: empty versions slice".into()));
+        return Err(IoError::Encode(
+            "encode_versions: empty versions slice".into(),
+        ));
     }
     for fi in versions {
         validate_for_encode(fi)?;
@@ -278,7 +286,9 @@ pub fn encode_versions(versions: &[FileInfo]) -> IoResult<EncodedXlMeta> {
         let mut version_len: u64 = 0;
         if let Some(frames) = fi.data.as_ref() {
             for f in frames {
-                if f.is_empty() { continue; }
+                if f.is_empty() {
+                    continue;
+                }
                 version_len += f.len() as u64;
                 tail_frames.push(f.clone());
             }
@@ -287,21 +297,29 @@ pub fn encode_versions(versions: &[FileInfo]) -> IoResult<EncodedXlMeta> {
         tail_pos += version_len;
     }
 
-    let records: Vec<VersionRecord> = versions.iter().zip(inline_meta).map(|(fi, (off, len))| {
-        Ok::<_, IoError>(VersionRecord {
-            version_id:    parse_uuid_bytes(&fi.version_id, "version_id")?,
-            ty:            if fi.deleted { VersionType::DeleteMarker as u8 } else { VersionType::Object as u8 },
-            mod_time:      fi.mod_time_ms,
-            data_dir:      parse_uuid_bytes(&fi.data_dir, "data_dir")?,
-            size:          fi.size,
-            erasure:       encode_erasure(&fi.erasure),
-            parts:         fi.parts.iter().map(encode_part).collect(),
-            metadata:      fi.metadata.clone(),
-            meta_sys:      fi.meta_sys.clone(),
-            inline_offset: off,
-            inline_length: len,
+    let records: Vec<VersionRecord> = versions
+        .iter()
+        .zip(inline_meta)
+        .map(|(fi, (off, len))| {
+            Ok::<_, IoError>(VersionRecord {
+                version_id: parse_uuid_bytes(&fi.version_id, "version_id")?,
+                ty: if fi.deleted {
+                    VersionType::DeleteMarker as u8
+                } else {
+                    VersionType::Object as u8
+                },
+                mod_time: fi.mod_time_ms,
+                data_dir: parse_uuid_bytes(&fi.data_dir, "data_dir")?,
+                size: fi.size,
+                erasure: encode_erasure(&fi.erasure),
+                parts: fi.parts.iter().map(encode_part).collect(),
+                metadata: fi.metadata.clone(),
+                meta_sys: fi.meta_sys.clone(),
+                inline_offset: off,
+                inline_length: len,
+            })
         })
-    }).collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()?;
 
     let on_disk = OnDiskMeta { versions: records };
 
@@ -333,8 +351,9 @@ pub fn decode(bytes: Bytes) -> IoResult<DecodedRecord> {
     let mut all = decode_all(bytes)?;
     if all.is_empty() {
         return Err(IoError::CorruptMetadata {
-            volume: String::new(), path: String::new(),
-            msg:    "empty versions list".into(),
+            volume: String::new(),
+            path: String::new(),
+            msg: "empty versions list".into(),
         });
     }
     Ok(all.remove(0))
@@ -355,8 +374,8 @@ pub fn decode(bytes: Bytes) -> IoResult<DecodedRecord> {
 pub fn decode_all(bytes: Bytes) -> IoResult<Vec<DecodedRecord>> {
     let corrupt = |msg: &str| IoError::CorruptMetadata {
         volume: String::new(),
-        path:   String::new(),
-        msg:    msg.to_owned(),
+        path: String::new(),
+        msg: msg.to_owned(),
     };
 
     if bytes.len() < HEADER_LEN + BIN32_HEADER_LEN + CRC_LEN {
@@ -369,7 +388,8 @@ pub fn decode_all(bytes: Bytes) -> IoResult<Vec<DecodedRecord>> {
     let minor = u16::from_le_bytes([bytes[6], bytes[7]]);
     if major != FORMAT_MAJOR {
         return Err(IoError::UnsupportedMetadataVersion {
-            found: major as u32, max: FORMAT_MAJOR as u32,
+            found: major as u32,
+            max: FORMAT_MAJOR as u32,
         });
     }
     if minor != FORMAT_MINOR {
@@ -381,15 +401,16 @@ pub fn decode_all(bytes: Bytes) -> IoResult<Vec<DecodedRecord>> {
     if bytes[HEADER_LEN] != BIN32_TAG {
         return Err(corrupt("missing bin32 header"));
     }
-    let body_len = u32::from_be_bytes(bytes[HEADER_LEN + 1..HEADER_LEN + 5].try_into().unwrap()) as usize;
+    let body_len =
+        u32::from_be_bytes(bytes[HEADER_LEN + 1..HEADER_LEN + 5].try_into().unwrap()) as usize;
     let body_start = HEADER_LEN + BIN32_HEADER_LEN;
-    let body_end   = body_start + body_len;
-    let crc_end    = body_end + CRC_LEN;
+    let body_end = body_start + body_len;
+    let crc_end = body_end + CRC_LEN;
     if bytes.len() < crc_end {
         return Err(corrupt("truncated body or crc"));
     }
 
-    let body     = &bytes[body_start..body_end];
+    let body = &bytes[body_start..body_end];
     let crc_slot = &bytes[body_end..crc_end];
     if crc_slot[0] != CRC_TAG {
         return Err(corrupt("missing crc marker"));
@@ -399,8 +420,8 @@ pub fn decode_all(bytes: Bytes) -> IoResult<Vec<DecodedRecord>> {
         return Err(corrupt("crc mismatch"));
     }
 
-    let mut on_disk: OnDiskMeta = rmp_serde::from_slice(body)
-        .map_err(|e| corrupt(&format!("decode body: {e}")))?;
+    let mut on_disk: OnDiskMeta =
+        rmp_serde::from_slice(body).map_err(|e| corrupt(&format!("decode body: {e}")))?;
 
     if on_disk.versions.is_empty() {
         return Err(corrupt("empty versions list"));
@@ -421,9 +442,10 @@ pub fn decode_all(bytes: Bytes) -> IoResult<Vec<DecodedRecord>> {
     for v in on_disk.versions.iter() {
         let inline: Option<Vec<Bytes>> = if v.inline_length > 0 {
             let lo_u64 = v.inline_offset;
-            let hi_u64 = v.inline_offset.checked_add(v.inline_length).ok_or_else(||
-                corrupt("inline range overflow")
-            )?;
+            let hi_u64 = v
+                .inline_offset
+                .checked_add(v.inline_length)
+                .ok_or_else(|| corrupt("inline range overflow"))?;
             if (hi_u64 as usize) > tail_len {
                 return Err(corrupt(&format!(
                     "inline range [{lo_u64},{hi_u64}) exceeds tail length {tail_len}"
@@ -437,17 +459,17 @@ pub fn decode_all(bytes: Bytes) -> IoResult<Vec<DecodedRecord>> {
         };
 
         out.push(DecodedRecord {
-            version_id:    format_version_id_bytes(&v.version_id),
-            data_dir:      format_data_dir_bytes(&v.data_dir),
-            deleted:       v.ty == VersionType::DeleteMarker as u8,
-            size:          v.size,
-            mod_time_ms:   v.mod_time,
-            metadata:      v.metadata.clone(),
-            meta_sys:      v.meta_sys.clone(),
-            erasure:       decode_erasure(&v.erasure),
-            parts:         v.parts.iter().map(decode_part).collect(),
+            version_id: format_version_id_bytes(&v.version_id),
+            data_dir: format_data_dir_bytes(&v.data_dir),
+            deleted: v.ty == VersionType::DeleteMarker as u8,
+            size: v.size,
+            mod_time_ms: v.mod_time,
+            metadata: v.metadata.clone(),
+            meta_sys: v.meta_sys.clone(),
+            erasure: decode_erasure(&v.erasure),
+            parts: v.parts.iter().map(decode_part).collect(),
             inline,
-            num_versions:  total_versions,
+            num_versions: total_versions,
         });
     }
     Ok(out)
@@ -457,7 +479,9 @@ pub fn decode_all(bytes: Bytes) -> IoResult<Vec<DecodedRecord>> {
 /// string). Returns `Ok(None)` if the blob decodes cleanly but the
 /// version isn't there.
 pub fn find_version(bytes: Bytes, version_id: &str) -> IoResult<Option<DecodedRecord>> {
-    Ok(decode_all(bytes)?.into_iter().find(|r| r.version_id == version_id))
+    Ok(decode_all(bytes)?
+        .into_iter()
+        .find(|r| r.version_id == version_id))
 }
 
 /// Build a `FileInfo` from a `DecodedRecord` plus the caller's bucket
@@ -465,19 +489,19 @@ pub fn find_version(bytes: Bytes, version_id: &str) -> IoResult<Option<DecodedRe
 /// it comes from the path the caller used to fetch the file.
 pub fn file_info_from_record(rec: DecodedRecord, volume: &str, path: &str) -> FileInfo {
     let mut fi = FileInfo::default();
-    fi.volume       = volume.to_owned();
-    fi.name         = path.to_owned();
-    fi.version_id   = rec.version_id;
-    fi.data_dir     = rec.data_dir;
-    fi.deleted      = rec.deleted;
-    fi.size         = rec.size;
-    fi.mod_time_ms  = rec.mod_time_ms;
-    fi.metadata     = rec.metadata;
-    fi.meta_sys     = rec.meta_sys;
-    fi.erasure      = rec.erasure;
-    fi.parts        = rec.parts;
-    fi.data         = rec.inline;
-    fi.is_latest    = true;
+    fi.volume = volume.to_owned();
+    fi.name = path.to_owned();
+    fi.version_id = rec.version_id;
+    fi.data_dir = rec.data_dir;
+    fi.deleted = rec.deleted;
+    fi.size = rec.size;
+    fi.mod_time_ms = rec.mod_time_ms;
+    fi.metadata = rec.metadata;
+    fi.meta_sys = rec.meta_sys;
+    fi.erasure = rec.erasure;
+    fi.parts = rec.parts;
+    fi.data = rec.inline;
+    fi.is_latest = true;
     fi.num_versions = rec.num_versions.max(1);
     fi
 }
@@ -488,7 +512,10 @@ pub fn file_info_from_record(rec: DecodedRecord, volume: &str, path: &str) -> Fi
 
 fn validate_for_encode(fi: &FileInfo) -> IoResult<()> {
     if fi.size < 0 {
-        return Err(IoError::Encode(format!("size must be >= 0, got {}", fi.size)));
+        return Err(IoError::Encode(format!(
+            "size must be >= 0, got {}",
+            fi.size
+        )));
     }
     if fi.mod_time_ms == 0 {
         return Err(IoError::Encode("mod_time_ms must be set (got 0)".into()));
@@ -502,15 +529,18 @@ fn validate_for_encode(fi: &FileInfo) -> IoResult<()> {
         }
         if fi.size != 0 {
             return Err(IoError::Encode(format!(
-                "delete marker must have size 0, got {}", fi.size
+                "delete marker must have size 0, got {}",
+                fi.size
             )));
         }
         if fi.data.as_ref().is_some_and(|frames| !frames.is_empty()) {
-            return Err(IoError::Encode("delete marker must have no inline data".into()));
+            return Err(IoError::Encode(
+                "delete marker must have no inline data".into(),
+            ));
         }
     } else if fi.size > 0 && fi.parts.is_empty() {
         return Err(IoError::Encode(
-            "non-deleted object with size > 0 must have at least one part".into()
+            "non-deleted object with size > 0 must have at least one part".into(),
         ));
     }
 
@@ -523,20 +553,27 @@ fn validate_for_encode(fi: &FileInfo) -> IoResult<()> {
     let has_inline = fi.data.as_ref().is_some_and(|frames| !frames.is_empty());
     if has_inline && !fi.data_dir.is_empty() {
         return Err(IoError::Encode(
-            "version cannot set both inline data and data_dir; inline-vs-EC is mutually exclusive".into()
+            "version cannot set both inline data and data_dir; inline-vs-EC is mutually exclusive"
+                .into(),
         ));
     }
     if !fi.deleted && fi.size > 0 && !has_inline && fi.data_dir.is_empty() {
         return Err(IoError::Encode(
-            "non-deleted EC object with size > 0 must have a non-empty data_dir".into()
+            "non-deleted EC object with size > 0 must have a non-empty data_dir".into(),
         ));
     }
     if has_inline {
-        let frame_total: i64 = fi.data.as_ref().unwrap().iter()
-            .map(|f| f.len() as i64).sum();
+        let frame_total: i64 = fi
+            .data
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|f| f.len() as i64)
+            .sum();
         if frame_total != fi.size {
             return Err(IoError::Encode(format!(
-                "inline frame total ({frame_total}) must equal size ({})", fi.size
+                "inline frame total ({frame_total}) must equal size ({})",
+                fi.size
             )));
         }
     }
@@ -545,17 +582,20 @@ fn validate_for_encode(fi: &FileInfo) -> IoResult<()> {
     for (i, p) in fi.parts.iter().enumerate() {
         if p.number <= 0 {
             return Err(IoError::Encode(format!(
-                "parts[{i}].number must be > 0, got {}", p.number
+                "parts[{i}].number must be > 0, got {}",
+                p.number
             )));
         }
         if p.size < 0 {
             return Err(IoError::Encode(format!(
-                "parts[{i}].size must be >= 0, got {}", p.size
+                "parts[{i}].size must be >= 0, got {}",
+                p.size
             )));
         }
         if p.actual_size < 0 {
             return Err(IoError::Encode(format!(
-                "parts[{i}].actual_size must be >= 0, got {}", p.actual_size
+                "parts[{i}].actual_size must be >= 0, got {}",
+                p.actual_size
             )));
         }
     }
@@ -565,7 +605,7 @@ fn validate_for_encode(fi: &FileInfo) -> IoResult<()> {
 fn validate_decoded_version(v: &VersionRecord) -> IoResult<()> {
     let corrupt = |msg: String| IoError::CorruptMetadata {
         volume: String::new(),
-        path:   String::new(),
+        path: String::new(),
         msg,
     };
     if v.ty > VersionType::DeleteMarker as u8 {
@@ -586,7 +626,8 @@ fn validate_decoded_version(v: &VersionRecord) -> IoResult<()> {
         }
         if v.size != 0 {
             return Err(corrupt(format!(
-                "delete marker must have size 0, got {}", v.size
+                "delete marker must have size 0, got {}",
+                v.size
             )));
         }
         if v.inline_length != 0 {
@@ -594,7 +635,7 @@ fn validate_decoded_version(v: &VersionRecord) -> IoResult<()> {
         }
     } else if v.size > 0 && v.parts.is_empty() {
         return Err(corrupt(
-            "non-deleted object with size > 0 must have at least one part".into()
+            "non-deleted object with size > 0 must have at least one part".into(),
         ));
     }
     let has_data_dir = v.data_dir != [0u8; 16];
@@ -612,12 +653,14 @@ fn validate_decoded_version(v: &VersionRecord) -> IoResult<()> {
     for (i, p) in v.parts.iter().enumerate() {
         if p.number <= 0 {
             return Err(corrupt(format!(
-                "parts[{i}].number must be > 0, got {}", p.number
+                "parts[{i}].number must be > 0, got {}",
+                p.number
             )));
         }
         if p.size < 0 {
             return Err(corrupt(format!(
-                "parts[{i}].size must be >= 0, got {}", p.size
+                "parts[{i}].size must be >= 0, got {}",
+                p.size
             )));
         }
     }
@@ -627,7 +670,7 @@ fn validate_decoded_version(v: &VersionRecord) -> IoResult<()> {
 fn validate_erasure(ei: &ErasureInfo, ctx: &str) -> IoResult<()> {
     let err = |msg: String| match ctx {
         "encode" => IoError::Encode(format!("erasure: {msg}")),
-        _        => IoError::InvalidArgument(format!("erasure: {msg}")),
+        _ => IoError::InvalidArgument(format!("erasure: {msg}")),
     };
     if ei.algorithm.is_empty() {
         return Err(err("algorithm must be non-empty".into()));
@@ -652,9 +695,7 @@ fn validate_erasure(ei: &ErasureInfo, ctx: &str) -> IoResult<()> {
         )));
     }
     if ei.index == 0 || (ei.index as usize) > n {
-        return Err(err(format!(
-            "index ({}) must be in [1, {n}]", ei.index
-        )));
+        return Err(err(format!("index ({}) must be in [1, {n}]", ei.index)));
     }
     if ei.block_size == 0 {
         return Err(err("block_size must be > 0".into()));
@@ -668,57 +709,65 @@ fn validate_erasure(ei: &ErasureInfo, ctx: &str) -> IoResult<()> {
 
 fn encode_erasure(ei: &ErasureInfo) -> ErasureBlock {
     ErasureBlock {
-        algorithm:    ei.algorithm.clone(),
-        data_blocks:  ei.data_blocks,
+        algorithm: ei.algorithm.clone(),
+        data_blocks: ei.data_blocks,
         parity_blocks: ei.parity_blocks,
-        index:        ei.index,
-        block_size:   ei.block_size,
+        index: ei.index,
+        block_size: ei.block_size,
         distribution: ei.distribution.clone(),
-        checksums:    ei.checksums.iter().map(|c| ChecksumBlock {
-            part_number: c.part_number,
-            algorithm:   c.algorithm.clone(),
-            hash:        c.hash.clone(),
-        }).collect(),
+        checksums: ei
+            .checksums
+            .iter()
+            .map(|c| ChecksumBlock {
+                part_number: c.part_number,
+                algorithm: c.algorithm.clone(),
+                hash: c.hash.clone(),
+            })
+            .collect(),
     }
 }
 
 fn decode_erasure(b: &ErasureBlock) -> ErasureInfo {
     ErasureInfo {
-        algorithm:    b.algorithm.clone(),
-        data_blocks:  b.data_blocks,
+        algorithm: b.algorithm.clone(),
+        data_blocks: b.data_blocks,
         parity_blocks: b.parity_blocks,
-        index:        b.index,
-        block_size:   b.block_size,
+        index: b.index,
+        block_size: b.block_size,
         distribution: b.distribution.clone(),
-        checksums:    b.checksums.iter().map(|c| ChecksumInfo {
-            part_number: c.part_number,
-            algorithm:   c.algorithm.clone(),
-            hash:        c.hash.clone(),
-        }).collect(),
+        checksums: b
+            .checksums
+            .iter()
+            .map(|c| ChecksumInfo {
+                part_number: c.part_number,
+                algorithm: c.algorithm.clone(),
+                hash: c.hash.clone(),
+            })
+            .collect(),
     }
 }
 
 fn encode_part(p: &ObjectPartInfo) -> PartBlock {
     PartBlock {
-        number:      p.number,
-        size:        p.size,
+        number: p.number,
+        size: p.size,
         actual_size: p.actual_size,
-        mod_time:    p.mod_time_ms,
-        etag:        p.etag.clone(),
-        index:       p.index.clone(),
-        checksums:   p.checksums.clone(),
+        mod_time: p.mod_time_ms,
+        etag: p.etag.clone(),
+        index: p.index.clone(),
+        checksums: p.checksums.clone(),
     }
 }
 
 fn decode_part(p: &PartBlock) -> ObjectPartInfo {
     ObjectPartInfo {
-        etag:        p.etag.clone(),
-        number:      p.number,
-        size:        p.size,
+        etag: p.etag.clone(),
+        number: p.number,
+        size: p.size,
         actual_size: p.actual_size,
         mod_time_ms: p.mod_time,
-        index:       p.index.clone(),
-        checksums:   p.checksums.clone(),
+        index: p.index.clone(),
+        checksums: p.checksums.clone(),
     }
 }
 
@@ -740,7 +789,8 @@ fn parse_uuid_bytes(s: &str, field: &str) -> IoResult<[u8; 16]> {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
     if hex.len() != 32 {
         return Err(IoError::Encode(format!(
-            "{field}: expected 32 hex chars after stripping dashes, got {}", hex.len()
+            "{field}: expected 32 hex chars after stripping dashes, got {}",
+            hex.len()
         )));
     }
     let mut out = [0u8; 16];
@@ -793,36 +843,38 @@ mod tests {
 
     fn sample_erasure() -> ErasureInfo {
         ErasureInfo {
-            algorithm:    "ReedSolomon".into(),
-            data_blocks:  3,
+            algorithm: "ReedSolomon".into(),
+            data_blocks: 3,
             parity_blocks: 1,
-            index:        1,
-            block_size:   1_048_576,
+            index: 1,
+            block_size: 1_048_576,
             distribution: vec![1, 2, 3, 4],
-            checksums:    Vec::new(),
+            checksums: Vec::new(),
         }
     }
 
     fn sample() -> FileInfo {
         let mut fi = FileInfo::default();
-        fi.volume      = "photos".into();
-        fi.name        = "dog.jpg".into();
-        fi.size        = 5;
+        fi.volume = "photos".into();
+        fi.name = "dog.jpg".into();
+        fi.size = 5;
         fi.mod_time_ms = 1_700_000_000_000;
-        fi.data        = Some(vec![Bytes::from_static(b"hello")]);
-        fi.parts       = vec![ObjectPartInfo {
-            etag:        "deadbeef".into(),
-            number:      1,
-            size:        5,
+        fi.data = Some(vec![Bytes::from_static(b"hello")]);
+        fi.parts = vec![ObjectPartInfo {
+            etag: "deadbeef".into(),
+            number: 1,
+            size: 5,
             actual_size: 5,
             mod_time_ms: 1_700_000_000_000,
-            index:       Vec::new(),
-            checksums:   BTreeMap::new(),
+            index: Vec::new(),
+            checksums: BTreeMap::new(),
         }];
-        fi.erasure     = sample_erasure();
-        fi.metadata.insert("etag".into(),             "deadbeef".into());
-        fi.metadata.insert("content-type".into(),     "image/jpeg".into());
-        fi.metadata.insert("x-amz-meta-owner".into(), "arnav".into());
+        fi.erasure = sample_erasure();
+        fi.metadata.insert("etag".into(), "deadbeef".into());
+        fi.metadata
+            .insert("content-type".into(), "image/jpeg".into());
+        fi.metadata
+            .insert("x-amz-meta-owner".into(), "arnav".into());
         fi
     }
 
@@ -838,15 +890,21 @@ mod tests {
         let rec = decode(Bytes::from(bytes)).unwrap();
         assert_eq!(rec.size, 5);
         assert_eq!(
-            rec.inline.as_ref().map(|frames| frames.iter().flat_map(|f| f.iter().copied()).collect::<Vec<u8>>()),
+            rec.inline.as_ref().map(|frames| frames
+                .iter()
+                .flat_map(|f| f.iter().copied())
+                .collect::<Vec<u8>>()),
             Some(b"hello".to_vec()),
         );
-        assert_eq!(rec.erasure.data_blocks,  3);
+        assert_eq!(rec.erasure.data_blocks, 3);
         assert_eq!(rec.erasure.parity_blocks, 1);
         assert_eq!(rec.erasure.distribution, vec![1, 2, 3, 4]);
         assert_eq!(rec.parts.len(), 1);
         assert_eq!(rec.parts[0].size, 5);
-        assert_eq!(rec.metadata.get("etag").map(String::as_str), Some("deadbeef"));
+        assert_eq!(
+            rec.metadata.get("etag").map(String::as_str),
+            Some("deadbeef")
+        );
     }
 
     #[test]
@@ -854,10 +912,10 @@ mod tests {
         // EC object — no inline tail, but data_dir names the
         // per-version on-disk directory holding part.N files.
         let mut fi = sample();
-        fi.data     = None;
+        fi.data = None;
         fi.data_dir = "deadbeef-cafe-1234-5678-90abcdef0011".into();
-        let enc   = encode(&fi).unwrap();
-        let rec   = decode(Bytes::from(enc.to_vec())).unwrap();
+        let enc = encode(&fi).unwrap();
+        let rec = decode(Bytes::from(enc.to_vec())).unwrap();
         assert!(rec.inline.is_none());
         assert_eq!(rec.size, 5);
         assert_eq!(rec.data_dir, "deadbeef-cafe-1234-5678-90abcdef0011");
@@ -867,34 +925,46 @@ mod tests {
     fn bad_magic_is_rejected() {
         let mut bytes = encode(&sample()).unwrap().to_vec();
         bytes[0] = b'Y';
-        assert!(matches!(decode(Bytes::from(bytes)), Err(IoError::CorruptMetadata { .. })));
+        assert!(matches!(
+            decode(Bytes::from(bytes)),
+            Err(IoError::CorruptMetadata { .. })
+        ));
     }
 
     #[test]
     fn future_major_version_is_flagged() {
         let mut bytes = encode(&sample()).unwrap().to_vec();
         bytes[4..6].copy_from_slice(&99u16.to_le_bytes());
-        assert!(matches!(decode(Bytes::from(bytes)), Err(IoError::UnsupportedMetadataVersion { .. })));
+        assert!(matches!(
+            decode(Bytes::from(bytes)),
+            Err(IoError::UnsupportedMetadataVersion { .. })
+        ));
     }
 
     #[test]
     fn old_minor_version_is_rejected() {
         let mut bytes = encode(&sample()).unwrap().to_vec();
         bytes[6..8].copy_from_slice(&1u16.to_le_bytes());
-        assert!(matches!(decode(Bytes::from(bytes)), Err(IoError::CorruptMetadata { .. })));
+        assert!(matches!(
+            decode(Bytes::from(bytes)),
+            Err(IoError::CorruptMetadata { .. })
+        ));
     }
 
     #[test]
     fn body_corruption_is_detected() {
         let mut bytes = encode(&sample()).unwrap().to_vec();
         bytes[20] ^= 0x01;
-        assert!(matches!(decode(Bytes::from(bytes)), Err(IoError::CorruptMetadata { .. })));
+        assert!(matches!(
+            decode(Bytes::from(bytes)),
+            Err(IoError::CorruptMetadata { .. })
+        ));
     }
 
     #[test]
     fn crc_slot_truncation_is_detected() {
-        let bytes     = encode(&sample()).unwrap().to_vec();
-        let body_len  = u32::from_be_bytes(bytes[9..13].try_into().unwrap()) as usize;
+        let bytes = encode(&sample()).unwrap().to_vec();
+        let body_len = u32::from_be_bytes(bytes[9..13].try_into().unwrap()) as usize;
         let head_only = &bytes[..HEADER_LEN + BIN32_HEADER_LEN + body_len + 2];
         assert!(matches!(
             decode(Bytes::copy_from_slice(head_only)),
@@ -905,19 +975,19 @@ mod tests {
     #[test]
     fn invalid_erasure_is_rejected_on_encode() {
         let mut fi = sample();
-        fi.erasure.parity_blocks = fi.erasure.data_blocks + 1;       // P > D
+        fi.erasure.parity_blocks = fi.erasure.data_blocks + 1; // P > D
         assert!(matches!(encode(&fi), Err(IoError::Encode(_))));
 
         let mut fi = sample();
-        fi.erasure.distribution = vec![1, 2];                         // wrong length
+        fi.erasure.distribution = vec![1, 2]; // wrong length
         assert!(matches!(encode(&fi), Err(IoError::Encode(_))));
 
         let mut fi = sample();
-        fi.erasure.index = 0;                                         // index < 1
+        fi.erasure.index = 0; // index < 1
         assert!(matches!(encode(&fi), Err(IoError::Encode(_))));
 
         let mut fi = sample();
-        fi.erasure.algorithm.clear();                                 // empty algorithm
+        fi.erasure.algorithm.clear(); // empty algorithm
         assert!(matches!(encode(&fi), Err(IoError::Encode(_))));
     }
 
@@ -933,9 +1003,9 @@ mod tests {
     fn delete_marker_round_trips() {
         let mut fi = sample();
         fi.deleted = true;
-        fi.size    = 0;
+        fi.size = 0;
         fi.parts.clear();
-        fi.data    = None;
+        fi.data = None;
         let enc = encode(&fi).unwrap();
         let rec = decode(Bytes::from(enc.to_vec())).unwrap();
         assert!(rec.deleted);
@@ -955,20 +1025,24 @@ mod tests {
     #[test]
     fn meta_sys_round_trips() {
         let mut fi = sample();
-        fi.meta_sys.insert("x-internal-test".into(), b"opaque-bytes".to_vec());
+        fi.meta_sys
+            .insert("x-internal-test".into(), b"opaque-bytes".to_vec());
         let enc = encode(&fi).unwrap();
         let rec = decode(Bytes::from(enc.to_vec())).unwrap();
-        assert_eq!(rec.meta_sys.get("x-internal-test"), Some(&b"opaque-bytes".to_vec()));
+        assert_eq!(
+            rec.meta_sys.get("x-internal-test"),
+            Some(&b"opaque-bytes".to_vec())
+        );
     }
 
     #[test]
     fn file_info_from_record_attaches_caller_context() {
         let enc = encode(&sample()).unwrap();
         let rec = decode(Bytes::from(enc.to_vec())).unwrap();
-        let fi    = file_info_from_record(rec, "photos", "dog.jpg");
+        let fi = file_info_from_record(rec, "photos", "dog.jpg");
         assert_eq!(fi.volume, "photos");
-        assert_eq!(fi.name,   "dog.jpg");
-        assert_eq!(fi.size,   5);
+        assert_eq!(fi.name, "dog.jpg");
+        assert_eq!(fi.size, 5);
         assert_eq!(fi.erasure.data_blocks, 3);
         assert_eq!(fi.parts.len(), 1);
     }
@@ -977,16 +1051,20 @@ mod tests {
     /// bytes, and mod time. Used to compose multi-version test fixtures.
     fn fi_inline(vid: &str, body: &[u8], mod_time_ms: u64) -> FileInfo {
         let mut fi = FileInfo::default();
-        fi.volume      = "photos".into();
-        fi.name        = "dog.jpg".into();
-        fi.version_id  = vid.into();
-        fi.size        = body.len() as i64;
+        fi.volume = "photos".into();
+        fi.name = "dog.jpg".into();
+        fi.version_id = vid.into();
+        fi.size = body.len() as i64;
         fi.mod_time_ms = mod_time_ms;
-        fi.data        = Some(vec![Bytes::copy_from_slice(body)]);
-        fi.parts       = vec![ObjectPartInfo {
-            etag: "etag".into(), number: 1,
-            size: body.len() as i64, actual_size: body.len() as i64,
-            mod_time_ms, index: Vec::new(), checksums: BTreeMap::new(),
+        fi.data = Some(vec![Bytes::copy_from_slice(body)]);
+        fi.parts = vec![ObjectPartInfo {
+            etag: "etag".into(),
+            number: 1,
+            size: body.len() as i64,
+            actual_size: body.len() as i64,
+            mod_time_ms,
+            index: Vec::new(),
+            checksums: BTreeMap::new(),
         }];
         fi.erasure = sample_erasure();
         fi.metadata.insert("etag".into(), "etag".into());
@@ -998,20 +1076,38 @@ mod tests {
     /// slice, no spill needed.
     #[test]
     fn round_trip_multi_version_inline() {
-        let v_new = fi_inline("11111111-1111-1111-1111-111111111111", b"newer-body!!", 1_700_000_002_000);
-        let v_old = fi_inline("22222222-2222-2222-2222-222222222222", b"older",        1_700_000_001_000);
+        let v_new = fi_inline(
+            "11111111-1111-1111-1111-111111111111",
+            b"newer-body!!",
+            1_700_000_002_000,
+        );
+        let v_old = fi_inline(
+            "22222222-2222-2222-2222-222222222222",
+            b"older",
+            1_700_000_001_000,
+        );
         // Caller pre-sorts newest-first.
-        let enc   = encode_versions(&[v_new.clone(), v_old.clone()]).unwrap();
-        let recs  = decode_all(Bytes::from(enc.to_vec())).unwrap();
+        let enc = encode_versions(&[v_new.clone(), v_old.clone()]).unwrap();
+        let recs = decode_all(Bytes::from(enc.to_vec())).unwrap();
 
         assert_eq!(recs.len(), 2);
         assert_eq!(recs[0].version_id, v_new.version_id);
         assert_eq!(recs[1].version_id, v_old.version_id);
 
-        let body0: Vec<u8> = recs[0].inline.as_ref().unwrap()
-            .iter().flat_map(|f| f.iter().copied()).collect();
-        let body1: Vec<u8> = recs[1].inline.as_ref().unwrap()
-            .iter().flat_map(|f| f.iter().copied()).collect();
+        let body0: Vec<u8> = recs[0]
+            .inline
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|f| f.iter().copied())
+            .collect();
+        let body1: Vec<u8> = recs[1]
+            .inline
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|f| f.iter().copied())
+            .collect();
         assert_eq!(body0, b"newer-body!!");
         assert_eq!(body1, b"older");
     }
@@ -1021,16 +1117,24 @@ mod tests {
     /// respective storage choice intact.
     #[test]
     fn round_trip_mixed_inline_and_ec() {
-        let mut v_ec = fi_inline("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", b"unused",  1_700_000_002_000);
-        v_ec.data    = None;
+        let mut v_ec = fi_inline(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            b"unused",
+            1_700_000_002_000,
+        );
+        v_ec.data = None;
         v_ec.data_dir = "deadbeef-cafe-1234-5678-90abcdef0011".into();
-        v_ec.size    = 1_000_000;
-        v_ec.parts[0].size        = 1_000_000;
+        v_ec.size = 1_000_000;
+        v_ec.parts[0].size = 1_000_000;
         v_ec.parts[0].actual_size = 1_000_000;
 
-        let v_inline = fi_inline("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", b"hello", 1_700_000_001_000);
+        let v_inline = fi_inline(
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            b"hello",
+            1_700_000_001_000,
+        );
 
-        let enc  = encode_versions(&[v_ec.clone(), v_inline.clone()]).unwrap();
+        let enc = encode_versions(&[v_ec.clone(), v_inline.clone()]).unwrap();
         let recs = decode_all(Bytes::from(enc.to_vec())).unwrap();
 
         assert_eq!(recs.len(), 2);
@@ -1038,8 +1142,13 @@ mod tests {
         assert!(recs[0].inline.is_none());
         assert_eq!(recs[0].data_dir, "deadbeef-cafe-1234-5678-90abcdef0011");
         // Inline version: has inline, empty data_dir.
-        let body: Vec<u8> = recs[1].inline.as_ref().unwrap()
-            .iter().flat_map(|f| f.iter().copied()).collect();
+        let body: Vec<u8> = recs[1]
+            .inline
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|f| f.iter().copied())
+            .collect();
         assert_eq!(body, b"hello");
         assert_eq!(recs[1].data_dir, "");
     }
@@ -1048,15 +1157,29 @@ mod tests {
     /// for any inline version, not just the newest.
     #[test]
     fn find_version_returns_inline_for_older_version() {
-        let v_new = fi_inline("11111111-1111-1111-1111-111111111111", b"new", 1_700_000_002_000);
-        let v_old = fi_inline("22222222-2222-2222-2222-222222222222", b"old", 1_700_000_001_000);
-        let enc   = encode_versions(&[v_new, v_old]).unwrap();
+        let v_new = fi_inline(
+            "11111111-1111-1111-1111-111111111111",
+            b"new",
+            1_700_000_002_000,
+        );
+        let v_old = fi_inline(
+            "22222222-2222-2222-2222-222222222222",
+            b"old",
+            1_700_000_001_000,
+        );
+        let enc = encode_versions(&[v_new, v_old]).unwrap();
         let bytes = Bytes::from(enc.to_vec());
 
         let r_old = find_version(bytes.clone(), "22222222-2222-2222-2222-222222222222")
-            .unwrap().expect("older version must be found");
-        let body: Vec<u8> = r_old.inline.as_ref().unwrap()
-            .iter().flat_map(|f| f.iter().copied()).collect();
+            .unwrap()
+            .expect("older version must be found");
+        let body: Vec<u8> = r_old
+            .inline
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|f| f.iter().copied())
+            .collect();
         assert_eq!(body, b"old");
     }
 
@@ -1073,7 +1196,7 @@ mod tests {
     #[test]
     fn inline_size_mismatch_is_rejected() {
         let mut fi = sample();
-        fi.size = 999;   // body is 5 bytes
+        fi.size = 999; // body is 5 bytes
         assert!(matches!(encode(&fi), Err(IoError::Encode(_))));
     }
 
@@ -1081,13 +1204,24 @@ mod tests {
     /// as a corrupt-metadata error rather than a silent short read.
     #[test]
     fn inline_range_exceeding_tail_is_rejected() {
-        let v0 = fi_inline("11111111-1111-1111-1111-111111111111", b"twelve-bytes", 1_700_000_002_000);
-        let v1 = fi_inline("22222222-2222-2222-2222-222222222222", b"five!",        1_700_000_001_000);
+        let v0 = fi_inline(
+            "11111111-1111-1111-1111-111111111111",
+            b"twelve-bytes",
+            1_700_000_002_000,
+        );
+        let v1 = fi_inline(
+            "22222222-2222-2222-2222-222222222222",
+            b"five!",
+            1_700_000_001_000,
+        );
         let enc = encode_versions(&[v0, v1]).unwrap();
         let mut bytes = enc.to_vec();
         // Drop the last 6 bytes of the tail — the second version's
         // inline range now runs past EOF.
         bytes.truncate(bytes.len() - 6);
-        assert!(matches!(decode_all(Bytes::from(bytes)), Err(IoError::CorruptMetadata { .. })));
+        assert!(matches!(
+            decode_all(Bytes::from(bytes)),
+            Err(IoError::CorruptMetadata { .. })
+        ));
     }
 }

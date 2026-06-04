@@ -47,13 +47,18 @@ impl<T: Serialize> IntoResponse for Xml<T> {
 #[derive(Serialize)]
 #[serde(rename = "LocationConstraint")]
 pub struct LocationConstraint {
-    #[serde(rename = "@xmlns")] pub xmlns: &'static str,
-    #[serde(rename = "$text")]  pub region: String,
+    #[serde(rename = "@xmlns")]
+    pub xmlns: &'static str,
+    #[serde(rename = "$text")]
+    pub region: String,
 }
 
 impl LocationConstraint {
     pub fn new(region: String) -> Self {
-        Self { xmlns: S3_NS, region }
+        Self {
+            xmlns: S3_NS,
+            region,
+        }
     }
 }
 
@@ -75,9 +80,9 @@ impl VersioningConfiguration {
     pub fn for_status(status: &openlake_io::VersioningStatus) -> Self {
         use openlake_io::VersioningStatus;
         Self {
-            xmlns:  S3_NS.to_owned(),
+            xmlns: S3_NS.to_owned(),
             status: match status {
-                VersioningStatus::Enabled   => Some("Enabled".to_owned()),
+                VersioningStatus::Enabled => Some("Enabled".to_owned()),
                 VersioningStatus::Suspended => Some("Suspended".to_owned()),
                 VersioningStatus::Unversioned => None,
             },
@@ -93,15 +98,27 @@ impl VersioningConfiguration {
 #[derive(Serialize)]
 #[serde(rename = "ListBucketResult")]
 pub struct ListBucketResult {
-    #[serde(rename = "@xmlns")]      pub xmlns:        &'static str,
-    #[serde(rename = "Name")]        pub name:         String,
-    #[serde(rename = "Prefix",      skip_serializing_if = "String::is_empty")] pub prefix:        String,
-    #[serde(rename = "KeyCount")]    pub key_count:    u32,
-    #[serde(rename = "MaxKeys")]     pub max_keys:     u32,
-    #[serde(rename = "IsTruncated")] pub is_truncated: bool,
-    #[serde(rename = "ContinuationToken",     skip_serializing_if = "Option::is_none")] pub continuation_token:     Option<String>,
-    #[serde(rename = "NextContinuationToken", skip_serializing_if = "Option::is_none")] pub next_continuation_token: Option<String>,
-    #[serde(rename = "Contents", default)] pub contents: Vec<ListBucketObject>,
+    #[serde(rename = "@xmlns")]
+    pub xmlns: &'static str,
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Prefix", skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    #[serde(rename = "KeyCount")]
+    pub key_count: u32,
+    #[serde(rename = "MaxKeys")]
+    pub max_keys: u32,
+    #[serde(rename = "IsTruncated")]
+    pub is_truncated: bool,
+    #[serde(rename = "ContinuationToken", skip_serializing_if = "Option::is_none")]
+    pub continuation_token: Option<String>,
+    #[serde(
+        rename = "NextContinuationToken",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub next_continuation_token: Option<String>,
+    #[serde(rename = "Contents", default)]
+    pub contents: Vec<ListBucketObject>,
 }
 
 /// One `<Contents>` entry inside `ListBucketResult`. Only the fields
@@ -112,11 +129,16 @@ pub struct ListBucketResult {
 #[derive(Serialize)]
 #[serde(rename = "Contents")]
 pub struct ListBucketObject {
-    #[serde(rename = "Key")]          pub key:           String,
-    #[serde(rename = "LastModified")] pub last_modified: String,
-    #[serde(rename = "ETag")]         pub etag:          String,
-    #[serde(rename = "Size")]         pub size:          u64,
-    #[serde(rename = "StorageClass")] pub storage_class: String,
+    #[serde(rename = "Key")]
+    pub key: String,
+    #[serde(rename = "LastModified")]
+    pub last_modified: String,
+    #[serde(rename = "ETag")]
+    pub etag: String,
+    #[serde(rename = "Size")]
+    pub size: u64,
+    #[serde(rename = "StorageClass")]
+    pub storage_class: String,
 }
 
 /// Body of `POST /{bucket}/{key}?uploads`, returned by
@@ -127,19 +149,26 @@ pub struct ListBucketObject {
 #[derive(Serialize)]
 #[serde(rename = "InitiateMultipartUploadResult")]
 pub struct InitiateMultipartUploadResult {
-    #[serde(rename = "@xmlns")] pub xmlns:     &'static str,
-    #[serde(rename = "Bucket")] pub bucket:    String,
-    #[serde(rename = "Key")]    pub key:       String,
-    #[serde(rename = "UploadId")] pub upload_id: String,
+    #[serde(rename = "@xmlns")]
+    pub xmlns: &'static str,
+    #[serde(rename = "Bucket")]
+    pub bucket: String,
+    #[serde(rename = "Key")]
+    pub key: String,
+    #[serde(rename = "UploadId")]
+    pub upload_id: String,
 }
 
 impl InitiateMultipartUploadResult {
     pub fn new(bucket: String, key: String, upload_id: String) -> Self {
-        Self { xmlns: S3_NS, bucket, key, upload_id }
+        Self {
+            xmlns: S3_NS,
+            bucket,
+            key,
+            upload_id,
+        }
     }
 }
-
-
 
 // ---------------------------------------------------------------------------
 // CompleteMultipartUpload — request body + response shape
@@ -159,8 +188,10 @@ pub struct CompleteMultipartUploadRequest {
 #[derive(Deserialize, Debug)]
 #[serde(rename = "Part")]
 pub struct CompleteMultipartUploadPart {
-    #[serde(rename = "PartNumber")] pub part_number: u32,
-    #[serde(rename = "ETag")]       pub etag:        String,
+    #[serde(rename = "PartNumber")]
+    pub part_number: u32,
+    #[serde(rename = "ETag")]
+    pub etag: String,
 }
 
 /// `<CompleteMultipartUploadResult>` response. `Location` is the
@@ -169,16 +200,27 @@ pub struct CompleteMultipartUploadPart {
 #[derive(Serialize)]
 #[serde(rename = "CompleteMultipartUploadResult")]
 pub struct CompleteMultipartUploadResult {
-    #[serde(rename = "@xmlns")]   pub xmlns:    &'static str,
-    #[serde(rename = "Location")] pub location: String,
-    #[serde(rename = "Bucket")]   pub bucket:   String,
-    #[serde(rename = "Key")]      pub key:      String,
-    #[serde(rename = "ETag")]     pub etag:     String,
+    #[serde(rename = "@xmlns")]
+    pub xmlns: &'static str,
+    #[serde(rename = "Location")]
+    pub location: String,
+    #[serde(rename = "Bucket")]
+    pub bucket: String,
+    #[serde(rename = "Key")]
+    pub key: String,
+    #[serde(rename = "ETag")]
+    pub etag: String,
 }
 
 impl CompleteMultipartUploadResult {
     pub fn new(bucket: String, key: String, etag: String) -> Self {
         let location = format!("/{bucket}/{key}");
-        Self { xmlns: S3_NS, location, bucket, key, etag }
+        Self {
+            xmlns: S3_NS,
+            location,
+            bucket,
+            key,
+            etag,
+        }
     }
 }
