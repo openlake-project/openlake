@@ -2034,6 +2034,126 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "openlake_cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "compio",
+ "futures-util",
+ "openlake_io",
+ "openlake_storage",
+ "serde",
+ "toml",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "openlake_io"
+version = "0.1.0"
+dependencies = [
+ "aligned-vec",
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bincode",
+ "bindgen 0.71.1",
+ "bytes",
+ "compio",
+ "crc32c",
+ "crossbeam-queue",
+ "cyper",
+ "futures",
+ "futures-util",
+ "http 1.4.0",
+ "libc",
+ "lru",
+ "once_cell",
+ "rdma-mummy-sys",
+ "rmp-serde",
+ "rustls",
+ "send_wrapper",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "openlake_server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-smithy-runtime-api",
+ "axum",
+ "base64",
+ "bytes",
+ "clap",
+ "compio",
+ "cyper",
+ "cyper-axum",
+ "futures",
+ "futures-util",
+ "hex",
+ "http 1.4.0",
+ "http-body-util",
+ "httparse",
+ "hwlocality",
+ "md-5",
+ "nix",
+ "openlake_io",
+ "openlake_storage",
+ "quick-xml",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "send_wrapper",
+ "serde",
+ "sha2",
+ "socket2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "time",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "openlake_storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "blake3",
+ "bytes",
+ "compio",
+ "futures-util",
+ "hex",
+ "openlake_io",
+ "reed-solomon-simd",
+ "regex",
+ "rmp-serde",
+ "serde",
+ "siphasher",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2082,126 +2202,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "phenomenal_cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "clap",
- "compio",
- "futures-util",
- "phenomenal_io",
- "phenomenal_storage",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "phenomenal_io"
-version = "0.1.0"
-dependencies = [
- "aligned-vec",
- "anyhow",
- "async-trait",
- "base64",
- "bincode",
- "bindgen 0.71.1",
- "bytes",
- "compio",
- "crc32c",
- "crossbeam-queue",
- "cyper",
- "futures",
- "futures-util",
- "http 1.4.0",
- "libc",
- "lru",
- "once_cell",
- "rdma-mummy-sys",
- "rmp-serde",
- "rustls",
- "send_wrapper",
- "serde",
- "serde_json",
- "socket2",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "xxhash-rust",
-]
-
-[[package]]
-name = "phenomenal_server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "aws-credential-types",
- "aws-sigv4",
- "aws-smithy-runtime-api",
- "axum",
- "base64",
- "bytes",
- "clap",
- "compio",
- "cyper",
- "cyper-axum",
- "futures",
- "futures-util",
- "hex",
- "http 1.4.0",
- "http-body-util",
- "httparse",
- "hwlocality",
- "md-5",
- "nix",
- "phenomenal_io",
- "phenomenal_storage",
- "quick-xml",
- "rcgen",
- "rustls",
- "rustls-pemfile",
- "send_wrapper",
- "serde",
- "sha2",
- "socket2",
- "tempfile",
- "thiserror 2.0.18",
- "time",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "phenomenal_storage"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64",
- "blake3",
- "bytes",
- "compio",
- "futures-util",
- "hex",
- "phenomenal_io",
- "reed-solomon-simd",
- "regex",
- "rmp-serde",
- "serde",
- "siphasher",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
- "uuid",
-]
 
 [[package]]
 name = "pin-project-lite"
