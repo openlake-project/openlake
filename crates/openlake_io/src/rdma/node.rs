@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use futures::channel::oneshot;
+use rdma_mummy_sys::ibv_ah;
 use serde::{Deserialize, Serialize};
 
 use super::ah_cache::AhCache;
@@ -13,6 +14,15 @@ use super::device::IbDevice;
 use super::rdma_buf::RdmaBufPool;
 use super::socket::{CqPump, IbSocket};
 use super::wire::RdmaResponse;
+use super::wr::PeerKey;
+
+pub struct PendingResponse {
+    pub tx:           oneshot::Sender<RdmaResponse>,
+    pub peer:         PeerKey,
+    pub ah:           *mut ibv_ah,
+    pub peer_dct_num: u32,
+    pub peer_dc_key:  u64,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PeerEndpoint {
@@ -59,14 +69,15 @@ pub struct RdmaNode {
     pub routing:           Arc<ClusterRoutingTable>,
     pub pump:              CqPump,
     pub next_request_id:   Cell<u64>,
-    pub pending_responses: RefCell<HashMap<u64, oneshot::Sender<RdmaResponse>>>,
+    pub pending_responses: RefCell<HashMap<u64, PendingResponse>>,
     pub bulk_pool:         Rc<RdmaBufPool>,
 }
 
 impl RdmaNode {
     pub fn start_local(cfg: &RdmaConfig) -> io::Result<(RdmaSetup, LocalEndpoint)> {
         let dev       = Rc::new(IbDevice::open(&cfg.dev_name)?);
-        let sock      = Rc::new(IbSocket::new(dev.clone(), cfg.dc_key, cfg.qos)?);
+        let self_key  = PeerKey::new(cfg.self_node_id, cfg.runtime_id);
+        let sock      = Rc::new(IbSocket::new(dev.clone(), cfg.dc_key, cfg.qos, self_key)?);
         let ah_cache  = Rc::new(AhCache::new(dev.clone(), cfg.qos, dev.gid_index, dev.port_attr.lid));
         let pump      = CqPump::start(sock.clone())?;
         let self_dct  = sock.self_dct_identifier;

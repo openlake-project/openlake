@@ -176,16 +176,32 @@ impl RemoteBackend {
     /// undecodable bodies fall back to a generic
     /// `rpc http <status>` error.
     async fn unary(&self, req: Request) -> IoResult<Response> {
+        let req_label = format!("{:?}", std::mem::discriminant(&req));
+        let t_total = std::time::Instant::now();
+        tracing::info!(peer_base = %self.peer.base, req = %req_label, "UNARY_RCA enter");
         let body = rpc::encode(&req)?;
-        let resp = self
+        let t_send = std::time::Instant::now();
+        let post_builder = self
             .peer.client
             .post(self.peer.url(URL_RPC))
-            .map_err(map_http)?
+            .map_err(|e| {
+                tracing::error!(peer_base = %self.peer.base, req = %req_label, error = %e, "UNARY_RCA post-builder err");
+                map_http(e)
+            })?;
+        let resp = post_builder
             .body(body)
             .send().await
-            .map_err(map_http)?;
+            .map_err(|e| {
+                tracing::error!(peer_base = %self.peer.base, req = %req_label, send_ms = t_send.elapsed().as_millis() as u64, error = %e, "UNARY_RCA send err");
+                map_http(e)
+            })?;
         let status = resp.status();
-        let bytes  = resp.bytes().await.map_err(map_http)?;
+        tracing::info!(peer_base = %self.peer.base, req = %req_label, %status, send_ms = t_send.elapsed().as_millis() as u64, "UNARY_RCA got head");
+        let bytes  = resp.bytes().await.map_err(|e| {
+            tracing::error!(peer_base = %self.peer.base, req = %req_label, error = %e, "UNARY_RCA body err");
+            map_http(e)
+        })?;
+        tracing::info!(peer_base = %self.peer.base, req = %req_label, total_ms = t_total.elapsed().as_millis() as u64, n_bytes = bytes.len(), "UNARY_RCA done");
         if !status.is_success() {
             if let Ok(Response::Err(e)) = rpc::decode::<Response>(&bytes) {
                 return Err(e.into());

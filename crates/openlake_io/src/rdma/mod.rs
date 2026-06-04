@@ -14,8 +14,9 @@ pub use ah_cache::AhCache;
 pub use bootstrap::{ClusterRoutingTable, LocalEndpoint};
 pub use buffers::BUF_SIZE;
 pub use device::IbDevice;
-pub use node::{PeerEndpoint, RdmaConfig, RdmaNode, RdmaQos, RdmaSetup};
+pub use node::{PeerEndpoint, PendingResponse, RdmaConfig, RdmaNode, RdmaQos, RdmaSetup};
 pub use rdma_buf::{RdmaBuf, RdmaBufPool};
 pub use socket::{CqPump, IbSocket};
+pub use wr::PeerKey;
 
 pub type RawAddressHandle = *mut rdma_mummy_sys::ibv_ah;

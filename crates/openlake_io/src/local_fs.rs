@@ -968,16 +968,27 @@ impl StorageBackend for LocalFsBackend {
 
     async fn read_format(&self) -> IoResult<Option<crate::types::FormatJson>> {
         let path = self.root.join(FORMAT_FILENAME);
+        tracing::info!(path = %path.display(), root = %self.root.display(), "LOCAL_RCA read_format attempt");
         match compio::fs::read(&path).await {
             Ok(bytes) => {
+                let head: Vec<u8> = bytes.iter().take(16).copied().collect();
+                tracing::warn!(path = %path.display(), n_bytes = bytes.len(), head_hex = %hex_dump(&head), "LOCAL_RCA read_format Ok(bytes)");
                 let fmt: crate::types::FormatJson = serde_json::from_slice(&bytes)
                     .map_err(|e| IoError::Decode(format!("format.json: {e}")))?;
+                tracing::warn!(path = %path.display(), format = %fmt.format, version = fmt.version, this_disk = fmt.this_disk, "LOCAL_RCA read_format parsed");
                 Ok(Some(fmt))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(IoError::Io(e)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::info!(path = %path.display(), "LOCAL_RCA read_format NotFound");
+                Ok(None)
+            }
+            Err(e) => {
+                tracing::error!(path = %path.display(), kind = ?e.kind(), error = %e, "LOCAL_RCA read_format Err");
+                Err(IoError::Io(e))
+            }
         }
     }
+
 
     async fn write_file(&self, volume: &str, path: &str, bytes: Vec<u8>) -> IoResult<()> {
         self.require_vol(volume).await?;
@@ -1513,4 +1524,10 @@ mod tests {
         assert_eq!(purged_high, 0, "young dirs must be left alone");
         assert!(std::fs::metadata(&fresh).is_ok());
     }
+}
+
+fn hex_dump(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 3);
+    for b in bytes { s.push_str(&format!("{:02x} ", b)); }
+    s
 }
