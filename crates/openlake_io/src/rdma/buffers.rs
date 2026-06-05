@@ -12,11 +12,22 @@ use rdma_mummy_sys::{
 
 use super::device::IbDevice;
 
-pub const BUF_SIZE:         usize = 16 * 1024;
-pub const SEND_BUF_CNT:     usize = 4;
-pub const BUF_ACK_BATCH:    u32   = 8;
-pub const BUF_SIGNAL_BATCH: u32   = 8;
-const PAGE_ALIGN:           usize = 4096;
+pub const BUF_SIZE:           usize = 16 * 1024;
+pub const SEND_BUF_CNT:       usize = 4;
+pub const PEER_CREDIT_BUDGET: u32   = SEND_BUF_CNT as u32;
+const PAGE_ALIGN:             usize = 4096;
+
+pub fn buf_ack_batch() -> u32 {
+    use std::sync::OnceLock;
+    static V: OnceLock<u32> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("OPENLAKE_BUF_ACK_BATCH")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n: &u32| *n > 0)
+            .unwrap_or(4)
+    })
+}
 
 pub struct BufferMem {
     base:   NonNull<u8>,

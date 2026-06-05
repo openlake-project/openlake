@@ -7,13 +7,23 @@ use futures::channel::oneshot;
 use crate::backend::StorageBackend;
 use crate::error::{IoError, IoResult};
 use crate::rdma::wire::{Envelope, ENVELOPE_MAGIC, RdmaRemoteBuf, RdmaRequest, RdmaResponse};
-use crate::rdma::RdmaNode;
+use crate::rdma::{PeerKey, RdmaNode};
 use crate::rpc::{encode, Request, Response};
 use crate::stream::{ByteSink, ByteStream};
 use crate::types::{
     DeleteOptions, DiskInfo, FileInfo, FormatJson, RenameDataResp, RenameOptions,
     UpdateMetadataOpts, VolInfo,
 };
+
+static RDMA_NETWORK_TIMEOUT_CELL: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+
+pub fn rdma_network_timeout() -> std::time::Duration {
+    *RDMA_NETWORK_TIMEOUT_CELL.get_or_init(|| std::time::Duration::from_secs(10 * 60 * 60))
+}
+
+pub fn set_rdma_network_timeout(d: std::time::Duration) {
+    let _ = RDMA_NETWORK_TIMEOUT_CELL.set(d);
+}
 
 #[derive(Clone)]
 pub struct RdmaBackend {
@@ -41,6 +51,7 @@ impl RdmaBackend {
             )))?
             .clone();
         let ah = self.node.ah_cache.get_or_create(&peer).map_err(IoError::Io)?;
+        let peer_key = PeerKey::new(self.peer_id, self.node.runtime_id);
 
         let request_id = {
             let id = self.node.next_request_id.get();
@@ -48,7 +59,14 @@ impl RdmaBackend {
             id
         };
         let (tx, rx) = oneshot::channel();
-        self.node.pending_responses.borrow_mut().insert(request_id, tx);
+        self.node.pending_responses.borrow_mut().insert(
+            request_id,
+            crate::rdma::PendingResponse {
+                tx, peer: peer_key, ah,
+                peer_dct_num: peer.dct_num,
+                peer_dc_key:  peer.dc_key,
+            },
+        );
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
@@ -58,15 +76,20 @@ impl RdmaBackend {
             payload: RdmaRequest::Generic(payload),
         };
         let body = encode(&env)?;
-        if let Err(e) = self.node.sock.send_kinded(&body, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::Unary).await {
+        if let Err(e) = self.node.sock.send_with_kind(&body, peer_key, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::Unary).await {
             self.node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
 
-        match rx.await {
-            Ok(RdmaResponse::Generic(resp)) => Ok(resp),
-            Ok(other) => Err(IoError::Decode(format!("unary expected Generic, got {other:?}"))),
-            Err(_)    => Err(IoError::Io(io::Error::other("dispatcher dropped waiter"))),
+        let timeout = rdma_network_timeout();
+        match compio::time::timeout(timeout, rx).await {
+            Ok(Ok(RdmaResponse::Generic(resp))) => Ok(resp),
+            Ok(Ok(other)) => Err(IoError::Decode(format!("unary expected Generic, got {other:?}"))),
+            Ok(Err(_))    => Err(IoError::Io(io::Error::other("dispatcher dropped waiter"))),
+            Err(_)        => {
+                self.node.pending_responses.borrow_mut().remove(&request_id);
+                Err(IoError::Io(io::Error::other(format!("unary rdma response timeout ({:?})", timeout))))
+            }
         }
     }
 
@@ -80,6 +103,7 @@ impl RdmaBackend {
             )))?
             .clone();
         let ah = node.ah_cache.get_or_create(&peer).map_err(IoError::Io)?;
+        let peer_key = PeerKey::new(self.peer_id, node.runtime_id);
 
         let buf    = node.bulk_pool.acquire().await.map_err(IoError::Io)?;
         let target = buf.as_remote(length);
@@ -90,7 +114,14 @@ impl RdmaBackend {
             id
         };
         let (resp_tx, resp_rx) = oneshot::channel();
-        node.pending_responses.borrow_mut().insert(request_id, resp_tx);
+        node.pending_responses.borrow_mut().insert(
+            request_id,
+            crate::rdma::PendingResponse {
+                tx: resp_tx, peer: peer_key, ah,
+                peer_dct_num: peer.dct_num,
+                peer_dc_key:  peer.dc_key,
+            },
+        );
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
@@ -107,7 +138,7 @@ impl RdmaBackend {
             },
         };
         let body = encode(&env)?;
-        if let Err(e) = node.sock.send_kinded(&body, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::ChunkReadReq).await {
+        if let Err(e) = node.sock.send_with_kind(&body, peer_key, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::ChunkReadReq).await {
             node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
@@ -152,6 +183,7 @@ impl RdmaBackend {
             )))?
             .clone();
         let ah = node.ah_cache.get_or_create(&peer).map_err(IoError::Io)?;
+        let peer_key = PeerKey::new(self.peer_id, node.runtime_id);
 
         let len = data.len();
         if len > u32::MAX as usize {
@@ -168,7 +200,14 @@ impl RdmaBackend {
             id
         };
         let (resp_tx, resp_rx) = oneshot::channel();
-        node.pending_responses.borrow_mut().insert(request_id, resp_tx);
+        node.pending_responses.borrow_mut().insert(
+            request_id,
+            crate::rdma::PendingResponse {
+                tx: resp_tx, peer: peer_key, ah,
+                peer_dct_num: peer.dct_num,
+                peer_dc_key:  peer.dc_key,
+            },
+        );
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
@@ -185,15 +224,18 @@ impl RdmaBackend {
             },
         };
         let body = encode(&env)?;
-        if let Err(e) = node.sock.send_kinded(&body, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::ChunkWriteReq).await {
+        if let Err(e) = node.sock.send_with_kind(&body, peer_key, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::ChunkWriteReq).await {
             node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
 
         let (done_tx, done_rx) = oneshot::channel::<IoResult<()>>();
+        let cleanup_node = node.clone();
+        let cleanup_request_id = request_id;
         compio::runtime::spawn(async move {
-            let result: IoResult<()> = match resp_rx.await {
-                Ok(RdmaResponse::ChunkWritten { bytes_written }) => {
+            let timeout = rdma_network_timeout();
+            let result: IoResult<()> = match compio::time::timeout(timeout, resp_rx).await {
+                Ok(Ok(RdmaResponse::ChunkWritten { bytes_written })) => {
                     drop(buf);
                     if (bytes_written as usize) != len {
                         Err(IoError::Io(io::Error::other(format!(
@@ -203,14 +245,19 @@ impl RdmaBackend {
                         Ok(())
                     }
                 }
-                Ok(RdmaResponse::Generic(Response::Err(e))) => { drop(buf); Err(IoError::from(e)) }
-                Ok(other) => {
+                Ok(Ok(RdmaResponse::Generic(Response::Err(e)))) => { drop(buf); Err(IoError::from(e)) }
+                Ok(Ok(other)) => {
                     drop(buf);
                     Err(IoError::Decode(format!("expected ChunkWritten, got {other:?}")))
                 }
-                Err(_) => {
+                Ok(Err(_)) => {
                     drop(buf);
                     Err(IoError::Io(io::Error::other("dispatcher dropped chunk waiter")))
+                }
+                Err(_) => {
+                    cleanup_node.pending_responses.borrow_mut().remove(&cleanup_request_id);
+                    drop(buf);
+                    Err(IoError::Io(io::Error::other(format!("chunk_write rdma response timeout ({:?})", timeout))))
                 }
             };
             let _ = done_tx.send(result);

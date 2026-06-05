@@ -6,7 +6,7 @@ use std::sync::Arc;
 use futures::stream::StreamExt;
 use openlake_io::error::IoError;
 use openlake_io::rdma::wire::{Envelope, ENVELOPE_MAGIC, RdmaRemoteBuf, RdmaRequest, RdmaResponse};
-use openlake_io::rdma::{BUF_SIZE, RawAddressHandle, RdmaNode};
+use openlake_io::rdma::{BUF_SIZE, PeerKey, RawAddressHandle, RdmaNode};
 use openlake_io::rpc::{decode, encode, Response, WireError};
 use openlake_io::stream::ByteStream;
 use openlake_io::{LocalFsBackend, StorageBackend};
@@ -28,7 +28,16 @@ pub async fn serve(
         loop {
             buf.clear();
             if node.sock.attempt_singular_rcv(&mut buf).is_none() { break; }
-            handle(&node, &disks, &local_disks, &locks, &endpoints, &buf).await;
+            let bytes = std::mem::take(&mut buf);
+            buf = Vec::with_capacity(BUF_SIZE);
+            let n = node.clone();
+            let d = disks.clone();
+            let ld = local_disks.clone();
+            let l = locks.clone();
+            let ep = endpoints.clone();
+            compio::runtime::spawn(async move {
+                handle(&n, &d, &ld, &l, &ep, &bytes).await;
+            }).detach();
         }
         if rx.next().await.is_none() { return Ok(()); }
     }
@@ -63,6 +72,11 @@ async fn handle(
                 Ok(ah) => ah,
                 Err(e) => { tracing::warn!("rdma_server: ah for {}: {e}", from_node_id); return; }
             };
+            let sender_key = PeerKey::new(from_node_id, from_runtime_id);
+
+            if let Err(e) = node.sock.note_drain(sender_key, sender_ah, sender.dct_num, sender.dc_key) {
+                tracing::warn!("rdma_server: note_drain: {e}");
+            }
 
             let resp = match payload {
                 RdmaRequest::ReadFileChunk { disk_idx, volume, path, offset, length, target } =>
@@ -87,7 +101,7 @@ async fn handle(
                 Ok(b)  => b,
                 Err(e) => { tracing::warn!("rdma_server: encode response: {e}"); return; }
             };
-            if let Err(e) = node.sock.send_kinded(&body, sender_ah, sender.dct_num, sender.dc_key, openlake_io::rdma::wr::SendKind::Response).await {
+            if let Err(e) = node.sock.send_with_kind(&body, sender_key, sender_ah, sender.dct_num, sender.dc_key, openlake_io::rdma::wr::SendKind::Response).await {
                 tracing::warn!("rdma_server: send response: {e}");
             }
         }
@@ -96,8 +110,11 @@ async fn handle(
                 tracing::warn!("rdma_server: bad response magic {:#x}", magic);
                 return;
             }
-            if let Some(tx) = node.pending_responses.borrow_mut().remove(&request_id) {
-                let _ = tx.send(payload);
+            if let Some(pending) = node.pending_responses.borrow_mut().remove(&request_id) {
+                if let Err(e) = node.sock.note_drain(pending.peer, pending.ah, pending.peer_dct_num, pending.peer_dc_key) {
+                    tracing::warn!("rdma_server: note_drain on rsp: {e}");
+                }
+                let _ = pending.tx.send(payload);
             } else {
                 tracing::warn!("rdma_server: unmatched response request_id {request_id}");
             }

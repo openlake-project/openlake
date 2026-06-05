@@ -84,6 +84,12 @@ fn main() -> anyhow::Result<()> {
     openlake_io::MemoryPool::init_pool(&(&cfg.memory_pool).into());
     openlake_io::init_purge_worker();
 
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
+    if let Some(rdma_cfg) = cfg.rdma.as_ref() {
+        let to = std::time::Duration::from_secs(rdma_cfg.network_timeout_secs);
+        openlake_io::rdma_backend::set_rdma_network_timeout(to);
+    }
+
     // One runtime per physical core. Hyperthread siblings are
     // skipped so two runtimes never share a physical core's L1/L2.
     let cpus = physical_cores().context("enumerate physical cores")?;
@@ -356,6 +362,7 @@ async fn run_runtime(
                 let rdma_cfg = build_rdma_config(
                     cfg.rdma.as_ref().expect("rdma transport requires [rdma]"),
                     runtime_id as u16,
+                    cfg.nodes.len() as u16,
                 );
                 let (setup, my_endpoint) = openlake_io::rdma::RdmaNode::start_local(&rdma_cfg)
                     .context("rdma start_local")?;
@@ -438,7 +445,6 @@ async fn run_runtime(
             }
         }
         let routing = Arc::new(routing);
-        tracing::info!(runtime_id, entries = routing.len(), "rdma routing table populated");
         Some(Rc::new(openlake_io::rdma::RdmaNode::finalize(&rdma_cfg, setup, routing)))
     } else {
         None
@@ -575,7 +581,7 @@ async fn run_runtime(
 }
 
 #[cfg(all(feature = "rdma", target_os = "linux"))]
-fn build_rdma_config(t: &config::RdmaToml, runtime_id: u16) -> openlake_io::rdma::RdmaConfig {
+fn build_rdma_config(t: &config::RdmaToml, runtime_id: u16, num_cluster_nodes: u16) -> openlake_io::rdma::RdmaConfig {
     openlake_io::rdma::RdmaConfig {
         self_node_id: t.self_node_id,
         runtime_id,
@@ -587,6 +593,7 @@ fn build_rdma_config(t: &config::RdmaToml, runtime_id: u16) -> openlake_io::rdma
         },
         bulk_buf_size: openlake_storage::DEFAULT_EC_PER_SHARD_BYTES,
         bulk_pool_cap: t.bulk_pool_cap,
+        num_cluster_nodes,
     }
 }
 

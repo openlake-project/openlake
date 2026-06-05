@@ -32,4 +32,8 @@ impl ClusterRoutingTable {
 
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&(u16, u16), &PeerEndpoint)> {
+        self.entries.iter()
+    }
 }

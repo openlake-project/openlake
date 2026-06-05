@@ -979,6 +979,7 @@ impl StorageBackend for LocalFsBackend {
         }
     }
 
+
     async fn write_file(&self, volume: &str, path: &str, bytes: Vec<u8>) -> IoResult<()> {
         self.require_vol(volume).await?;
         let final_path = self.file_path(volume, path);
@@ -1514,3 +1515,4 @@ mod tests {
         assert!(std::fs::metadata(&fresh).is_ok());
     }
 }
+

@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::mem;
 use std::ptr::{self, NonNull};
@@ -15,11 +15,11 @@ use rdma_mummy_sys::{
     ibv_qp_init_attr_ex, ibv_qp_state, ibv_qp_to_qp_ex, ibv_qp_type, ibv_recv_wr,
     ibv_req_notify_cq, ibv_send_flags, ibv_sge, ibv_srq, ibv_srq_init_attr, ibv_wc,
     ibv_wc_flags, ibv_wc_opcode, ibv_wc_status, ibv_wr_complete, ibv_wr_rdma_read,
-    ibv_wr_rdma_write, ibv_wr_send, ibv_wr_send_imm, ibv_wr_set_sge, ibv_wr_start,
+    ibv_wr_rdma_write, ibv_wr_send, ibv_wr_send_imm, ibv_wr_set_sge, ibv_wr_set_sge_list, ibv_wr_start,
 };
 
 use super::buffers::{
-    RecvBuffers, SendBuffers, BUF_ACK_BATCH, BUF_SIGNAL_BATCH, BUF_SIZE, SEND_BUF_CNT,
+    buf_ack_batch, RecvBuffers, SendBuffers, BUF_SIZE, PEER_CREDIT_BUDGET, SEND_BUF_CNT,
 };
 use super::device::{IbDevice, PORT_NUM};
 use super::node::RdmaQos;
@@ -28,7 +28,7 @@ use super::mlx5dv_sys::{
     mlx5dv_dc_type_MLX5DV_DCTYPE_DCT, mlx5dv_dc_type_MLX5DV_DCTYPE_DCI,
     mlx5dv_qp_init_attr_mask_MLX5DV_QP_INIT_ATTR_MASK_DC,
 };
-use super::wr::{ImmData, ImmType, WrId, WrType};
+use super::wr::{ImmData, ImmType, PeerKey, WrId, WrType};
 
 extern "C" {
     fn ibv_wc_status_str(status: u32) -> *const std::os::raw::c_char;
@@ -42,11 +42,24 @@ fn wc_status_str(status: i32) -> &'static str {
 
 const CQ_DEPTH:        i32 = 4096;
 const MAX_SEND_WR:     u32 = 256;
-const SRQ_DEPTH:       u32 = 64;
+const SRQ_DEPTH:       u32 = 1024;
 const MAX_RD_ATOMIC:   u8  = 16;
 const MIN_RNR_TIMER:   u8  = 1;
 const QP_TIMEOUT:      u8  = 14;
 const QP_RETRY_CNT:    u8  = 7;
+
+pub(super) struct PeerCredit {
+    pub sent:      u64,
+    pub acked:     u64,
+    pub not_acked: u32,
+    pub wakers:    VecDeque<oneshot::Sender<()>>,
+}
+
+impl PeerCredit {
+    fn new() -> Self {
+        Self { sent: 0, acked: 0, not_acked: 0, wakers: VecDeque::new() }
+    }
+}
 
 pub struct IbSocket {
     pub(super) dev:          Rc<IbDevice>,
@@ -59,15 +72,10 @@ pub struct IbSocket {
     pub(super) recv_bufs:    RecvBuffers,
     pub(super) dc_key:       u64,
     pub(super) self_dct_identifier:   u32,
+    pub(super) self_key:     PeerKey,
 
-    // Credit accounting, mutated by the CQ pump task.
-    // Cell, not Atomic: only one task at a time (single-threaded runtime).
-    pub(super) send_signaled:     Cell<u64>,
-    pub(super) send_acked:        Cell<u64>,
-    pub(super) send_not_signaled: Cell<u32>,
-    pub(super) recv_not_acked:    Cell<u32>,
+    pub(super) per_peer: RefCell<HashMap<PeerKey, PeerCredit>>,
 
-    // Per-wr_id completion waiters for one-sided RDMA WRITE/READ.
     pub(super) completion: RefCell<HashMap<u64, oneshot::Sender<i32>>>,
     pub(super) next_wr_id: Cell<u64>,
 }
@@ -75,7 +83,9 @@ pub struct IbSocket {
 impl IbSocket {
     pub fn self_dct_identifier(&self) -> u32 { self.self_dct_identifier }
 
-    pub fn new(dev: Rc<IbDevice>, dc_key: u64, qos: RdmaQos) -> io::Result<Self> {
+    pub fn new(
+        dev: Rc<IbDevice>, dc_key: u64, qos: RdmaQos, self_key: PeerKey, recv_buf_cnt: usize,
+    ) -> io::Result<Self> {
         unsafe {
             let comp_channel = ibv_create_comp_channel(dev.ctx.as_ptr());
             let comp_channel = NonNull::new(comp_channel)
@@ -114,36 +124,47 @@ impl IbSocket {
                 .map_err(|e| io::Error::other(format!("transition_dci: {e}")))?;
 
             let send_bufs = SendBuffers::new(dev.clone(), SEND_BUF_CNT, BUF_SIZE)?;
-            let recv_bufs = RecvBuffers::new(dev.clone(), SEND_BUF_CNT, BUF_SIZE)?;
+            let recv_bufs = RecvBuffers::new(dev.clone(), recv_buf_cnt, BUF_SIZE)?;
 
             let sock = IbSocket {
                 dev, cq, comp_channel, srq, dct, dci,
-                send_bufs, recv_bufs, dc_key, self_dct_identifier,
-                send_signaled:     Cell::new(0),
-                send_acked:        Cell::new(0),
-                send_not_signaled: Cell::new(0),
-                recv_not_acked:    Cell::new(0),
-                completion:        RefCell::new(HashMap::new()),
-                next_wr_id:        Cell::new(1),
+                send_bufs, recv_bufs, dc_key, self_dct_identifier, self_key,
+                per_peer:   RefCell::new(HashMap::new()),
+                completion: RefCell::new(HashMap::new()),
+                next_wr_id: Cell::new(1),
             };
-            for i in 0..SEND_BUF_CNT { sock.post_recv(i as u32)?; }
+            for i in 0..recv_buf_cnt { sock.post_recv(i as u32)?; }
             Ok(sock)
         }
     }
 
-    pub async fn send(
-        &self, buf: &[u8], ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
-    ) -> io::Result<usize> {
-        self.send_kinded(buf, ah, peer_dct_num, peer_dc_key, super::wr::SendKind::Other).await
-    }
-
-    pub async fn send_kinded(
-        &self, mut buf: &[u8], ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64, kind: super::wr::SendKind,
+    pub async fn send_with_kind(
+        &self,
+        mut buf:      &[u8],
+        peer:         PeerKey,
+        ah:           *mut ibv_ah,
+        peer_dct_num: u32,
+        peer_dc_key:  u64,
+        kind:         super::wr::SendKind,
     ) -> io::Result<usize> {
         let mut total = 0;
         let bs = BUF_SIZE;
         let mut waiters: Vec<oneshot::Receiver<i32>> = Vec::new();
         while !buf.is_empty() {
+            loop {
+                let mut per_peer = self.per_peer.borrow_mut();
+                let entry = per_peer.entry(peer).or_insert_with(PeerCredit::new);
+                let outstanding = entry.sent.wrapping_sub(entry.acked);
+                if outstanding < PEER_CREDIT_BUDGET as u64 {
+                    entry.sent = entry.sent.wrapping_add(1);
+                    break;
+                }
+                let (tx, rx) = oneshot::channel();
+                entry.wakers.push_back(tx);
+                drop(per_peer);
+                let _ = rx.await;
+            }
+
             let idx = self.send_bufs.acquire().await;
             let n = buf.len().min(bs);
             unsafe {
@@ -153,15 +174,18 @@ impl IbSocket {
                     n,
                 );
             }
-            let seq    = { let id = self.next_wr_id.get(); self.next_wr_id.set(id + 1); id };
-            let wr_id  = super::wr::WrId::send_with_kind_seq(seq, kind).0;
+            let seq   = { let id = self.next_wr_id.get(); self.next_wr_id.set(id + 1); id };
+            let wr_id = super::wr::WrId::send_with_kind_seq(seq, kind).0;
             let (tx, rx) = oneshot::channel();
             self.completion.borrow_mut().insert(wr_id, tx);
 
             if let Err(e) = self.post_send_with_id(wr_id, idx as u32, n as u32, ah, peer_dct_num, peer_dc_key) {
                 self.completion.borrow_mut().remove(&wr_id);
-                // Best-effort slot reclaim on local post failure.
                 self.send_bufs.push(1);
+                let mut per_peer = self.per_peer.borrow_mut();
+                if let Some(entry) = per_peer.get_mut(&peer) {
+                    entry.sent = entry.sent.wrapping_sub(1);
+                }
                 return Err(e);
             }
             waiters.push(rx);
@@ -172,15 +196,14 @@ impl IbSocket {
         for rx in waiters {
             let status = rx.await.map_err(|_| io::Error::other("pump dropped"))?;
             if status != ibv_wc_status::IBV_WC_SUCCESS as i32 {
-                return Err(io::Error::other(format!("send wc.status={status} ({}) kind={kind:?}", wc_status_str(status))));
+                return Err(io::Error::other(format!(
+                    "send wc.status={status} ({}) kind={kind:?}", wc_status_str(status)
+                )));
             }
         }
         Ok(total)
     }
 
-    /// Pop one fully-received envelope from the recv queue. Used by the
-    /// rdma_server dispatcher which awaits notification from the pump
-    /// and then drains envelopes one at a time.
     pub fn attempt_singular_rcv(&self, out: &mut Vec<u8>) -> Option<()> {
         let (idx, len) = self.recv_bufs.pop()?;
         out.resize(len as usize, 0);
@@ -194,31 +217,29 @@ impl IbSocket {
         Some(())
     }
 
-    pub fn recv(
-        &self, mut out: &mut [u8], ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
-    ) -> io::Result<usize> {
-        let mut total = 0;
-        while !out.is_empty() {
-            let Some((idx, len)) = self.recv_bufs.pop() else { break; };
-            let n = (len as usize).min(out.len());
-            unsafe {
-                // todo: @arnav revisit memcp here
-                ptr::copy_nonoverlapping(
-                    self.recv_bufs.base().slot_ptr(idx as usize),
-                    out.as_mut_ptr(),
-                    n,
-                );
+    pub fn note_drain(
+        &self,
+        peer:         PeerKey,
+        ah:           *mut ibv_ah,
+        peer_dct_num: u32,
+        peer_dc_key:  u64,
+    ) -> io::Result<()> {
+        let to_ack = {
+            let mut per_peer = self.per_peer.borrow_mut();
+            let entry = per_peer.entry(peer).or_insert_with(PeerCredit::new);
+            entry.not_acked = entry.not_acked.saturating_add(1);
+            if entry.not_acked >= buf_ack_batch() {
+                let count = entry.not_acked;
+                entry.not_acked = 0;
+                count
+            } else {
+                0
             }
-            out = &mut out[n..];
-            total += n;
-            let prev = self.recv_not_acked.get() + 1;
-            self.recv_not_acked.set(prev);
-            if prev >= BUF_ACK_BATCH {
-                self.recv_not_acked.set(0);
-                self.post_ack(ah, peer_dct_num, peer_dc_key)?;
-            }
+        };
+        if to_ack > 0 {
+            self.post_ack(ah, peer_dct_num, peer_dc_key, to_ack)?;
         }
-        Ok(total)
+        Ok(())
     }
 
     pub async fn rdma_write(
@@ -282,14 +303,6 @@ impl IbSocket {
         Ok(())
     }
 
-    pub(super) fn post_send(
-        &self, buf_idx: u32, len: u32, ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
-    ) -> io::Result<()> {
-        let seq = { let id = self.next_wr_id.get(); self.next_wr_id.set(id + 1); id };
-        let wr_id = super::wr::WrId::send_with_kind_seq(seq, super::wr::SendKind::Other).0;
-        self.post_send_with_id(wr_id, buf_idx, len, ah, peer_dct_num, peer_dc_key)
-    }
-
     pub(super) fn post_send_with_id(
         &self, wr_id: u64, buf_idx: u32, len: u32, ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
     ) -> io::Result<()> {
@@ -310,15 +323,22 @@ impl IbSocket {
     }
 
     pub(super) fn post_ack(
-        &self, ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
+        &self,
+        ah:           *mut ibv_ah,
+        peer_dct_num: u32,
+        peer_dc_key:  u64,
+        count:        u32,
     ) -> io::Result<()> {
+        let imm_host = ImmData::ack(self.self_key, count).0;
+        let imm_wire = imm_host.to_be();
         unsafe {
             let qpx  = ibv_qp_to_qp_ex(self.dci.as_ptr());
             let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
             ibv_wr_start(qpx);
             (*qpx).wr_id    = WrId::ack().0;
             (*qpx).wr_flags = ibv_send_flags::IBV_SEND_SIGNALED.0 as u32;
-            ibv_wr_send_imm(qpx, ImmData::ack(BUF_ACK_BATCH).0.to_be());
+            ibv_wr_send_imm(qpx, imm_wire);
+            ibv_wr_set_sge_list(qpx, 0, std::ptr::null());
             ((*mqpx).wr_set_dc_addr.expect("wr_set_dc_addr"))(mqpx, ah, peer_dct_num, peer_dc_key);
             let rc = ibv_wr_complete(qpx);
             if rc != 0 { return Err(io::Error::from_raw_os_error(rc)); }
@@ -488,7 +508,6 @@ async fn run_pump_compio(sock: Rc<IbSocket>, fd: std::os::fd::RawFd, recv_tx: mp
                 for wc in &wcs[..n as usize] {
                     handle_wc(&sock, wc, &recv_tx);
                 }
-                reconcile_credit(&sock);
             }
         }
     }
@@ -522,8 +541,9 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
     }
     match wc.opcode {
         ibv_wc_opcode::IBV_WC_SEND => {
-            // Slot reclaim and completion routing for the SUCCESS case.
-            sock.send_bufs.push(1);
+            if wr.ty() == WrType::Send {
+                sock.send_bufs.push(1);
+            }
             if let Some(tx) = sock.completion.borrow_mut().remove(&wc.wr_id) {
                 let _ = tx.send(wc.status as i32);
             }
@@ -534,14 +554,26 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
             }
         }
         ibv_wc_opcode::IBV_WC_RECV | ibv_wc_opcode::IBV_WC_RECV_RDMA_WITH_IMM => {
-            if !status_ok { return; }
             let buf_idx = (wc.wr_id & ((1 << 56) - 1)) as u32;
             if imm_set {
                 let imm = unsafe {
                     ImmData(u32::from_be(wc.imm_data_invalidated_rkey_union.imm_data))
                 };
-                if imm.ty() == ImmType::Ack {
-                    sock.send_acked.set(sock.send_acked.get() + imm.data() as u64);
+                match imm.ty() {
+                    ImmType::Ack => {
+                        let src   = imm.src();
+                        let count = imm.count();
+                        let mut per_peer = sock.per_peer.borrow_mut();
+                        let entry = per_peer.entry(src).or_insert_with(PeerCredit::new);
+                        entry.acked = entry.acked.wrapping_add(count as u64);
+                        for _ in 0..count {
+                            match entry.wakers.pop_front() {
+                                Some(w) => { let _ = w.send(()); }
+                                None    => break,
+                            }
+                        }
+                    }
+                    ImmType::Close | ImmType::Other => {}
                 }
             } else {
                 sock.recv_bufs.push(buf_idx, wc.byte_len);
@@ -550,17 +582,6 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
             let _ = sock.post_recv(buf_idx);
         }
         _ => {}
-    }
-}
-
-fn reconcile_credit(sock: &IbSocket) {
-    let signaled = sock.send_signaled.get();
-    let acked    = sock.send_acked.get();
-    let avail    = signaled.min(acked);
-    if avail > 0 {
-        sock.send_signaled.set(signaled - avail);
-        sock.send_acked   .set(acked    - avail);
-        sock.send_bufs.push(avail);
     }
 }
 
@@ -602,7 +623,7 @@ unsafe fn transition_dci(qp: *mut ibv_qp, dev: &IbDevice, qos: RdmaQos) -> io::R
     a.sq_psn        = 0;
     a.timeout       = QP_TIMEOUT;
     a.retry_cnt     = QP_RETRY_CNT;
-    a.rnr_retry     = 7;
+    a.rnr_retry     = 0;
     a.max_rd_atomic = MAX_RD_ATOMIC;
     let m = ibv_qp_attr_mask::IBV_QP_STATE.0
           | ibv_qp_attr_mask::IBV_QP_SQ_PSN.0
