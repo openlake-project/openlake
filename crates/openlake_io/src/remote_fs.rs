@@ -678,6 +678,14 @@ impl StorageBackend for RemoteBackend {
             path:     path.into(),
         })
     }
+
+    async fn scrub_staging(&self, min_age: std::time::Duration) -> IoResult<usize> {
+        match self.unary(Request::ScrubStaging { disk_idx: self.disk_idx, min_age_secs: min_age.as_secs() }).await? {
+            Response::Scrub(n) => Ok(n),
+            Response::Err(e)   => Err(e.into()),
+            other              => Err(unexpected(other)),
+        }
+    }
 }
 
 #[async_trait(?Send)]

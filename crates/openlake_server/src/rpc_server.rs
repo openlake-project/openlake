@@ -55,6 +55,7 @@ use openlake_io::rpc::{self, DiskIdx, Request, Response as RpcResponse};
 use openlake_io::stream::{ByteSink, ByteStream};
 use openlake_io::tuning::TCP_BUFFER_BYTES;
 use openlake_io::{IoError, IoResult, StorageBackend};
+use openlake_storage::Engine;
 
 use crate::lock_server::LockServer;
 use crate::s3::listener::TlsTcpListener;
@@ -82,6 +83,8 @@ const HDR_RPC: &str = "x-openlake-rpc";
 /// Response header echoing the streaming GET length so the client
 /// can sanity-check the byte stream before consuming it.
 const HDR_LEN: &str = "x-openlake-length";
+
+const SCRUB_LIST_PAGE: usize = 1000;
 
 pub fn bind_reuseport(addr: SocketAddr) -> std::io::Result<TcpListener> {
     let socket = socket2::Socket::new(
@@ -121,6 +124,7 @@ struct RpcAppStateInner {
     disks:     Vec<Rc<dyn StorageBackend>>,
     locks:     Arc<LockServer>,
     endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+    engine:    Rc<Engine>,
 }
 
 // SAFETY: every `RpcAppState` clone stays on the runtime that
@@ -133,14 +137,16 @@ impl RpcAppState {
         disks: Vec<Rc<dyn StorageBackend>>,
         locks: Arc<LockServer>,
         endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+        engine: Rc<Engine>,
     ) -> Self {
-        Self { inner: Rc::new(RpcAppStateInner { disks, locks, endpoints }) }
+        Self { inner: Rc::new(RpcAppStateInner { disks, locks, endpoints, engine }) }
     }
     fn disks(&self) -> &[Rc<dyn StorageBackend>] { &self.inner.disks }
     fn locks(&self) -> &Arc<LockServer> { &self.inner.locks }
     fn endpoints(&self) -> &Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>> {
         &self.inner.endpoints
     }
+    fn engine(&self) -> &Rc<Engine> { &self.inner.engine }
 }
 
 // -----------------------------------------------------------------------------
@@ -153,8 +159,9 @@ pub async fn serve(
     locks:     Arc<LockServer>,
     tls:       Option<Rc<TlsAcceptor>>,
     endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+    engine:    Rc<Engine>,
 ) -> anyhow::Result<()> {
-    let state = RpcAppState::new(disks.iter().cloned().collect(), locks, endpoints);
+    let state = RpcAppState::new(disks.iter().cloned().collect(), locks, endpoints, engine);
     let app: Router = Router::new()
         .route("/v1/rpc",              post(handle_unary))
         .route("/v1/rpc/stream-write", put (handle_stream_write))
@@ -220,11 +227,84 @@ async fn handle_unary(
             IoError::InvalidArgument("streaming variant routed to /v1/rpc".into()),
         );
     }
-    let resp = SendWrapper::new(async move {
-        dispatch(state.disks(), state.locks(), state.endpoints(), req).await
-    }).await;
+    let resp = match req {
+        Request::ScrubCluster => {
+            let engine = state.engine().clone();
+            match scrub_cluster(engine).await {
+                Ok(n)  => RpcResponse::Scrub(n),
+                Err(e) => RpcResponse::Err(e.into()),
+            }
+        }
+        _ => SendWrapper::new(async move {
+            dispatch(state.disks(), state.locks(), state.endpoints(), req).await
+        }).await,
+    };
     let body_bytes = rpc::encode(&resp).unwrap_or_default();
     rpc_ok(body_bytes)
+}
+
+async fn scrub_cluster(engine: Rc<Engine>) -> IoResult<usize> {
+    let mut buckets: Vec<String> = Vec::new();
+    let mut start_after: Option<String> = None;
+    loop {
+        let infos = engine.list(
+            openlake_io::SYSTEM_BUCKET,
+            "buckets/",
+            start_after.as_deref(),
+            SCRUB_LIST_PAGE,
+        ).await?;
+        for info in &infos {
+            if let Some(name) = bucket_name_from_meta_key(&info.key) {
+                buckets.push(name);
+            }
+        }
+        if infos.len() < SCRUB_LIST_PAGE {
+            break;
+        }
+        start_after = infos.last().map(|info| info.key.clone());
+    }
+
+    let mut total_deleted = 0;
+    for bucket in buckets {
+        total_deleted += scrub_bucket(&engine, &bucket).await?;
+    }
+    Ok(total_deleted)
+}
+
+fn bucket_name_from_meta_key(key: &str) -> Option<String> {
+    const PREFIX: &str = "buckets/";
+    const SUFFIX: &str = "/.metadata.bin";
+    if key.starts_with(PREFIX) && key.ends_with(SUFFIX) {
+        let name = &key[PREFIX.len()..key.len() - SUFFIX.len()];
+        if !name.is_empty() {
+            return Some(name.to_owned());
+        }
+    }
+    None
+}
+
+async fn scrub_bucket(engine: &Rc<Engine>, bucket: &str) -> IoResult<usize> {
+    let mut deleted = 0;
+    let mut start_after: Option<String> = None;
+    loop {
+        let infos = engine.list(bucket, "", start_after.as_deref(), SCRUB_LIST_PAGE).await?;
+        if infos.is_empty() {
+            break;
+        }
+        let keys: Vec<String> = infos.iter().map(|info| info.key.clone()).collect();
+        let results = engine.delete_objects(bucket, &keys).await?;
+        for res in results {
+            match res {
+                Ok(()) => deleted += 1,
+                Err(e) => return Err(e),
+            }
+        }
+        if infos.len() < SCRUB_LIST_PAGE {
+            break;
+        }
+        start_after = infos.last().map(|info| info.key.clone());
+    }
+    Ok(deleted)
 }
 
 /// `PUT /v1/rpc/stream-write` — streaming PUT.
@@ -533,6 +613,25 @@ pub(crate) async fn dispatch(
                 &RenameOptions::default()).await, RpcResponse::Renamed),
         VerifyFile     { disk_idx, volume, path, fi } =>
             fold_unit(disk_or_err!(disk_idx).verify_file(&volume, &path, &fi).await),
+
+        ScrubStaging { disk_idx, min_age_secs } =>
+            fold(
+                disk_or_err!(disk_idx).scrub_staging(std::time::Duration::from_secs(min_age_secs)).await,
+                RpcResponse::Scrub,
+            ),
+
+        ScrubNode { min_age_secs } => {
+            // Ask every local disk to scrub and sum the results.
+            let min_age = std::time::Duration::from_secs(min_age_secs);
+            let mut total: usize = 0;
+            for d in disks.iter() {
+                match d.scrub_staging(min_age).await {
+                    Ok(n) => total += n,
+                    Err(e) => return RpcResponse::Err(e.into()),
+                }
+            }
+            RpcResponse::Scrub(total)
+        }
 
         ReadFormat     { disk_idx } =>
             match disk_or_err!(disk_idx).read_format().await {

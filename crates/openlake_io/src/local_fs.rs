@@ -1010,6 +1010,13 @@ impl StorageBackend for LocalFsBackend {
             .map_err(|e| IoError::Encode(format!("format.json: {e}")))?;
         atomic_write_bytes(&self.root.join(FORMAT_FILENAME), bytes).await
     }
+
+    async fn scrub_staging(&self, min_age: std::time::Duration) -> IoResult<usize> {
+        match LocalFsBackend::scrub_staging(self, min_age).await {
+            Ok(n) => Ok(n),
+            Err(e) => Err(IoError::Io(e)),
+        }
+    }
 }
 
 /// Write an `EncodedXlMeta` (head + optional tail) to `file` at offset

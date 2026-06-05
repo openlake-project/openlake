@@ -403,8 +403,16 @@ async fn run_runtime(
     let rpc_locks      = lock_server.clone();
     let rpc_acceptor_t = rpc_acceptor.clone();
     let rpc_endpoints  = endpoint_registry.clone();
+    let rpc_engine = engine.clone();
     let rpc_task = compio::runtime::spawn(async move {
-        if let Err(e) = rpc_server::serve(rpc_listener, rpc_disks, rpc_locks, rpc_acceptor_t, rpc_endpoints).await {
+        if let Err(e) = rpc_server::serve(
+            rpc_listener,
+            rpc_disks,
+            rpc_locks,
+            rpc_acceptor_t,
+            rpc_endpoints,
+            rpc_engine,
+        ).await {
             tracing::error!(runtime_id, "rpc serve error: {e:#}");
         }
     });

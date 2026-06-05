@@ -188,6 +188,11 @@ pub trait StorageBackend {
     async fn read_file(&self, volume: &str, path: &str) -> IoResult<Option<Vec<u8>>>;
 
     async fn make_dir_all(&self, volume: &str, path: &str) -> IoResult<()>;
+
+    /// Sweep the `STAGING_VOL` (and related staging areas) for orphan
+    /// staging directories older than `min_age` and move them to trash.
+    /// Returns the number of purged staging dirs.
+    async fn scrub_staging(&self, min_age: std::time::Duration) -> IoResult<usize>;
 }
 
 /// Lock-plane peer.

@@ -85,6 +85,17 @@ pub enum Request {
     /// Recursive mkdir; idempotent.
     MakeDirAll     { disk_idx: DiskIdx, volume: String, path: String },
 
+    /// Disk-scoped scrub: sweep `STAGING_VOL` on `disk_idx` for orphan
+    /// staging dirs older than `min_age_secs` and move them to trash.
+    ScrubStaging { disk_idx: DiskIdx, min_age_secs: u64 },
+
+    /// Node-scoped scrub: ask the node to scrub all its local disks and
+    /// return the total number of purged entries.
+    ScrubNode { min_age_secs: u64 },
+
+    /// Cluster-scoped wipe: remove every object from every bucket.
+    ScrubCluster,
+
     // ---- Node-scoped variants (no `disk_idx`). ----
     //
     // Distributed lock plane: there is one `LockServer` per process,
@@ -117,6 +128,8 @@ pub enum Response {
     FormatOpt(Option<FormatJson>),
     /// Reply for `Request::ReadFile`. `None` if the file does not exist.
     FileBytes(Option<Vec<u8>>),
+    /// Reply for scrub operations: number of purged staging dirs.
+    Scrub(usize),
     LockGranted,
     LockDenied,
     LockRefreshed,

@@ -2040,6 +2040,7 @@ dependencies = [
  "anyhow",
  "clap",
  "compio",
+ "cyper",
  "futures-util",
  "openlake_io",
  "openlake_storage",
