@@ -41,13 +41,14 @@ pub struct RdmaQos {
 
 #[derive(Clone, Debug)]
 pub struct RdmaConfig {
-    pub self_node_id:  u16,
-    pub runtime_id:    u16,
-    pub dev_name:      String,
-    pub dc_key:        u64,
-    pub qos:           RdmaQos,
-    pub bulk_buf_size: usize,
-    pub bulk_pool_cap: usize,
+    pub self_node_id:       u16,
+    pub runtime_id:         u16,
+    pub dev_name:           String,
+    pub dc_key:             u64,
+    pub qos:                RdmaQos,
+    pub bulk_buf_size:      usize,
+    pub bulk_pool_cap:      usize,
+    pub num_cluster_nodes:  u16,
 }
 
 pub struct RdmaSetup {
@@ -75,9 +76,10 @@ pub struct RdmaNode {
 
 impl RdmaNode {
     pub fn start_local(cfg: &RdmaConfig) -> io::Result<(RdmaSetup, LocalEndpoint)> {
-        let dev       = Rc::new(IbDevice::open(&cfg.dev_name)?);
-        let self_key  = PeerKey::new(cfg.self_node_id, cfg.runtime_id);
-        let sock      = Rc::new(IbSocket::new(dev.clone(), cfg.dc_key, cfg.qos, self_key)?);
+        let dev          = Rc::new(IbDevice::open(&cfg.dev_name)?);
+        let self_key     = PeerKey::new(cfg.self_node_id, cfg.runtime_id);
+        let recv_buf_cnt = (super::buffers::SEND_BUF_CNT) * (cfg.num_cluster_nodes as usize);
+        let sock         = Rc::new(IbSocket::new(dev.clone(), cfg.dc_key, cfg.qos, self_key, recv_buf_cnt)?);
         let ah_cache  = Rc::new(AhCache::new(dev.clone(), cfg.qos, dev.gid_index, dev.port_attr.lid));
         let pump      = CqPump::start(sock.clone())?;
         let self_dct  = sock.self_dct_identifier;
@@ -91,6 +93,7 @@ impl RdmaNode {
             dc_key:     cfg.dc_key,
             lid:        setup.dev.port_attr.lid,
         };
+        tracing::info!(self_node = cfg.self_node_id, self_runtime = cfg.runtime_id, self_dct = self_dct, self_lid = setup.dev.port_attr.lid, self_dc_key = format!("0x{:x}", cfg.dc_key), num_cluster_nodes = cfg.num_cluster_nodes, recv_buf_cnt = (super::buffers::SEND_BUF_CNT) * (cfg.num_cluster_nodes as usize), "rdma self-dct allocated");
         Ok((setup, endpoint))
     }
 

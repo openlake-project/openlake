@@ -19,7 +19,7 @@ use rdma_mummy_sys::{
 };
 
 use super::buffers::{
-    buf_ack_batch, RecvBuffers, SendBuffers, BUF_SIZE, PEER_CREDIT_BUDGET, RECV_BUF_CNT, SEND_BUF_CNT,
+    buf_ack_batch, RecvBuffers, SendBuffers, BUF_SIZE, PEER_CREDIT_BUDGET, SEND_BUF_CNT,
 };
 use super::device::{IbDevice, PORT_NUM};
 use super::node::RdmaQos;
@@ -84,7 +84,7 @@ impl IbSocket {
     pub fn self_dct_identifier(&self) -> u32 { self.self_dct_identifier }
 
     pub fn new(
-        dev: Rc<IbDevice>, dc_key: u64, qos: RdmaQos, self_key: PeerKey,
+        dev: Rc<IbDevice>, dc_key: u64, qos: RdmaQos, self_key: PeerKey, recv_buf_cnt: usize,
     ) -> io::Result<Self> {
         unsafe {
             let comp_channel = ibv_create_comp_channel(dev.ctx.as_ptr());
@@ -124,7 +124,7 @@ impl IbSocket {
                 .map_err(|e| io::Error::other(format!("transition_dci: {e}")))?;
 
             let send_bufs = SendBuffers::new(dev.clone(), SEND_BUF_CNT, BUF_SIZE)?;
-            let recv_bufs = RecvBuffers::new(dev.clone(), RECV_BUF_CNT, BUF_SIZE)?;
+            let recv_bufs = RecvBuffers::new(dev.clone(), recv_buf_cnt, BUF_SIZE)?;
 
             let sock = IbSocket {
                 dev, cq, comp_channel, srq, dct, dci,
@@ -133,7 +133,7 @@ impl IbSocket {
                 completion: RefCell::new(HashMap::new()),
                 next_wr_id: Cell::new(1),
             };
-            for i in 0..RECV_BUF_CNT { sock.post_recv(i as u32)?; }
+            for i in 0..recv_buf_cnt { sock.post_recv(i as u32)?; }
             Ok(sock)
         }
     }
@@ -157,28 +157,10 @@ impl IbSocket {
                 let outstanding = entry.sent.wrapping_sub(entry.acked);
                 if outstanding < PEER_CREDIT_BUDGET as u64 {
                     entry.sent = entry.sent.wrapping_add(1);
-                    tracing::info!(
-                        peer_node    = peer.node_id,
-                        peer_runtime = peer.runtime_id,
-                        ?kind,
-                        sent  = entry.sent,
-                        acked = entry.acked,
-                        outstanding_after = outstanding + 1,
-                        "CREDIT_RCA send_with_kind admitted",
-                    );
                     break;
                 }
                 let (tx, rx) = oneshot::channel();
                 entry.wakers.push_back(tx);
-                tracing::info!(
-                    peer_node    = peer.node_id,
-                    peer_runtime = peer.runtime_id,
-                    ?kind,
-                    sent  = entry.sent,
-                    acked = entry.acked,
-                    outstanding,
-                    "CREDIT_RCA send_with_kind parking on credit",
-                );
                 drop(per_peer);
                 let _ = rx.await;
             }
@@ -197,6 +179,7 @@ impl IbSocket {
             let (tx, rx) = oneshot::channel();
             self.completion.borrow_mut().insert(wr_id, tx);
 
+            tracing::debug!(?peer, ?kind, bytes = n, wr_id, "ib_send_pre");
             if let Err(e) = self.post_send_with_id(wr_id, idx as u32, n as u32, ah, peer_dct_num, peer_dc_key) {
                 self.completion.borrow_mut().remove(&wr_id);
                 self.send_bufs.push(1);
@@ -206,6 +189,7 @@ impl IbSocket {
                 }
                 return Err(e);
             }
+            tracing::debug!(?peer, ?kind, bytes = n, wr_id, "ib_send_post");
             waiters.push(rx);
             total += n;
             buf = &buf[n..];
@@ -246,13 +230,6 @@ impl IbSocket {
             let mut per_peer = self.per_peer.borrow_mut();
             let entry = per_peer.entry(peer).or_insert_with(PeerCredit::new);
             entry.not_acked = entry.not_acked.saturating_add(1);
-            tracing::info!(
-                peer_node    = peer.node_id,
-                peer_runtime = peer.runtime_id,
-                not_acked    = entry.not_acked,
-                threshold    = buf_ack_batch(),
-                "CREDIT_RCA note_drain bumped",
-            );
             if entry.not_acked >= buf_ack_batch() {
                 let count = entry.not_acked;
                 entry.not_acked = 0;
@@ -262,12 +239,6 @@ impl IbSocket {
             }
         };
         if to_ack > 0 {
-            tracing::info!(
-                peer_node    = peer.node_id,
-                peer_runtime = peer.runtime_id,
-                count        = to_ack,
-                "CREDIT_RCA note_drain firing post_ack",
-            );
             self.post_ack(ah, peer_dct_num, peer_dc_key, to_ack)?;
         }
         Ok(())
@@ -334,14 +305,6 @@ impl IbSocket {
         Ok(())
     }
 
-    pub(super) fn post_send(
-        &self, buf_idx: u32, len: u32, ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
-    ) -> io::Result<()> {
-        let seq = { let id = self.next_wr_id.get(); self.next_wr_id.set(id + 1); id };
-        let wr_id = super::wr::WrId::send_with_kind_seq(seq, super::wr::SendKind::Other).0;
-        self.post_send_with_id(wr_id, buf_idx, len, ah, peer_dct_num, peer_dc_key)
-    }
-
     pub(super) fn post_send_with_id(
         &self, wr_id: u64, buf_idx: u32, len: u32, ah: *mut ibv_ah, peer_dct_num: u32, peer_dc_key: u64,
     ) -> io::Result<()> {
@@ -370,13 +333,6 @@ impl IbSocket {
     ) -> io::Result<()> {
         let imm_host = ImmData::ack(self.self_key, count).0;
         let imm_wire = imm_host.to_be();
-        tracing::info!(
-            peer_dct = peer_dct_num,
-            imm_host, imm_wire, count,
-            src_node    = self.self_key.node_id,
-            src_runtime = self.self_key.runtime_id,
-            "CREDIT_RCA post_ack ABOUT_TO_POST",
-        );
         unsafe {
             let qpx  = ibv_qp_to_qp_ex(self.dci.as_ptr());
             let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
@@ -601,6 +557,7 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
         }
         ibv_wc_opcode::IBV_WC_RECV | ibv_wc_opcode::IBV_WC_RECV_RDMA_WITH_IMM => {
             let buf_idx = (wc.wr_id & ((1 << 56) - 1)) as u32;
+            tracing::debug!(buf_idx, bytes = wc.byte_len, imm = imm_set, opcode = wc.opcode as i32, "pump_recv_pre");
             if imm_set {
                 let imm = unsafe {
                     ImmData(u32::from_be(wc.imm_data_invalidated_rkey_union.imm_data))
@@ -612,38 +569,21 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
                         let mut per_peer = sock.per_peer.borrow_mut();
                         let entry = per_peer.entry(src).or_insert_with(PeerCredit::new);
                         entry.acked = entry.acked.wrapping_add(count as u64);
-                        let mut woken = 0u32;
                         for _ in 0..count {
                             match entry.wakers.pop_front() {
-                                Some(w) => { let _ = w.send(()); woken += 1; }
+                                Some(w) => { let _ = w.send(()); }
                                 None    => break,
                             }
                         }
-                        tracing::info!(
-                            src_node    = src.node_id,
-                            src_runtime = src.runtime_id,
-                            count,
-                            woken,
-                            sent  = entry.sent,
-                            acked = entry.acked,
-                            "CREDIT_RCA imm_ack received",
-                        );
                     }
-                    ImmType::Close => {
-                        let src = imm.src();
-                        tracing::info!(
-                            src_node    = src.node_id,
-                            src_runtime = src.runtime_id,
-                            "CREDIT_RCA imm_close received",
-                        );
-                    }
-                    ImmType::Other => {}
+                    ImmType::Close | ImmType::Other => {}
                 }
             } else {
                 sock.recv_bufs.push(buf_idx, wc.byte_len);
                 let _ = recv_tx.unbounded_send(());
             }
             let _ = sock.post_recv(buf_idx);
+            tracing::debug!(buf_idx, bytes = wc.byte_len, imm = imm_set, "pump_recv_post");
         }
         _ => {}
     }

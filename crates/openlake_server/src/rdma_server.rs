@@ -28,7 +28,16 @@ pub async fn serve(
         loop {
             buf.clear();
             if node.sock.attempt_singular_rcv(&mut buf).is_none() { break; }
-            handle(&node, &disks, &local_disks, &locks, &endpoints, &buf).await;
+            let bytes = std::mem::take(&mut buf);
+            buf = Vec::with_capacity(BUF_SIZE);
+            let n = node.clone();
+            let d = disks.clone();
+            let ld = local_disks.clone();
+            let l = locks.clone();
+            let ep = endpoints.clone();
+            compio::runtime::spawn(async move {
+                handle(&n, &d, &ld, &l, &ep, &bytes).await;
+            }).detach();
         }
         if rx.next().await.is_none() { return Ok(()); }
     }

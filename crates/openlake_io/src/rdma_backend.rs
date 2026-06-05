@@ -15,6 +15,16 @@ use crate::types::{
     UpdateMetadataOpts, VolInfo,
 };
 
+static RDMA_NETWORK_TIMEOUT_CELL: std::sync::OnceLock<std::time::Duration> = std::sync::OnceLock::new();
+
+pub fn rdma_network_timeout() -> std::time::Duration {
+    *RDMA_NETWORK_TIMEOUT_CELL.get_or_init(|| std::time::Duration::from_secs(10 * 60 * 60))
+}
+
+pub fn set_rdma_network_timeout(d: std::time::Duration) {
+    let _ = RDMA_NETWORK_TIMEOUT_CELL.set(d);
+}
+
 #[derive(Clone)]
 pub struct RdmaBackend {
     node:     Rc<RdmaNode>,
@@ -71,10 +81,15 @@ impl RdmaBackend {
             return Err(IoError::Io(e));
         }
 
-        match rx.await {
-            Ok(RdmaResponse::Generic(resp)) => Ok(resp),
-            Ok(other) => Err(IoError::Decode(format!("unary expected Generic, got {other:?}"))),
-            Err(_)    => Err(IoError::Io(io::Error::other("dispatcher dropped waiter"))),
+        let timeout = rdma_network_timeout();
+        match compio::time::timeout(timeout, rx).await {
+            Ok(Ok(RdmaResponse::Generic(resp))) => Ok(resp),
+            Ok(Ok(other)) => Err(IoError::Decode(format!("unary expected Generic, got {other:?}"))),
+            Ok(Err(_))    => Err(IoError::Io(io::Error::other("dispatcher dropped waiter"))),
+            Err(_)        => {
+                self.node.pending_responses.borrow_mut().remove(&request_id);
+                Err(IoError::Io(io::Error::other(format!("unary rdma response timeout ({:?})", timeout))))
+            }
         }
     }
 
@@ -215,9 +230,12 @@ impl RdmaBackend {
         }
 
         let (done_tx, done_rx) = oneshot::channel::<IoResult<()>>();
+        let cleanup_node = node.clone();
+        let cleanup_request_id = request_id;
         compio::runtime::spawn(async move {
-            let result: IoResult<()> = match resp_rx.await {
-                Ok(RdmaResponse::ChunkWritten { bytes_written }) => {
+            let timeout = rdma_network_timeout();
+            let result: IoResult<()> = match compio::time::timeout(timeout, resp_rx).await {
+                Ok(Ok(RdmaResponse::ChunkWritten { bytes_written })) => {
                     drop(buf);
                     if (bytes_written as usize) != len {
                         Err(IoError::Io(io::Error::other(format!(
@@ -227,14 +245,19 @@ impl RdmaBackend {
                         Ok(())
                     }
                 }
-                Ok(RdmaResponse::Generic(Response::Err(e))) => { drop(buf); Err(IoError::from(e)) }
-                Ok(other) => {
+                Ok(Ok(RdmaResponse::Generic(Response::Err(e)))) => { drop(buf); Err(IoError::from(e)) }
+                Ok(Ok(other)) => {
                     drop(buf);
                     Err(IoError::Decode(format!("expected ChunkWritten, got {other:?}")))
                 }
-                Err(_) => {
+                Ok(Err(_)) => {
                     drop(buf);
                     Err(IoError::Io(io::Error::other("dispatcher dropped chunk waiter")))
+                }
+                Err(_) => {
+                    cleanup_node.pending_responses.borrow_mut().remove(&cleanup_request_id);
+                    drop(buf);
+                    Err(IoError::Io(io::Error::other(format!("chunk_write rdma response timeout ({:?})", timeout))))
                 }
             };
             let _ = done_tx.send(result);

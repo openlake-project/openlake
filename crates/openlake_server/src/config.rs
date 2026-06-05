@@ -149,9 +149,12 @@ pub struct RdmaToml {
     pub qos:           RdmaQosToml,
     #[serde(default = "default_bulk_pool_cap")]
     pub bulk_pool_cap: usize,
+    #[serde(default = "default_network_timeout_secs")]
+    pub network_timeout_secs: u64,
 }
 
 fn default_bulk_pool_cap() -> usize { 64 }
+fn default_network_timeout_secs() -> u64 { 10 * 60 * 60 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct RdmaQosToml {

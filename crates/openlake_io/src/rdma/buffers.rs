@@ -13,9 +13,8 @@ use rdma_mummy_sys::{
 use super::device::IbDevice;
 
 pub const BUF_SIZE:           usize = 16 * 1024;
-pub const SEND_BUF_CNT:       usize = 16;
-pub const RECV_BUF_CNT:       usize = 16;
-pub const PEER_CREDIT_BUDGET: u32   = 4;
+pub const SEND_BUF_CNT:       usize = 4;
+pub const PEER_CREDIT_BUDGET: u32   = SEND_BUF_CNT as u32;
 const PAGE_ALIGN:             usize = 4096;
 
 pub fn buf_ack_batch() -> u32 {
@@ -26,7 +25,7 @@ pub fn buf_ack_batch() -> u32 {
             .ok()
             .and_then(|s| s.parse().ok())
             .filter(|n: &u32| *n > 0)
-            .unwrap_or(3)
+            .unwrap_or(4)
     })
 }
 

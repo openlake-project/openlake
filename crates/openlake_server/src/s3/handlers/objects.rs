@@ -545,10 +545,14 @@ pub async fn put_object(
         .map(str::to_owned);
 
     let engine = state.engine().clone();
-    let info = SendWrapper::new(async move {
-        engine
-            .put(&bucket, &key, engine_size, &mut body_src, content_type)
-            .await
+    let info = SendWrapper::new({
+        let bucket = bucket.clone();
+        let key    = key.clone();
+        async move {
+            engine
+                .put(&bucket, &key, engine_size, &mut body_src, content_type)
+                .await
+        }
     })
     .await?;
 
