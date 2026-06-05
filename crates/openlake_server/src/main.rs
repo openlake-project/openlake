@@ -88,7 +88,6 @@ fn main() -> anyhow::Result<()> {
     if let Some(rdma_cfg) = cfg.rdma.as_ref() {
         let to = std::time::Duration::from_secs(rdma_cfg.network_timeout_secs);
         openlake_io::rdma_backend::set_rdma_network_timeout(to);
-        tracing::info!(network_timeout = ?to, "rdma network timeout configured");
     }
 
     // One runtime per physical core. Hyperthread siblings are
@@ -446,10 +445,6 @@ async fn run_runtime(
             }
         }
         let routing = Arc::new(routing);
-        tracing::info!(runtime_id, entries = routing.len(), "rdma routing table populated");
-        for ((peer_node, peer_runtime), ep) in routing.iter() {
-            tracing::debug!(self_runtime = runtime_id, peer_node, peer_runtime, peer_dct = ep.dct_num, peer_lid = ep.lid, peer_dc_key = format!("0x{:x}", ep.dc_key), "rdma routing entry");
-        }
         Some(Rc::new(openlake_io::rdma::RdmaNode::finalize(&rdma_cfg, setup, routing)))
     } else {
         None

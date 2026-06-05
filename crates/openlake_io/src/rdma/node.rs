@@ -93,7 +93,6 @@ impl RdmaNode {
             dc_key:     cfg.dc_key,
             lid:        setup.dev.port_attr.lid,
         };
-        tracing::info!(self_node = cfg.self_node_id, self_runtime = cfg.runtime_id, self_dct = self_dct, self_lid = setup.dev.port_attr.lid, self_dc_key = format!("0x{:x}", cfg.dc_key), num_cluster_nodes = cfg.num_cluster_nodes, recv_buf_cnt = (super::buffers::SEND_BUF_CNT) * (cfg.num_cluster_nodes as usize), "rdma self-dct allocated");
         Ok((setup, endpoint))
     }
 

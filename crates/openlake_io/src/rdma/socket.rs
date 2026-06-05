@@ -179,7 +179,6 @@ impl IbSocket {
             let (tx, rx) = oneshot::channel();
             self.completion.borrow_mut().insert(wr_id, tx);
 
-            tracing::debug!(?peer, ?kind, bytes = n, wr_id, "ib_send_pre");
             if let Err(e) = self.post_send_with_id(wr_id, idx as u32, n as u32, ah, peer_dct_num, peer_dc_key) {
                 self.completion.borrow_mut().remove(&wr_id);
                 self.send_bufs.push(1);
@@ -189,7 +188,6 @@ impl IbSocket {
                 }
                 return Err(e);
             }
-            tracing::debug!(?peer, ?kind, bytes = n, wr_id, "ib_send_post");
             waiters.push(rx);
             total += n;
             buf = &buf[n..];
@@ -557,7 +555,6 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
         }
         ibv_wc_opcode::IBV_WC_RECV | ibv_wc_opcode::IBV_WC_RECV_RDMA_WITH_IMM => {
             let buf_idx = (wc.wr_id & ((1 << 56) - 1)) as u32;
-            tracing::debug!(buf_idx, bytes = wc.byte_len, imm = imm_set, opcode = wc.opcode as i32, "pump_recv_pre");
             if imm_set {
                 let imm = unsafe {
                     ImmData(u32::from_be(wc.imm_data_invalidated_rkey_union.imm_data))
@@ -583,7 +580,6 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
                 let _ = recv_tx.unbounded_send(());
             }
             let _ = sock.post_recv(buf_idx);
-            tracing::debug!(buf_idx, bytes = wc.byte_len, imm = imm_set, "pump_recv_post");
         }
         _ => {}
     }

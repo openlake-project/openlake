@@ -50,42 +50,12 @@ pub async fn bootstrap_format(
     let quorum  = (total / 2) + 1;
     let deadline = Instant::now() + timeout;
 
-    let mut iteration: u64 = 0;
     loop {
-        iteration += 1;
-        let t0 = Instant::now();
         let local_fmts = read_all(local).await;
-        let local_elapsed = t0.elapsed();
-        let t1 = Instant::now();
         let peer_fmts  = read_all(peers).await;
-        let peer_elapsed = t1.elapsed();
         let formatted  = local_fmts.iter().chain(peer_fmts.iter())
             .filter(|r| matches!(r, Ok(Some(_))))
             .count();
-        let local_some = local_fmts.iter().filter(|r| matches!(r, Ok(Some(_)))).count();
-        let local_none = local_fmts.iter().filter(|r| matches!(r, Ok(None))).count();
-        let local_err  = local_fmts.iter().filter(|r| matches!(r, Err(_))).count();
-        let peer_some  = peer_fmts.iter().filter(|r| matches!(r, Ok(Some(_)))).count();
-        let peer_none  = peer_fmts.iter().filter(|r| matches!(r, Ok(None))).count();
-        let peer_err   = peer_fmts.iter().filter(|r| matches!(r, Err(_))).count();
-        tracing::info!(
-            iteration, am_seed, formatted, quorum, total,
-            local_some, local_none, local_err,
-            peer_some, peer_none, peer_err,
-            local_elapsed_ms = local_elapsed.as_millis() as u64,
-            peer_elapsed_ms  = peer_elapsed.as_millis() as u64,
-            "BOOTSTRAP_RCA iter"
-        );
-        for (idx, r) in peer_fmts.iter().enumerate() {
-            if let Err(e) = r {
-                tracing::warn!(iteration, peer_idx = idx, error = %e, "BOOTSTRAP_RCA peer read err");
-            }
-        }
-        for (idx, r) in local_fmts.iter().enumerate() {
-            if let Err(e) = r {
-                tracing::warn!(iteration, local_idx = idx, error = %e, "BOOTSTRAP_RCA local read err");
-            }
-        }
 
         if formatted == 0 && all_ok_none(&local_fmts) && all_ok_none(&peer_fmts) {
             if am_seed {
