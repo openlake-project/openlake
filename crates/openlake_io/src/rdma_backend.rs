@@ -1,9 +1,12 @@
 use std::io;
 use std::rc::Rc;
 
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::channel::oneshot;
 use crate::backend::StorageBackend;
 use crate::error::{IoError, IoResult};
-use crate::rdma::wire::{Envelope, RdmaRemoteBuf, RdmaRequest, RdmaResponse, ENVELOPE_MAGIC};
+use crate::rdma::wire::{Envelope, ENVELOPE_MAGIC, RdmaRemoteBuf, RdmaRequest, RdmaResponse};
 use crate::rdma::RdmaNode;
 use crate::rpc::{encode, Request, Response};
 use crate::stream::{ByteSink, ByteStream};
@@ -11,14 +14,11 @@ use crate::types::{
     DeleteOptions, DiskInfo, FileInfo, FormatJson, RenameDataResp, RenameOptions,
     UpdateMetadataOpts, VolInfo,
 };
-use async_trait::async_trait;
-use bytes::Bytes;
-use futures::channel::oneshot;
 
 #[derive(Clone)]
 pub struct RdmaBackend {
-    node: Rc<RdmaNode>,
-    peer_id: u16,
+    node:     Rc<RdmaNode>,
+    peer_id:  u16,
     disk_idx: u16,
     rpc_backend: Rc<dyn StorageBackend>,
 }
@@ -29,35 +29,18 @@ impl RdmaBackend {
     /// `read_file_stream`). Remove this parameter and the coupling once the
     /// RDMA backend implements every `StorageBackend` op natively.
     pub fn new(
-        node: Rc<RdmaNode>,
-        peer_id: u16,
-        disk_idx: u16,
-        rpc_backend: Rc<dyn StorageBackend>,
+        node: Rc<RdmaNode>, peer_id: u16, disk_idx: u16, rpc_backend: Rc<dyn StorageBackend>,
     ) -> Self {
-        Self {
-            node,
-            peer_id,
-            disk_idx,
-            rpc_backend,
-        }
+        Self { node, peer_id, disk_idx, rpc_backend }
     }
 
     async fn unary(&self, payload: Request) -> IoResult<Response> {
-        let peer = self
-            .node
-            .peer(self.peer_id)
-            .ok_or_else(|| {
-                IoError::Io(io::Error::other(format!(
-                    "rdma peer {} not in registry",
-                    self.peer_id
-                )))
-            })?
+        let peer = self.node.peer(self.peer_id)
+            .ok_or_else(|| IoError::Io(io::Error::other(
+                format!("rdma peer {} not in registry", self.peer_id)
+            )))?
             .clone();
-        let ah = self
-            .node
-            .ah_cache
-            .get_or_create(&peer)
-            .map_err(IoError::Io)?;
+        let ah = self.node.ah_cache.get_or_create(&peer).map_err(IoError::Io)?;
 
         let request_id = {
             let id = self.node.next_request_id.get();
@@ -65,64 +48,40 @@ impl RdmaBackend {
             id
         };
         let (tx, rx) = oneshot::channel();
-        self.node
-            .pending_responses
-            .borrow_mut()
-            .insert(request_id, tx);
+        self.node.pending_responses.borrow_mut().insert(request_id, tx);
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
-            from_node_id: self.node.self_id,
+            from_node_id:    self.node.self_id,
             from_runtime_id: self.node.runtime_id,
             request_id,
             payload: RdmaRequest::Generic(payload),
         };
         let body = encode(&env)?;
-        if let Err(e) = self
-            .node
-            .sock
-            .send_kinded(
-                &body,
-                ah,
-                peer.dct_num,
-                peer.dc_key,
-                crate::rdma::wr::SendKind::Unary,
-            )
-            .await
-        {
+        if let Err(e) = self.node.sock.send_kinded(&body, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::Unary).await {
             self.node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
 
         match rx.await {
             Ok(RdmaResponse::Generic(resp)) => Ok(resp),
-            Ok(other) => Err(IoError::Decode(format!(
-                "unary expected Generic, got {other:?}"
-            ))),
-            Err(_) => Err(IoError::Io(io::Error::other("dispatcher dropped waiter"))),
+            Ok(other) => Err(IoError::Decode(format!("unary expected Generic, got {other:?}"))),
+            Err(_)    => Err(IoError::Io(io::Error::other("dispatcher dropped waiter"))),
         }
     }
 
     async fn read_single_chunk(
-        &self,
-        volume: &str,
-        path: &str,
-        offset: u64,
-        length: u32,
+        &self, volume: &str, path: &str, offset: u64, length: u32,
     ) -> IoResult<Bytes> {
         let node = self.node.clone();
-        let peer = node
-            .peer(self.peer_id)
-            .ok_or_else(|| {
-                IoError::Io(io::Error::other(format!(
-                    "rdma peer {} not in registry",
-                    self.peer_id
-                )))
-            })?
+        let peer = node.peer(self.peer_id)
+            .ok_or_else(|| IoError::Io(io::Error::other(
+                format!("rdma peer {} not in registry", self.peer_id)
+            )))?
             .clone();
         let ah = node.ah_cache.get_or_create(&peer).map_err(IoError::Io)?;
 
-        let buf = node.bulk_pool.acquire().await.map_err(IoError::Io)?;
+        let buf    = node.bulk_pool.acquire().await.map_err(IoError::Io)?;
         let target = buf.as_remote(length);
 
         let request_id = {
@@ -131,36 +90,24 @@ impl RdmaBackend {
             id
         };
         let (resp_tx, resp_rx) = oneshot::channel();
-        node.pending_responses
-            .borrow_mut()
-            .insert(request_id, resp_tx);
+        node.pending_responses.borrow_mut().insert(request_id, resp_tx);
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
-            from_node_id: node.self_id,
+            from_node_id:    node.self_id,
             from_runtime_id: node.runtime_id,
             request_id,
             payload: RdmaRequest::ReadFileChunk {
                 disk_idx: self.disk_idx,
-                volume: volume.into(),
-                path: path.into(),
+                volume:   volume.into(),
+                path:     path.into(),
                 offset,
                 length,
                 target,
             },
         };
         let body = encode(&env)?;
-        if let Err(e) = node
-            .sock
-            .send_kinded(
-                &body,
-                ah,
-                peer.dct_num,
-                peer.dc_key,
-                crate::rdma::wr::SendKind::ChunkReadReq,
-            )
-            .await
-        {
+        if let Err(e) = node.sock.send_kinded(&body, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::ChunkReadReq).await {
             node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
@@ -177,53 +124,38 @@ impl RdmaBackend {
                 }
                 Ok(other) => {
                     drop(buf);
-                    Err(IoError::Decode(format!(
-                        "expected ChunkReady, got {other:?}"
-                    )))
+                    Err(IoError::Decode(format!("expected ChunkReady, got {other:?}")))
                 }
                 Err(_) => {
                     drop(buf);
-                    Err(IoError::Io(io::Error::other(
-                        "dispatcher dropped chunk waiter",
-                    )))
+                    Err(IoError::Io(io::Error::other("dispatcher dropped chunk waiter")))
                 }
             };
             let _ = bytes_tx.send(result);
-        })
-        .detach();
+        }).detach();
 
         match bytes_rx.await {
-            Ok(r) => r,
+            Ok(r)  => r,
             Err(_) => Err(IoError::Io(io::Error::other(
-                "chunk completion task dropped before producing bytes",
+                "chunk completion task dropped before producing bytes"
             ))),
         }
     }
 
     async fn write_single_chunk(
-        &self,
-        volume: &str,
-        path: &str,
-        offset: u64,
-        data: Bytes,
+        &self, volume: &str, path: &str, offset: u64, data: Bytes,
     ) -> IoResult<()> {
         let node = self.node.clone();
-        let peer = node
-            .peer(self.peer_id)
-            .ok_or_else(|| {
-                IoError::Io(io::Error::other(format!(
-                    "rdma peer {} not in registry",
-                    self.peer_id
-                )))
-            })?
+        let peer = node.peer(self.peer_id)
+            .ok_or_else(|| IoError::Io(io::Error::other(
+                format!("rdma peer {} not in registry", self.peer_id)
+            )))?
             .clone();
         let ah = node.ah_cache.get_or_create(&peer).map_err(IoError::Io)?;
 
         let len = data.len();
         if len > u32::MAX as usize {
-            return Err(IoError::InvalidArgument(format!(
-                "write chunk too large: {len}"
-            )));
+            return Err(IoError::InvalidArgument(format!("write chunk too large: {len}")));
         }
         let mut buf = node.bulk_pool.acquire().await.map_err(IoError::Io)?;
         // todo: @arnav this can be avoided.
@@ -236,36 +168,24 @@ impl RdmaBackend {
             id
         };
         let (resp_tx, resp_rx) = oneshot::channel();
-        node.pending_responses
-            .borrow_mut()
-            .insert(request_id, resp_tx);
+        node.pending_responses.borrow_mut().insert(request_id, resp_tx);
 
         let env = Envelope::Req {
             magic: ENVELOPE_MAGIC,
-            from_node_id: node.self_id,
+            from_node_id:    node.self_id,
             from_runtime_id: node.runtime_id,
             request_id,
             payload: RdmaRequest::WriteFileChunk {
                 disk_idx: self.disk_idx,
-                volume: volume.into(),
-                path: path.into(),
+                volume:   volume.into(),
+                path:     path.into(),
                 offset,
-                length: len as u32,
+                length:   len as u32,
                 source,
             },
         };
         let body = encode(&env)?;
-        if let Err(e) = node
-            .sock
-            .send_kinded(
-                &body,
-                ah,
-                peer.dct_num,
-                peer.dc_key,
-                crate::rdma::wr::SendKind::ChunkWriteReq,
-            )
-            .await
-        {
+        if let Err(e) = node.sock.send_kinded(&body, ah, peer.dct_num, peer.dc_key, crate::rdma::wr::SendKind::ChunkWriteReq).await {
             node.pending_responses.borrow_mut().remove(&request_id);
             return Err(IoError::Io(e));
         }
@@ -283,31 +203,23 @@ impl RdmaBackend {
                         Ok(())
                     }
                 }
-                Ok(RdmaResponse::Generic(Response::Err(e))) => {
-                    drop(buf);
-                    Err(IoError::from(e))
-                }
+                Ok(RdmaResponse::Generic(Response::Err(e))) => { drop(buf); Err(IoError::from(e)) }
                 Ok(other) => {
                     drop(buf);
-                    Err(IoError::Decode(format!(
-                        "expected ChunkWritten, got {other:?}"
-                    )))
+                    Err(IoError::Decode(format!("expected ChunkWritten, got {other:?}")))
                 }
                 Err(_) => {
                     drop(buf);
-                    Err(IoError::Io(io::Error::other(
-                        "dispatcher dropped chunk waiter",
-                    )))
+                    Err(IoError::Io(io::Error::other("dispatcher dropped chunk waiter")))
                 }
             };
             let _ = done_tx.send(result);
-        })
-        .detach();
+        }).detach();
 
         match done_rx.await {
-            Ok(r) => r,
+            Ok(r)  => r,
             Err(_) => Err(IoError::Io(io::Error::other(
-                "write completion task dropped",
+                "write completion task dropped"
             ))),
         }
     }
@@ -413,11 +325,11 @@ rdma_backend_storage_impl! {
 }
 
 struct RdmaReadStream {
-    backend: RdmaBackend,
-    volume: String,
-    path: String,
-    offset: u64,
-    remaining: u64,
+    backend:    RdmaBackend,
+    volume:     String,
+    path:       String,
+    offset:     u64,
+    remaining:  u64,
     chunk_size: u32,
 }
 
@@ -428,13 +340,12 @@ impl ByteStream for RdmaReadStream {
             return Ok(Bytes::new());
         }
         let request_len = self.remaining.min(self.chunk_size as u64) as u32;
-        let chunk = self
-            .backend
+        let chunk = self.backend
             .read_single_chunk(&self.volume, &self.path, self.offset, request_len)
             .await?;
         let got = chunk.len() as u64;
-        self.offset += got;
-        self.remaining = self.remaining.saturating_sub(got);
+        self.offset    += got;
+        self.remaining  = self.remaining.saturating_sub(got);
         if got < request_len as u64 {
             self.remaining = 0;
         }
@@ -447,13 +358,13 @@ impl ByteStream for RdmaReadStream {
 }
 
 struct RdmaWriteSink {
-    backend: RdmaBackend,
-    volume: String,
-    path: String,
-    cursor: u64,
-    expected: u64,
+    backend:    RdmaBackend,
+    volume:     String,
+    path:       String,
+    cursor:     u64,
+    expected:   u64,
     chunk_size: u32,
-    finished: bool,
+    finished:   bool,
 }
 
 #[async_trait(?Send)]
@@ -470,24 +381,17 @@ impl ByteSink for RdmaWriteSink {
             remaining = remaining.slice(take..);
             let offset = self.cursor;
             self.cursor += take as u64;
-            self.backend
-                .write_single_chunk(&self.volume, &self.path, offset, piece)
-                .await?;
+            self.backend.write_single_chunk(&self.volume, &self.path, offset, piece).await?;
         }
         Ok(())
     }
 
     async fn finish(&mut self) -> IoResult<()> {
-        if self.finished {
-            return Ok(());
-        }
+        if self.finished { return Ok(()); }
         if self.cursor != self.expected {
             return Err(IoError::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!(
-                    "rdma create_file_writer: wrote {}/{}",
-                    self.cursor, self.expected
-                ),
+                format!("rdma create_file_writer: wrote {}/{}", self.cursor, self.expected),
             )));
         }
         self.finished = true;

@@ -11,23 +11,17 @@ use super::device::{IbDevice, PORT_NUM};
 use super::node::{PeerEndpoint, RdmaQos};
 
 pub struct AhCache {
-    pd: *mut ibv_pd,
-    qos: RdmaQos,
+    pd:        *mut ibv_pd,
+    qos:       RdmaQos,
     gid_index: u8,
-    table: RefCell<HashMap<u16, NonNull<ibv_ah>>>,
-    _dev: Rc<IbDevice>,
+    table:     RefCell<HashMap<u16, NonNull<ibv_ah>>>,
+    _dev:      Rc<IbDevice>,
 }
 
 impl AhCache {
     pub fn new(dev: Rc<IbDevice>, qos: RdmaQos, gid_index: u8, _local_lid: u16) -> Self {
         let pd = dev.pd.as_ptr();
-        Self {
-            pd,
-            qos,
-            gid_index,
-            table: RefCell::new(HashMap::new()),
-            _dev: dev,
-        }
+        Self { pd, qos, gid_index, table: RefCell::new(HashMap::new()), _dev: dev }
     }
 
     pub fn get_or_create(&self, peer: &PeerEndpoint) -> io::Result<*mut ibv_ah> {
@@ -36,23 +30,21 @@ impl AhCache {
         }
         let ah = unsafe {
             let mut a: ibv_ah_attr = mem::zeroed();
-            a.is_global = 1;
-            a.dlid = peer.lid;
-            a.port_num = PORT_NUM;
-            a.sl = self.qos.service_level;
-            a.grh.dgid.raw = peer.gid;
-            a.grh.sgid_index = self.gid_index;
-            a.grh.hop_limit = 64;
+            a.is_global           = 1;
+            a.dlid                = peer.lid;
+            a.port_num            = PORT_NUM;
+            a.sl                  = self.qos.service_level;
+            a.grh.dgid.raw        = peer.gid;
+            a.grh.sgid_index      = self.gid_index;
+            a.grh.hop_limit       = 64;
             // todo @arnav revisit sl and traffic class for pfc etc on roce
-            a.grh.traffic_class = self.qos.traffic_class;
+            a.grh.traffic_class   = self.qos.traffic_class;
             ibv_create_ah(self.pd, &mut a)
         };
         let ah = NonNull::new(ah).ok_or_else(io::Error::last_os_error)?;
         let mut t = self.table.borrow_mut();
         if let Some(e) = t.get(&peer.node_id) {
-            unsafe {
-                ibv_destroy_ah(ah.as_ptr());
-            }
+            unsafe { ibv_destroy_ah(ah.as_ptr()); }
             return Ok(e.as_ptr());
         }
         t.insert(peer.node_id, ah);
@@ -63,9 +55,7 @@ impl AhCache {
 impl Drop for AhCache {
     fn drop(&mut self) {
         for (_, ah) in self.table.borrow_mut().drain() {
-            unsafe {
-                ibv_destroy_ah(ah.as_ptr());
-            }
+            unsafe { ibv_destroy_ah(ah.as_ptr()); }
         }
     }
 }

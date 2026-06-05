@@ -30,16 +30,13 @@ pub fn build_router(state: AppState) -> Router {
 
     Router::new()
         .route("/", get(list_buckets_unimplemented))
-        .route("/{bucket}", bucket_routes.clone())
-        .route("/{bucket}/", bucket_routes)
-        .route(
-            "/{bucket}/{*key}",
-            get(objects::get_object)
-                .head(objects::head_object)
-                .delete(objects::delete_object)
-                .put(objects::put_object)
-                .post(objects::post_object),
-        )
+        .route("/{bucket}",        bucket_routes.clone())
+        .route("/{bucket}/",       bucket_routes)
+        .route("/{bucket}/{*key}", get(objects::get_object)
+                                   .head(objects::head_object)
+                                   .delete(objects::delete_object)
+                                   .put(objects::put_object)
+                                   .post(objects::post_object))
         .fallback(not_found)
         .layer(axum::middleware::from_fn_with_state(state.clone(), sigv4))
         .with_state(state)
@@ -66,8 +63,8 @@ impl<'a> Connected<cyper_axum::IncomingStream<'a, TlsTcpListener>> for CompioSoc
 
 pub async fn serve(
     listener: TcpListener,
-    state: AppState,
-    tls: Option<Rc<TlsAcceptor>>,
+    state:    AppState,
+    tls:      Option<Rc<TlsAcceptor>>,
 ) -> Result<(), Infallible> {
     let app = build_router(state);
 

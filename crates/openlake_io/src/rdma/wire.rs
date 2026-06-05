@@ -7,50 +7,28 @@ pub const ENVELOPE_MAGIC: u32 = 0x52444D31;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct RdmaRemoteBuf {
     pub addr: u64,
-    pub len: u32,
+    pub len:  u32,
     pub rkey: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RdmaRequest {
-    ReadFileChunk {
-        disk_idx: DiskIdx,
-        volume: String,
-        path: String,
-        offset: u64,
-        length: u32,
-        target: RdmaRemoteBuf,
-    },
-    WriteFileChunk {
-        disk_idx: DiskIdx,
-        volume: String,
-        path: String,
-        offset: u64,
-        length: u32,
-        source: RdmaRemoteBuf,
-    },
+    ReadFileChunk  { disk_idx: DiskIdx, volume: String, path: String,
+                     offset: u64, length: u32, target: RdmaRemoteBuf },
+    WriteFileChunk { disk_idx: DiskIdx, volume: String, path: String,
+                     offset: u64, length: u32, source: RdmaRemoteBuf },
     Generic(Request),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RdmaResponse {
-    ChunkReady { bytes_written: u32 },
+    ChunkReady   { bytes_written: u32 },
     ChunkWritten { bytes_written: u32 },
     Generic(Response),
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum Envelope {
-    Req {
-        magic: u32,
-        from_node_id: u16,
-        from_runtime_id: u16,
-        request_id: u64,
-        payload: RdmaRequest,
-    },
-    Rsp {
-        magic: u32,
-        request_id: u64,
-        payload: RdmaResponse,
-    },
+    Req { magic: u32, from_node_id: u16, from_runtime_id: u16, request_id: u64, payload: RdmaRequest  },
+    Rsp { magic: u32, request_id: u64,                                          payload: RdmaResponse },
 }

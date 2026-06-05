@@ -23,11 +23,7 @@ pub enum StorageError {
     /// to decide whether to retry with a different versionId or treat
     /// the whole key as gone.
     #[error("version not found: {bucket}/{key}@{version_id}")]
-    VersionNotFound {
-        bucket: String,
-        key: String,
-        version_id: String,
-    },
+    VersionNotFound { bucket: String, key: String, version_id: String },
 
     #[error("invalid bucket name: {0}")]
     InvalidBucketName(String),
@@ -51,11 +47,7 @@ pub enum StorageError {
     /// distinctly from `ObjectNotFound` so operators can tell
     /// "object missing" from "object split-brain — needs heal."
     #[error("inconsistent metadata for {bucket}/{key}: {msg}")]
-    InconsistentMeta {
-        bucket: String,
-        key: String,
-        msg: String,
-    },
+    InconsistentMeta { bucket: String, key: String, msg: String },
 
     /// Read-side gate failed before content consensus ran: too few
     /// disks responded to even attempt a quorum decision (typically
@@ -64,11 +56,7 @@ pub enum StorageError {
     /// but disagreed) and `ObjectNotFound` (which means the disks
     /// agreed the object doesn't exist).
     #[error("insufficient online drives for {bucket}/{key}: {msg}")]
-    InsufficientOnlineDrives {
-        bucket: String,
-        key: String,
-        msg: String,
-    },
+    InsufficientOnlineDrives { bucket: String, key: String, msg: String },
 
     #[error("io: {0}")]
     Io(#[from] IoError),

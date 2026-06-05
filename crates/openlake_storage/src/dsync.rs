@@ -22,8 +22,8 @@
 //! treated as gone and the next acquire takes over.
 
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::future::join_all;
@@ -40,7 +40,7 @@ const DEFAULT_LEASE: Duration = Duration::from_secs(30);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Per-attempt acquire backoff caps.
-const MAX_BACKOFF: Duration = Duration::from_millis(2_000);
+const MAX_BACKOFF:  Duration = Duration::from_millis(2_000);
 const BASE_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Shared between `LockGuard` and its refresh task.
@@ -56,19 +56,15 @@ struct LockState {
 /// is irrelevant to correctness but must include every node in the
 /// object's set so quorum math (`peers.len() / 2 + 1`) lines up.
 pub struct DsyncClient {
-    peers: Vec<Rc<dyn LockPeer>>,
-    quorum: usize,
+    peers:            Vec<Rc<dyn LockPeer>>,
+    quorum:           usize,
     refresh_interval: Duration,
 }
 
 impl DsyncClient {
     pub fn new(peers: Vec<Rc<dyn LockPeer>>) -> Self {
         let quorum = peers.len() / 2 + 1;
-        Self {
-            peers,
-            quorum,
-            refresh_interval: REFRESH_INTERVAL,
-        }
+        Self { peers, quorum, refresh_interval: REFRESH_INTERVAL }
     }
 
     /// Lock-less client. `acquire` returns immediately with a guard
@@ -76,11 +72,7 @@ impl DsyncClient {
     /// there is exactly one writer in flight; not for production.
     #[doc(hidden)]
     pub fn no_op() -> Self {
-        Self {
-            peers: Vec::new(),
-            quorum: 0,
-            refresh_interval: REFRESH_INTERVAL,
-        }
+        Self { peers: Vec::new(), quorum: 0, refresh_interval: REFRESH_INTERVAL }
     }
 
     /// Override the refresh ping cadence. Tests use a short interval
@@ -94,7 +86,11 @@ impl DsyncClient {
     /// Try to acquire `resource` within `timeout`. Returns a guard that
     /// will release the lock on drop. Returns `LockTimeout` if no
     /// majority is reached before the deadline.
-    pub async fn acquire(&self, resource: &str, timeout: Duration) -> StorageResult<LockGuard> {
+    pub async fn acquire(
+        &self,
+        resource: &str,
+        timeout:  Duration,
+    ) -> StorageResult<LockGuard> {
         let deadline = Instant::now() + timeout;
         let lease_ms = DEFAULT_LEASE.as_millis() as u32;
         let mut attempt: u32 = 0;
@@ -105,15 +101,14 @@ impl DsyncClient {
             // Fan out the vote. Errors count as denials at the quorum
             // count — a peer we cannot reach has not granted us anything.
             let acquires = self.peers.iter().enumerate().map(|(i, p)| {
-                let p = p.clone();
+                let p   = p.clone();
                 let res = resource.to_owned();
                 let uid = uid.clone();
                 async move { (i, p.lock_acquire(&res, &uid, lease_ms).await) }
             });
             let results = join_all(acquires).await;
 
-            let granted: Vec<usize> = results
-                .into_iter()
+            let granted: Vec<usize> = results.into_iter()
                 .filter_map(|(i, r)| matches!(r, Ok(true)).then_some(i))
                 .collect();
 
@@ -132,8 +127,8 @@ impl DsyncClient {
                 );
                 return Ok(LockGuard {
                     resource: Some(resource.to_owned()),
-                    uid: Some(uid),
-                    peers: Some(self.peers.clone()),
+                    uid:      Some(uid),
+                    peers:    Some(self.peers.clone()),
                     state,
                 });
             }
@@ -142,10 +137,10 @@ impl DsyncClient {
             // the next round. Best effort; any failure here is
             // covered by the lease TTL.
             for i in granted {
-                let p = self.peers[i].clone();
+                let p   = self.peers[i].clone();
                 let res = resource.to_owned();
                 let uid = uid.clone();
-                let _ = p.lock_release(&res, &uid).await;
+                let _   = p.lock_release(&res, &uid).await;
             }
 
             if Instant::now() >= deadline {
@@ -162,9 +157,9 @@ impl DsyncClient {
 /// active compio runtime.
 pub struct LockGuard {
     resource: Option<String>,
-    uid: Option<String>,
-    peers: Option<Vec<Rc<dyn LockPeer>>>,
-    state: Arc<LockState>,
+    uid:      Option<String>,
+    peers:    Option<Vec<Rc<dyn LockPeer>>>,
+    state:    Arc<LockState>,
 }
 
 impl LockGuard {
@@ -191,23 +186,17 @@ impl Drop for LockGuard {
         self.state.stop.store(true, Ordering::Release);
 
         let (Some(resource), Some(uid), Some(peers)) =
-            (self.resource.take(), self.uid.take(), self.peers.take())
-        else {
-            return;
-        };
+            (self.resource.take(), self.uid.take(), self.peers.take()) else { return };
 
         compio::runtime::spawn(async move {
             let releases = peers.iter().map(|p| {
-                let p = p.clone();
+                let p   = p.clone();
                 let res = resource.clone();
                 let uid = uid.clone();
-                async move {
-                    let _ = p.lock_release(&res, &uid).await;
-                }
+                async move { let _ = p.lock_release(&res, &uid).await; }
             });
             join_all(releases).await;
-        })
-        .detach();
+        }).detach();
     }
 }
 
@@ -218,42 +207,36 @@ impl Drop for LockGuard {
 ///   * `not_found > tolerance` → lost.
 ///   * `offline` (network failure) is neutral; next round retries.
 fn spawn_refresh_task(
-    state: Arc<LockState>,
-    peers: Vec<Rc<dyn LockPeer>>,
-    quorum: usize,
+    state:    Arc<LockState>,
+    peers:    Vec<Rc<dyn LockPeer>>,
+    quorum:   usize,
     resource: String,
-    uid: String,
+    uid:      String,
     interval: Duration,
 ) {
     if peers.is_empty() {
-        return;
+        return; 
     }
     let tolerance = peers.len() - quorum;
 
     compio::runtime::spawn(async move {
         loop {
             compio::runtime::time::sleep(interval).await;
-            if state.stop.load(Ordering::Acquire) {
-                return;
-            }
+            if state.stop.load(Ordering::Acquire) { return; }
 
             let refreshes = peers.iter().map(|p| {
-                let p = p.clone();
+                let p   = p.clone();
                 let res = resource.clone();
                 let uid = uid.clone();
                 async move { p.lock_refresh(&res, &uid).await }
             });
             let results = join_all(refreshes).await;
 
-            if state.stop.load(Ordering::Acquire) {
-                return;
-            }
+            if state.stop.load(Ordering::Acquire) { return; }
 
             let mut not_found = 0usize;
             for r in results {
-                if let Ok(false) = r {
-                    not_found += 1;
-                }
+                if let Ok(false) = r { not_found += 1; }
             }
             if not_found > tolerance {
                 state.lost.store(true, Ordering::Release);
@@ -262,28 +245,24 @@ fn spawn_refresh_task(
                 let peers = peers.clone();
                 compio::runtime::spawn(async move {
                     let releases = peers.iter().map(|p| {
-                        let p = p.clone();
+                        let p   = p.clone();
                         let res = res.clone();
                         let uid = uid.clone();
-                        async move {
-                            let _ = p.lock_release(&res, &uid).await;
-                        }
+                        async move { let _ = p.lock_release(&res, &uid).await; }
                     });
                     join_all(releases).await;
-                })
-                .detach();
+                }).detach();
                 return;
             }
         }
-    })
-    .detach();
+    }).detach();
 }
 
 fn jitter(attempt: u32) -> Duration {
     let base = BASE_BACKOFF.as_millis() as u64;
-    let cap = MAX_BACKOFF.as_millis() as u64;
+    let cap  = MAX_BACKOFF .as_millis() as u64;
     let shift = attempt.min(6);
-    let max = base.checked_shl(shift).unwrap_or(u64::MAX).min(cap);
+    let max   = base.checked_shl(shift).unwrap_or(u64::MAX).min(cap);
     let span = max.saturating_sub(base).max(1);
 
     let pseudo = pseudo_random_u64();
@@ -299,9 +278,9 @@ fn jitter(attempt: u32) -> Duration {
 /// `String` without a separate type.
 fn fresh_uid() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let n   = COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id() as u64;
-    let t = std::time::SystemTime::now()
+    let t   = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
@@ -341,11 +320,7 @@ mod tests {
         state: RefCell<HashMap<String, (String, Instant)>>,
     }
     impl FakePeer {
-        fn new() -> Self {
-            Self {
-                state: RefCell::new(HashMap::new()),
-            }
-        }
+        fn new() -> Self { Self { state: RefCell::new(HashMap::new()) } }
     }
 
     #[async_trait(?Send)]
@@ -356,19 +331,14 @@ mod tests {
             match m.get(res) {
                 Some((_, exp)) if *exp > now => Ok(false),
                 _ => {
-                    m.insert(
-                        res.into(),
-                        (uid.into(), now + Duration::from_millis(ttl_ms as u64)),
-                    );
+                    m.insert(res.into(), (uid.into(), now + Duration::from_millis(ttl_ms as u64)));
                     Ok(true)
                 }
             }
         }
         async fn lock_release(&self, res: &str, uid: &str) -> IoResult<()> {
             let mut m = self.state.borrow_mut();
-            if m.get(res).is_some_and(|(u, _)| u == uid) {
-                m.remove(res);
-            }
+            if m.get(res).is_some_and(|(u, _)| u == uid) { m.remove(res); }
             Ok(())
         }
         async fn lock_refresh(&self, res: &str, uid: &str) -> IoResult<bool> {
@@ -405,7 +375,7 @@ mod tests {
         // We instead verify timing: hold the guard, retry, expect timeout.
         let g1 = c.acquire("k", Duration::from_secs(1)).await.unwrap();
         let started = Instant::now();
-        let r = c.acquire("k", Duration::from_millis(150)).await;
+        let r       = c.acquire("k", Duration::from_millis(150)).await;
         assert!(r.is_err(), "second acquire must time out while first holds");
         assert!(started.elapsed() >= Duration::from_millis(150));
         drop(g1);
@@ -425,9 +395,7 @@ mod tests {
     #[test]
     fn fresh_uid_is_unique_in_a_burst() {
         let mut s = std::collections::HashSet::new();
-        for _ in 0..1024 {
-            s.insert(fresh_uid());
-        }
+        for _ in 0..1024 { s.insert(fresh_uid()); }
         assert_eq!(s.len(), 1024);
     }
 

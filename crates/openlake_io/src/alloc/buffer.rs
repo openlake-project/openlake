@@ -28,9 +28,9 @@ use super::memory_pool::{memory_pool, AlignedBuffer, AlignedBufferExt, ALIGNMENT
 /// by `freeze()` / `into_inner()` to suppress the return-on-drop.
 #[derive(Debug)]
 pub struct PooledBuffer {
-    from_pool: bool,
-    original_capacity: usize,
-    inner: AlignedBuffer,
+    from_pool:           bool,
+    original_capacity:   usize,
+    inner:               AlignedBuffer,
 }
 
 impl Default for PooledBuffer {
@@ -49,14 +49,13 @@ impl PooledBuffer {
         let (buffer, was_pool_allocated) = memory_pool().acquire_buffer(capacity.max(ALIGNMENT));
         let original_capacity = buffer.capacity();
         debug_assert_eq!(
-            buffer.as_ptr() as usize % ALIGNMENT,
-            0,
+            buffer.as_ptr() as usize % ALIGNMENT, 0,
             "PooledBuffer must be {ALIGNMENT}-byte aligned"
         );
         Self {
-            from_pool: was_pool_allocated,
+            from_pool:         was_pool_allocated,
             original_capacity,
-            inner: buffer,
+            inner:             buffer,
         }
     }
 
@@ -64,9 +63,9 @@ impl PooledBuffer {
     /// the actual size is known. Does not touch the pool.
     pub fn empty() -> Self {
         Self {
-            from_pool: false,
+            from_pool:         false,
             original_capacity: 0,
-            inner: AlignedBuffer::new(ALIGNMENT),
+            inner:             AlignedBuffer::new(ALIGNMENT),
         }
     }
 
@@ -126,15 +125,11 @@ impl PooledBuffer {
 
 impl Deref for PooledBuffer {
     type Target = AlignedBuffer;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
+    fn deref(&self) -> &Self::Target { &self.inner }
 }
 
 impl DerefMut for PooledBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.inner }
 }
 
 impl Drop for PooledBuffer {
@@ -147,9 +142,7 @@ impl Drop for PooledBuffer {
 }
 
 impl AsRef<[u8]> for PooledBuffer {
-    fn as_ref(&self) -> &[u8] {
-        &self.inner
-    }
+    fn as_ref(&self) -> &[u8] { &self.inner }
 }
 
 impl From<&[u8]> for PooledBuffer {

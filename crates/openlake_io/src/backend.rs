@@ -57,7 +57,12 @@ pub trait StorageBackend {
     // -------------------------------------------------------------------
 
     /// List entries in a single directory, capped at `count` (0 for no cap).
-    async fn list_dir(&self, volume: &str, dir_path: &str, count: usize) -> IoResult<Vec<String>>;
+    async fn list_dir(
+        &self,
+        volume: &str,
+        dir_path: &str,
+        count: usize,
+    ) -> IoResult<Vec<String>>;
 
     /// Open a streaming read over `[offset, offset+length)` of `(volume,
     /// path)`. The returned stream owns a recycled scratch buffer; bytes

@@ -52,7 +52,7 @@ pub fn bind_reuseport(addr: SocketAddr) -> io::Result<TcpListener> {
 /// Listener that completes the TLS handshake before yielding the
 /// connection to cyper-axum's HTTP/1.1 driver.
 pub struct TlsTcpListener {
-    inner: TcpListener,
+    inner:    TcpListener,
     acceptor: TlsAcceptor,
 }
 
@@ -63,7 +63,7 @@ impl TlsTcpListener {
 }
 
 impl Listener for TlsTcpListener {
-    type Io = TlsStream<TcpStream>;
+    type Io   = TlsStream<TcpStream>;
     type Addr = SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
@@ -81,7 +81,7 @@ impl Listener for TlsTcpListener {
             };
             match self.acceptor.accept(tcp).await {
                 Ok(tls) => return (tls, peer),
-                Err(e) => {
+                Err(e)  => {
                     tracing::warn!(?peer, error = %e, "tls handshake failed");
                     continue;
                 }

@@ -38,7 +38,7 @@ use siphasher::sip::SipHasher;
 /// matter for a single-cluster deployment.
 const SET_HASH_KEY: [u8; 16] = [0; 16];
 
-pub type NodeId = u16;
+pub type NodeId  = u16;
 pub type DiskIdx = u16;
 
 /// Logical address of one physical disk in the cluster. The pair
@@ -51,7 +51,7 @@ pub type DiskIdx = u16;
 /// `DiskIdx` alone in the RPC variants.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Deserialize, Serialize)]
 pub struct DiskAddr {
-    pub node_id: NodeId,
+    pub node_id:  NodeId,
     pub disk_idx: DiskIdx,
 }
 
@@ -63,7 +63,7 @@ impl std::fmt::Display for DiskAddr {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NodeAddr {
-    pub id: NodeId,
+    pub id:       NodeId,
     /// `ip:port` for this node's peer-to-peer RPC listener. All disks
     /// on this node share this single listener; disk dispatch happens
     /// at the per-RPC `disk_idx` field, not via separate ports.
@@ -75,9 +75,7 @@ pub struct NodeAddr {
     pub disk_count: DiskIdx,
 }
 
-fn default_disk_count() -> DiskIdx {
-    1
-}
+fn default_disk_count() -> DiskIdx { 1 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClusterConfig {
@@ -126,7 +124,7 @@ impl ClusterConfig {
             nodes,
             set_drive_count: replication,
             default_parity_count,
-            deployment_id: uuid::Uuid::nil(),
+            deployment_id:   uuid::Uuid::nil(),
         }
     }
 
@@ -138,11 +136,7 @@ impl ClusterConfig {
     /// Number of erasure sets the cluster is partitioned into.
     pub fn num_sets(&self) -> usize {
         let total = self.total_disks();
-        if total == 0 {
-            0
-        } else {
-            total / self.set_drive_count
-        }
+        if total == 0 { 0 } else { total / self.set_drive_count }
     }
 
     /// Flat ordered list of every disk in the cluster. Nodes are
@@ -153,10 +147,7 @@ impl ClusterConfig {
         let mut out = Vec::with_capacity(self.total_disks());
         for n in &self.nodes {
             for d in 0..n.disk_count {
-                out.push(DiskAddr {
-                    node_id: n.id,
-                    disk_idx: d,
-                });
+                out.push(DiskAddr { node_id: n.id, disk_idx: d });
             }
         }
         out
@@ -166,9 +157,9 @@ impl ClusterConfig {
     /// Slot 0 of every set is always the same physical disk for the
     /// life of the cluster — EC layouts depend on this stability.
     pub fn set_disks(&self, set_index: usize) -> Vec<DiskAddr> {
-        let all = self.all_disks();
+        let all   = self.all_disks();
         let start = set_index * self.set_drive_count;
-        let end = start + self.set_drive_count;
+        let end   = start + self.set_drive_count;
         all[start..end].to_vec()
     }
 
@@ -182,7 +173,7 @@ impl ClusterConfig {
     /// a strict subset of nodes — that subset is exactly the lock plane
     /// for objects routed there.
     pub fn set_node_ids(&self, set_index: usize) -> Vec<NodeId> {
-        let mut out = Vec::with_capacity(self.set_drive_count);
+        let mut out  = Vec::with_capacity(self.set_drive_count);
         let mut seen = std::collections::HashSet::with_capacity(self.set_drive_count);
         for d in self.set_disks(set_index) {
             if seen.insert(d.node_id) {
@@ -225,15 +216,11 @@ impl ClusterConfig {
     /// Write quorum: every disk in the set must succeed today
     /// (replication has no parity slack). Drops to `data + 1`
     /// once the engine's EC tightens this.
-    pub fn write_quorum(&self) -> usize {
-        self.set_drive_count
-    }
+    pub fn write_quorum(&self) -> usize { self.set_drive_count }
 
     /// Read quorum: one live disk in the set is enough today
     /// (replication). Rises to `data` once EC lands.
-    pub fn read_quorum(&self) -> usize {
-        1
-    }
+    pub fn read_quorum(&self) -> usize { 1 }
 }
 
 #[cfg(test)]
@@ -311,48 +298,18 @@ mod tests {
 
         let s0 = c.set_disks(0);
         let s1 = c.set_disks(1);
-        assert_eq!(
-            s0,
-            vec![
-                DiskAddr {
-                    node_id: 0,
-                    disk_idx: 0
-                },
-                DiskAddr {
-                    node_id: 0,
-                    disk_idx: 1
-                },
-                DiskAddr {
-                    node_id: 0,
-                    disk_idx: 2
-                },
-                DiskAddr {
-                    node_id: 0,
-                    disk_idx: 3
-                },
-            ]
-        );
-        assert_eq!(
-            s1,
-            vec![
-                DiskAddr {
-                    node_id: 1,
-                    disk_idx: 0
-                },
-                DiskAddr {
-                    node_id: 1,
-                    disk_idx: 1
-                },
-                DiskAddr {
-                    node_id: 1,
-                    disk_idx: 2
-                },
-                DiskAddr {
-                    node_id: 1,
-                    disk_idx: 3
-                },
-            ]
-        );
+        assert_eq!(s0, vec![
+            DiskAddr { node_id: 0, disk_idx: 0 },
+            DiskAddr { node_id: 0, disk_idx: 1 },
+            DiskAddr { node_id: 0, disk_idx: 2 },
+            DiskAddr { node_id: 0, disk_idx: 3 },
+        ]);
+        assert_eq!(s1, vec![
+            DiskAddr { node_id: 1, disk_idx: 0 },
+            DiskAddr { node_id: 1, disk_idx: 1 },
+            DiskAddr { node_id: 1, disk_idx: 2 },
+            DiskAddr { node_id: 1, disk_idx: 3 },
+        ]);
     }
 
     #[test]
@@ -363,34 +320,16 @@ mod tests {
         let c = n_nodes_d_disks(2, 4, 2);
         assert_eq!(c.num_sets(), 4);
         // Set 0 = node 0 disks 0,1
-        assert_eq!(
-            c.set_disks(0),
-            vec![
-                DiskAddr {
-                    node_id: 0,
-                    disk_idx: 0
-                },
-                DiskAddr {
-                    node_id: 0,
-                    disk_idx: 1
-                },
-            ]
-        );
+        assert_eq!(c.set_disks(0), vec![
+            DiskAddr { node_id: 0, disk_idx: 0 },
+            DiskAddr { node_id: 0, disk_idx: 1 },
+        ]);
         // Set 2 = node 1 disks 0,1 — set 1 wholly within node 0,
         // so set 2 starts cleanly on node 1.
-        assert_eq!(
-            c.set_disks(2),
-            vec![
-                DiskAddr {
-                    node_id: 1,
-                    disk_idx: 0
-                },
-                DiskAddr {
-                    node_id: 1,
-                    disk_idx: 1
-                },
-            ]
-        );
+        assert_eq!(c.set_disks(2), vec![
+            DiskAddr { node_id: 1, disk_idx: 0 },
+            DiskAddr { node_id: 1, disk_idx: 1 },
+        ]);
     }
 
     #[test]
@@ -412,10 +351,7 @@ mod tests {
 
     #[test]
     fn disk_addr_display_is_compact() {
-        let d = DiskAddr {
-            node_id: 7,
-            disk_idx: 3,
-        };
+        let d = DiskAddr { node_id: 7, disk_idx: 3 };
         assert_eq!(format!("{d}"), "n7d3");
     }
 }

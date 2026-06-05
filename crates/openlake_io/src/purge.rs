@@ -22,9 +22,7 @@ pub fn init_purge_worker() {
 }
 
 pub fn register_drive(trash_dir: &Path) {
-    let Ok(rd) = std::fs::read_dir(trash_dir) else {
-        return;
-    };
+    let Ok(rd) = std::fs::read_dir(trash_dir) else { return };
     for ent in rd.flatten() {
         try_enqueue(ent.path());
     }

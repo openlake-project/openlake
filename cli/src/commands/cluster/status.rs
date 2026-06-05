@@ -18,14 +18,12 @@ pub struct StatusArgs {
 }
 
 pub async fn run(args: StatusArgs) -> Result<()> {
-    let cfg =
-        config::load(&args.config).with_context(|| format!("load {}", args.config.display()))?;
+    let cfg = config::load(&args.config)
+        .with_context(|| format!("load {}", args.config.display()))?;
 
     if cfg.nodes.is_empty() {
-        println!(
-            "no openlake cluster detected: {} declares zero nodes",
-            args.config.display()
-        );
+        println!("no openlake cluster detected: {} declares zero nodes",
+                 args.config.display());
         return Ok(());
     }
 
@@ -33,8 +31,10 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 
     let mut alive = 0usize;
     for node in &cfg.nodes {
-        let ok = match compio::time::timeout(probe_timeout, TcpStream::connect(node.rpc_addr)).await
-        {
+        let ok = match compio::time::timeout(
+            probe_timeout,
+            TcpStream::connect(node.rpc_addr),
+        ).await {
             Ok(Ok(_stream)) => true,
             _ => false,
         };
@@ -48,18 +48,13 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 
     if alive == 0 {
         println!();
-        println!(
-            "no openlake cluster detected: 0 / {} nodes responded.",
-            cfg.nodes.len()
-        );
+        println!("no openlake cluster detected: 0 / {} nodes responded.",
+                 cfg.nodes.len());
         println!("hint: bring the cluster up first, then re-run.");
     } else {
         println!();
-        println!(
-            "openlake cluster status: {} / {} nodes alive",
-            alive,
-            cfg.nodes.len()
-        );
+        println!("openlake cluster status: {} / {} nodes alive",
+                 alive, cfg.nodes.len());
     }
     Ok(())
 }

@@ -55,7 +55,11 @@ pub async fn read_full(s: &mut dyn ByteStream, dst: &mut [u8]) -> IoResult<usize
     Ok(filled)
 }
 
-pub async fn pump_n(src: &mut dyn ByteStream, dst: &mut dyn ByteSink, size: u64) -> IoResult<()> {
+pub async fn pump_n(
+    src: &mut dyn ByteStream,
+    dst: &mut dyn ByteSink,
+    size: u64,
+) -> IoResult<()> {
     let mut moved = 0u64;
     while moved < size {
         let chunk = src.read().await?;
@@ -82,8 +86,8 @@ pub async fn pump_n(src: &mut dyn ByteStream, dst: &mut dyn ByteSink, size: u64)
 }
 
 pub async fn pump_compio_to_sink<R: AsyncRead + Unpin>(
-    src: &mut R,
-    dst: &mut dyn ByteSink,
+    src:  &mut R,
+    dst:  &mut dyn ByteSink,
     size: u64,
 ) -> IoResult<()> {
     let mut moved = 0u64;
@@ -113,9 +117,7 @@ pub struct VecByteStream {
 
 impl VecByteStream {
     pub fn new(buf: Vec<u8>) -> Self {
-        Self {
-            buf: Bytes::from(buf),
-        }
+        Self { buf: Bytes::from(buf) }
     }
 }
 
@@ -157,9 +159,7 @@ pub struct RopeByteStream {
 
 impl RopeByteStream {
     pub fn new(frames: Vec<bytes::Bytes>) -> Self {
-        Self {
-            frames: frames.into(),
-        }
+        Self { frames: frames.into() }
     }
 }
 
@@ -175,18 +175,14 @@ impl ByteStream for RopeByteStream {
 }
 
 pub struct SkipTakeStream {
-    inner: Box<dyn ByteStream>,
-    to_skip: u64,
+    inner:     Box<dyn ByteStream>,
+    to_skip:   u64,
     remaining: u64,
 }
 
 impl SkipTakeStream {
     pub fn new(inner: Box<dyn ByteStream>, skip: u64, take: u64) -> Self {
-        Self {
-            inner,
-            to_skip: skip,
-            remaining: take,
-        }
+        Self { inner, to_skip: skip, remaining: take }
     }
 }
 
@@ -207,18 +203,10 @@ impl ByteStream for SkipTakeStream {
             }
             let drop = self.to_skip as usize;
             self.to_skip = 0;
-            let kept = if drop == 0 {
-                chunk
-            } else {
-                bytes::Bytes::slice(&chunk, drop..)
-            };
+            let kept = if drop == 0 { chunk } else { bytes::Bytes::slice(&chunk, drop..) };
             let take = (self.remaining as usize).min(kept.len());
             self.remaining -= take as u64;
-            return Ok(if take == kept.len() {
-                kept
-            } else {
-                bytes::Bytes::slice(&kept, ..take)
-            });
+            return Ok(if take == kept.len() { kept } else { bytes::Bytes::slice(&kept, ..take) });
         }
     }
 
@@ -237,9 +225,7 @@ impl VecByteSink {
         Self { buf: Vec::new() }
     }
     pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            buf: Vec::with_capacity(cap),
-        }
+        Self { buf: Vec::with_capacity(cap) }
     }
     pub fn into_inner(self) -> Vec<u8> {
         self.buf
@@ -276,9 +262,7 @@ mod tests {
     }
 
     fn chunks(parts: &[&[u8]]) -> Box<dyn ByteStream> {
-        Box::new(ChunkSource(
-            parts.iter().map(|b| Bytes::copy_from_slice(b)).collect(),
-        ))
+        Box::new(ChunkSource(parts.iter().map(|b| Bytes::copy_from_slice(b)).collect()))
     }
 
     async fn drain(s: &mut dyn ByteStream) -> Vec<u8> {
