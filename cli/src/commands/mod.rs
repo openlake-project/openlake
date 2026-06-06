@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod cluster;
 pub mod disk;
 use anyhow::Result;
@@ -9,11 +10,15 @@ pub enum Cmd {
 
     /// Disk inspection commands.
     Disk(disk::Args),
+
+    /// Fabric microbench.
+    Bench(bench::Args),
 }
 
 pub async fn dispatch(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Cluster(a) => cluster::run(a).await,
-        Cmd::Disk(a) => disk::run(a).await,
+        Cmd::Disk(a)    => disk::run(a).await,
+        Cmd::Bench(a)   => bench::run(a).await,
     }
 }
