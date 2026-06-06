@@ -75,7 +75,25 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let cfg_text = std::fs::read_to_string(&args.config)
         .with_context(|| format!("reading {}", args.config.display()))?;
-    let cfg = Arc::new(config::Config::from_toml(&cfg_text)?);
+    let mut cfg = config::Config::from_toml(&cfg_text)?;
+
+    if let Ok(s) = std::env::var("OPENLAKE_SELF_ID") {
+        let ord: u16 = s.parse()?;
+        let toml_self_id = cfg.self_id;
+        cfg.self_id = ord;
+        if let Some(rdma) = cfg.rdma.as_mut() {
+            rdma.self_node_id = ord;
+        }
+        tracing::warn!(
+            env_self_id = ord,
+            toml_self_id,
+            "OPENLAKE_SELF_ID override: StatefulSet self_id={ord} \
+             picked over config-provided value {toml_self_id}; \
+             align the TOML or drop the env var to remove ambiguity"
+        );
+    }
+
+    let cfg = Arc::new(cfg);
 
     // Initialise the global buffer pool BEFORE any runtime spawns so
     // every per-connection task sees a ready pool from the very first
