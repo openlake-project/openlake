@@ -587,9 +587,10 @@ async fn run_runtime(
     let s3_engine     = engine.clone();
     let s3_auth       = auth_state.clone();
     let s3_acceptor   = s3_acceptor.clone();
+    let s3_cfg        = cfg.clone();
     let s3_task = compio::runtime::spawn(async move {
         let app_state = s3::state::AppState::new(s3_engine, s3_auth);
-        let _ = s3::app::serve(s3_listener, app_state, s3_acceptor).await;
+        let _ = s3::app::serve(s3_listener, app_state, s3_acceptor, s3_cfg).await;
         tracing::error!(runtime_id, "s3 serve loop exited");
     });
 

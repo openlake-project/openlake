@@ -58,11 +58,11 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use openlake_storage::NodeAddr;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub self_id:         u16,
     /// Local disk mountpoints owned by this node, in `disk_idx`
@@ -134,14 +134,14 @@ pub struct Config {
     pub rdma:            Option<RdmaToml>,     // required when transport = rdma
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportMode {
     #[default] H2,
     Rdma,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RdmaToml {
     pub self_node_id:  u16,
     pub dev_name:      String,
@@ -156,7 +156,7 @@ pub struct RdmaToml {
 fn default_bulk_pool_cap() -> usize { 64 }
 fn default_network_timeout_secs() -> u64 { 10 * 60 * 60 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct RdmaQosToml {
     pub traffic_class: u8,
     pub service_level: u8,
@@ -165,7 +165,7 @@ pub struct RdmaQosToml {
 /// TOML-friendly mirror of `openlake_io::MemoryPoolConfig`. Defaults
 /// match the production-tuned values; deviating is rare. `enabled =
 /// false` is supported for diff-testing.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct MemoryPoolToml {
     pub enabled:         bool,
@@ -199,7 +199,7 @@ impl From<&MemoryPoolToml> for openlake_io::MemoryPoolConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Credential {
     pub access_key: String,
     pub secret_key: String,
@@ -209,7 +209,7 @@ pub struct Credential {
 /// for the S3 plane and the RPC plane; `client_ca` is only meaningful
 /// for the RPC plane (the connector side), where it pins which cluster
 /// CA the `RemoteBackend` connector trusts when verifying peers.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TlsConfig {
     pub cert_path:    PathBuf,
     pub key_path:     PathBuf,
