@@ -94,7 +94,7 @@ Please check out [Contributing to OpenLake](https://github.com/openlake-project/
 ## Contact Us
 
   - For technical support, please reach out on [discord](https://discord.gg/TNXqVSnP6x).
-  - For technical issues, bugs, and feature requests, please open an issue on [GitHub](https://github.com/theopenlake/openlake/issues).
+  - For technical issues, bugs, and feature requests, please open an issue on [GitHub](https://github.com/openlake-project/openlake/issues).
   - For everything else, visit the [website](https://theopenlake.com) or reach out to the maintainers on discord.
 
 ## License
