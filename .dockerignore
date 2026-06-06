@@ -1,0 +1,8 @@
+target
+.git
+.github
+docs
+assets
+benchmarks
+docker
+**/*.md
