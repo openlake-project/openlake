@@ -15,6 +15,7 @@ rdma    = ["openlake_io/rdma", "dep:rdma-mummy-sys", "dep:serde_json"]
 
 [dependencies]
 openlake_io      = { path = "../crates/openlake_io" }
+openlake_server  = { path = "../crates/openlake_server" }
 openlake_storage = { path = "../crates/openlake_storage" }
 
 clap               = { workspace = true }

@@ -3,67 +3,60 @@ use clap::Args as ClapArgs;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use crate::config::{self, ClusterToml};
+use openlake_server::config::Config;
+use openlake_storage::NodeAddr;
 
 #[derive(ClapArgs)]
 pub struct TopologyArgs {
-    /// Cluster TOML.  One TOML describes exactly one cluster.
+    /// openlake.toml. The same file openlaked reads.
     #[arg(long)]
     pub config: PathBuf,
 }
 
 pub async fn run(args: TopologyArgs) -> Result<()> {
-    let cfg = config::load(&args.config).with_context(|| {
-        format!("failed to load cluster config from {}", args.config.display())
-    })?;
+    let text = std::fs::read_to_string(&args.config)
+        .with_context(|| format!("read {}", args.config.display()))?;
+    let cfg: Config = toml::from_str(&text)
+        .with_context(|| format!("parse {}", args.config.display()))?;
 
     println!("openlake cluster topology: {}", args.config.display());
     println!();
 
-    let (report, warnings) = render(&cfg);
+    let (report, warnings) = render(&cfg.nodes);
     print!("{report}");
 
-    // Keep stdout a clean, pipeable report; diagnostics go to stderr.
     for w in warnings {
         eprintln!("{w}");
     }
     Ok(())
 }
 
-/// Render the declared cluster layout and any config warnings.
-///
-/// Unlike `cluster status`, this never touches the network: it reports the
-/// static topology exactly as the TOML declares it, sorted by node id.  The
-/// returned tuple is `(report, warnings)` — the report is the stdout table,
-/// and `warnings` are diagnostics the caller should emit on stderr.
-fn render(cfg: &ClusterToml) -> (String, Vec<String>) {
-    if cfg.nodes.is_empty() {
-        let report = "config declares zero nodes; nothing to lay out.\n".to_string();
-        return (report, Vec::new());
+fn render(nodes: &[NodeAddr]) -> (String, Vec<String>) {
+    if nodes.is_empty() {
+        return ("config declares zero nodes, nothing to lay out.\n".to_string(), Vec::new());
     }
 
-    let mut nodes: Vec<_> = cfg.nodes.iter().collect();
-    nodes.sort_unstable_by_key(|n| n.id);
+    let mut sorted: Vec<&NodeAddr> = nodes.iter().collect();
+    sorted.sort_unstable_by_key(|n| n.id);
 
     let mut out = String::new();
-    out.push_str("  node    rpc address\n");
-    out.push_str("  ----    -----------\n");
-    for n in &nodes {
-        let _ = writeln!(out, "  {:>4}    {}", n.id, n.rpc_addr);
+    out.push_str("  node    disks    rpc address\n");
+    out.push_str("  ----    -----    -----------\n");
+    for n in &sorted {
+        let _ = writeln!(out, "  {:>4}    {:>5}    {}", n.id, n.disk_count, n.rpc_addr);
     }
     out.push('\n');
 
-    let count = nodes.len();
+    let count = sorted.len();
+    let total_disks: u32 = sorted.iter().map(|n| n.disk_count as u32).sum();
     let _ = writeln!(
         out,
-        "{} node{} configured.",
-        count,
-        if count == 1 { "" } else { "s" }
+        "{} node{} configured, {} disk{} total.",
+        count,        if count == 1 { "" } else { "s" },
+        total_disks,  if total_disks == 1 { "" } else { "s" },
     );
 
-    // A cluster TOML must map each id to exactly one node.  After sorting,
-    // duplicates are adjacent, so a single pass surfaces them.
-    let mut dup_ids: Vec<u32> = nodes
+    let mut dup_ids: Vec<u16> = sorted
         .windows(2)
         .filter(|w| w[0].id == w[1].id)
         .map(|w| w[0].id)
@@ -80,57 +73,57 @@ fn render(cfg: &ClusterToml) -> (String, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::NodeToml;
     use std::net::SocketAddr;
 
-    fn node(id: u32, addr: &str) -> NodeToml {
-        NodeToml {
+    fn node(id: u16, addr: &str, disk_count: u16) -> NodeAddr {
+        NodeAddr {
             id,
             rpc_addr: addr.parse::<SocketAddr>().unwrap(),
+            disk_count,
         }
     }
 
     #[test]
     fn empty_config_reports_no_nodes() {
-        let (report, warnings) = render(&ClusterToml { nodes: vec![] });
+        let (report, warnings) = render(&[]);
         assert!(report.contains("zero nodes"));
         assert!(warnings.is_empty());
     }
 
     #[test]
     fn nodes_are_sorted_by_id() {
-        let cfg = ClusterToml {
-            nodes: vec![
-                node(2, "127.0.0.1:9002"),
-                node(0, "127.0.0.1:9000"),
-                node(1, "127.0.0.1:9001"),
-            ],
-        };
-        let (report, warnings) = render(&cfg);
+        let nodes = vec![
+            node(2, "127.0.0.1:9002", 1),
+            node(0, "127.0.0.1:9000", 1),
+            node(1, "127.0.0.1:9001", 1),
+        ];
+        let (report, warnings) = render(&nodes);
         let p0 = report.find("127.0.0.1:9000").unwrap();
         let p1 = report.find("127.0.0.1:9001").unwrap();
         let p2 = report.find("127.0.0.1:9002").unwrap();
         assert!(p0 < p1 && p1 < p2, "nodes should be ordered by id");
-        assert!(report.contains("3 nodes configured."));
+        assert!(report.contains("3 nodes configured"));
         assert!(warnings.is_empty());
     }
 
     #[test]
     fn single_node_uses_singular() {
-        let cfg = ClusterToml {
-            nodes: vec![node(0, "127.0.0.1:9000")],
-        };
-        let (report, _) = render(&cfg);
-        assert!(report.contains("1 node configured."));
+        let (report, _) = render(&[node(0, "127.0.0.1:9000", 1)]);
+        assert!(report.contains("1 node configured"));
+        assert!(report.contains("1 disk total"));
     }
 
     #[test]
     fn duplicate_ids_are_flagged() {
-        let cfg = ClusterToml {
-            nodes: vec![node(0, "127.0.0.1:9000"), node(0, "10.0.0.1:9000")],
-        };
-        let (_, warnings) = render(&cfg);
+        let nodes = vec![node(0, "127.0.0.1:9000", 1), node(0, "10.0.0.1:9000", 2)];
+        let (_, warnings) = render(&nodes);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("node id 0 declared more than once."));
+    }
+
+    #[test]
+    fn disk_count_appears_in_render() {
+        let (report, _) = render(&[node(0, "127.0.0.1:9000", 4), node(1, "127.0.0.1:9001", 4)]);
+        assert!(report.contains("8 disks total"));
     }
 }
