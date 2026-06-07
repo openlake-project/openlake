@@ -5,6 +5,6 @@ use clap::Parser;
 pub struct VersionArgs {}
 
 pub async fn run(_args: VersionArgs) -> Result<()> {
-    println!("OpenLake CLI Version 0.1.0");
+    println!("OpenLake CLI Version {}", env!("CARGO_PKG_VERSION"));
     Ok(())
 }
