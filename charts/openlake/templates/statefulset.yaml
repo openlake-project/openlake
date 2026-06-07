@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "openlake.fullname" . }}
+  labels:
+    {{- include "openlake.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "openlake.fullname" . }}-rpc
+  replicas: {{ .Values.replicaCount }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "openlake.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openlake.selectorLabels" . | nindent 8 }}
+        openlake.dev/mode: {{ .Values.mode }}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "openlake.selectorLabels" . | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: openlaked
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "/etc/openlake/entrypoint.sh"]
+          env:
+            - name: OPENLAKE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "openlake.fullname" . }}-credentials
+                  key: accessKey
+            - name: OPENLAKE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "openlake.fullname" . }}-credentials
+                  key: secretKey
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RUST_LOG
+              value: info
+            - name: RUST_BACKTRACE
+              value: "1"
+          ports:
+            - name: rpc
+              containerPort: {{ .Values.ports.rpc }}
+              protocol: TCP
+            - name: s3
+              containerPort: {{ .Values.ports.s3 }}
+              protocol: TCP
+          {{- if eq .Values.mode "rdma" }}
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK", "NET_RAW"]
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/openlake
+            {{- range $i, $_ := until (int .Values.storage.diskCount) }}
+            - name: data-{{ $i }}
+              mountPath: /var/lib/openlake/d{{ $i }}
+            {{- end }}
+            {{- if eq .Values.mode "rdma" }}
+            - name: infiniband
+              mountPath: /dev/infiniband
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "openlake.fullname" . }}-config
+            defaultMode: 0755
+        {{- if eq .Values.mode "rdma" }}
+        - name: infiniband
+          hostPath:
+            path: /dev/infiniband
+            type: Directory
+        {{- end }}
+  volumeClaimTemplates:
+    {{- range $i, $_ := until (int .Values.storage.diskCount) }}
+    - metadata:
+        name: data-{{ $i }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ $.Values.storage.storageClassName }}
+        resources:
+          requests:
+            storage: {{ $.Values.storage.size }}
+    {{- end }}

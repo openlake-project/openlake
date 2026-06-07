@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openlake.fullname" . }}-config
+  labels:
+    {{- include "openlake.labels" . | nindent 4 }}
+data:
+  openlake.toml.tpl: |
+    self_id              = __SELF_ID__
+    data_dirs            = [
+    {{- range $i, $_ := until (int .Values.storage.diskCount) }}
+      "/var/lib/openlake/d{{ $i }}"{{ if lt (add1 $i) (int $.Values.storage.diskCount) }},{{ end }}
+    {{- end }}
+    ]
+    s3_addr              = "0.0.0.0:{{ .Values.ports.s3 }}"
+    rpc_addr             = "0.0.0.0:{{ .Values.ports.rpc }}"
+    set_drive_count      = {{ .Values.cluster.setDriveCount }}
+    default_parity_count = {{ .Values.cluster.defaultParityCount }}
+    region               = "{{ .Values.cluster.region }}"
+    transport            = {{ if eq .Values.mode "rdma" }}"rdma"{{ else }}"h2"{{ end }}
+
+    [[credentials]]
+    access_key = "__ACCESS_KEY__"
+    secret_key = "__SECRET_KEY__"
+
+    {{- range .Values.nodes }}
+
+    [[nodes]]
+    id         = {{ .id }}
+    rpc_addr   = "{{ .host }}:{{ $.Values.ports.rpc }}"
+    disk_count = {{ $.Values.storage.diskCount }}
+    {{- end }}
+
+    {{- if eq .Values.mode "rdma" }}
+
+    [rdma]
+    self_node_id = __SELF_ID__
+    dev_name     = "{{ .Values.rdma.devName }}"
+    dc_key       = {{ .Values.rdma.dcKey }}
+
+    [rdma.qos]
+    traffic_class = {{ .Values.rdma.qos.trafficClass }}
+    service_level = {{ .Values.rdma.qos.serviceLevel }}
+    {{- end }}
+
+  entrypoint.sh: |
+    #!/bin/sh
+    set -eu
+    ORD=${POD_NAME##*-}
+    sed -e "s/__SELF_ID__/${ORD}/g" \
+        -e "s|__ACCESS_KEY__|${OPENLAKE_ACCESS_KEY}|g" \
+        -e "s|__SECRET_KEY__|${OPENLAKE_SECRET_KEY}|g" \
+        /etc/openlake/openlake.toml.tpl > /tmp/openlake.toml
+    exec /usr/local/bin/openlaked --config /tmp/openlake.toml

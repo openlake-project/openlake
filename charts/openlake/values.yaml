@@ -1,0 +1,44 @@
+image:
+  repository: openlake/openlaked
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+mode: tls
+
+replicaCount: 2
+
+ports:
+  rpc: 9091
+  s3: 9000
+
+cluster:
+  setDriveCount: 2
+  defaultParityCount: 1
+  region: us-east-1
+
+storage:
+  storageClassName: local-path
+  size: 1Ti
+  diskCount: 2
+
+credentials:
+  accessKey: openlakeadmin
+  secretKey: openlakesecret
+
+nodes:
+  - id: 0
+    host: 10.0.0.9
+  - id: 1
+    host: 10.0.0.10
+
+rdma:
+  devName: mlx5_ib0
+  dcKey: "0x0BADBEEFC0FFEE"
+  qos:
+    trafficClass: 0
+    serviceLevel: 0
+
+resources: {}
+
+s3Service:
+  type: ClusterIP

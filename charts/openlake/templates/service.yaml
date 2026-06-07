@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "openlake.fullname" . }}-rpc
+  labels:
+    {{- include "openlake.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "openlake.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: rpc
+      port: {{ .Values.ports.rpc }}
+      targetPort: rpc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "openlake.fullname" . }}-s3
+  labels:
+    {{- include "openlake.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.s3Service.type }}
+  {{- if eq .Values.s3Service.type "LoadBalancer" }}
+  externalTrafficPolicy: Local
+  {{- end }}
+  selector:
+    {{- include "openlake.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: s3
+      port: {{ .Values.ports.s3 }}
+      targetPort: s3
