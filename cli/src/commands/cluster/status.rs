@@ -20,12 +20,14 @@ pub struct StatusArgs {
 pub async fn run(args: StatusArgs) -> Result<()> {
     let text = std::fs::read_to_string(&args.config)
         .with_context(|| format!("read {}", args.config.display()))?;
-    let cfg: Config = toml::from_str(&text)
-        .with_context(|| format!("parse {}", args.config.display()))?;
+    let cfg: Config =
+        toml::from_str(&text).with_context(|| format!("parse {}", args.config.display()))?;
 
     if cfg.nodes.is_empty() {
-        println!("no openlake cluster detected: {} declares zero nodes",
-                 args.config.display());
+        println!(
+            "no openlake cluster detected: {} declares zero nodes",
+            args.config.display()
+        );
         return Ok(());
     }
 
@@ -39,20 +41,31 @@ pub async fn run(args: StatusArgs) -> Result<()> {
         );
         if ok {
             alive += 1;
-            println!("[node {:>3}] up    {} ({} disks)", node.id, node.rpc_addr, node.disk_count);
+            println!(
+                "[node {:>3}] up    {} ({} disks)",
+                node.id, node.rpc_addr, node.disk_count
+            );
         } else {
-            println!("[node {:>3}] DOWN  {} ({} disks)", node.id, node.rpc_addr, node.disk_count);
+            println!(
+                "[node {:>3}] DOWN  {} ({} disks)",
+                node.id, node.rpc_addr, node.disk_count
+            );
         }
     }
 
     println!();
     if alive == 0 {
-        println!("no openlake cluster detected: 0 / {} nodes responded.",
-                 cfg.nodes.len());
+        println!(
+            "no openlake cluster detected: 0 / {} nodes responded.",
+            cfg.nodes.len()
+        );
         println!("hint: bring the cluster up first, then re-run.");
     } else {
-        println!("openlake cluster status: {} / {} nodes alive",
-                 alive, cfg.nodes.len());
+        println!(
+            "openlake cluster status: {} / {} nodes alive",
+            alive,
+            cfg.nodes.len()
+        );
     }
     Ok(())
 }

@@ -2119,6 +2119,7 @@ dependencies = [
  "hdrhistogram",
  "libc",
  "openlake_io",
+ "openlake_server",
  "openlake_storage",
  "rdma-mummy-sys",
  "serde",

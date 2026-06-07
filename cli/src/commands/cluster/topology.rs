@@ -16,8 +16,8 @@ pub struct TopologyArgs {
 pub async fn run(args: TopologyArgs) -> Result<()> {
     let text = std::fs::read_to_string(&args.config)
         .with_context(|| format!("read {}", args.config.display()))?;
-    let cfg: Config = toml::from_str(&text)
-        .with_context(|| format!("parse {}", args.config.display()))?;
+    let cfg: Config =
+        toml::from_str(&text).with_context(|| format!("parse {}", args.config.display()))?;
 
     println!("openlake cluster topology: {}", args.config.display());
     println!();
@@ -33,7 +33,10 @@ pub async fn run(args: TopologyArgs) -> Result<()> {
 
 fn render(nodes: &[NodeAddr]) -> (String, Vec<String>) {
     if nodes.is_empty() {
-        return ("config declares zero nodes, nothing to lay out.\n".to_string(), Vec::new());
+        return (
+            "config declares zero nodes, nothing to lay out.\n".to_string(),
+            Vec::new(),
+        );
     }
 
     let mut sorted: Vec<&NodeAddr> = nodes.iter().collect();
@@ -43,7 +46,11 @@ fn render(nodes: &[NodeAddr]) -> (String, Vec<String>) {
     out.push_str("  node    disks    rpc address\n");
     out.push_str("  ----    -----    -----------\n");
     for n in &sorted {
-        let _ = writeln!(out, "  {:>4}    {:>5}    {}", n.id, n.disk_count, n.rpc_addr);
+        let _ = writeln!(
+            out,
+            "  {:>4}    {:>5}    {}",
+            n.id, n.disk_count, n.rpc_addr
+        );
     }
     out.push('\n');
 
@@ -52,8 +59,10 @@ fn render(nodes: &[NodeAddr]) -> (String, Vec<String>) {
     let _ = writeln!(
         out,
         "{} node{} configured, {} disk{} total.",
-        count,        if count == 1 { "" } else { "s" },
-        total_disks,  if total_disks == 1 { "" } else { "s" },
+        count,
+        if count == 1 { "" } else { "s" },
+        total_disks,
+        if total_disks == 1 { "" } else { "s" },
     );
 
     let mut dup_ids: Vec<u16> = sorted

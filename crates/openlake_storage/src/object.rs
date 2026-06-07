@@ -31,7 +31,7 @@ pub struct MultipartInit {
 #[derive(Debug, Clone)]
 pub struct CompletePart {
     pub part_number: u32,
-    pub etag:        String,
+    pub etag: String,
 }
 
 /// Information about an object. Returned by `get`, `stat`, `list`.

@@ -37,36 +37,35 @@ use crate::backend::StorageBackend;
 use crate::error::{IoError, IoResult};
 use crate::stream::{ByteSink, ByteStream};
 use crate::types::{
-    DeleteOptions, DiskInfo, FileInfo, RenameDataResp, RenameOptions,
-    UpdateMetadataOpts, VolInfo,
+    DeleteOptions, DiskInfo, FileInfo, RenameDataResp, RenameOptions, UpdateMetadataOpts, VolInfo,
 };
 use crate::xl_meta::{self, DecodedRecord};
 
-const META_FILENAME:         &str = "xl.meta";
+const META_FILENAME: &str = "xl.meta";
 /// Cluster-identity file. One per drive root, persisted JSON,
 /// written exactly once at first cluster init by the seed node.
 /// See [`crate::types::FormatJson`] and the bootstrap state machine
 /// in `openlake_storage::format`.
-const FORMAT_FILENAME:       &str = ".openlake.format.json";
+const FORMAT_FILENAME: &str = ".openlake.format.json";
 /// Backup-of-prior-xl.meta filename written inside the old data_dir
 /// on same-`version_id` overwrites (S-6). A crash-recovery scrubber
 /// finds this and can reconstruct the pre-PUT state if the live
 /// xl.meta got torn between S-5 (data_dir grafted) and S-7 (xl.meta
 /// commit). Mirrors MinIO's `xl.meta.bkp` (`xl-storage-format-v2.go`
 /// `xlStorageFormatFileBackup`).
-const META_BACKUP_FILENAME:  &str = "xl.meta.bkp";
-const TRASH_DIRNAME:         &str = ".openlake.trash";
+const META_BACKUP_FILENAME: &str = "xl.meta.bkp";
+const TRASH_DIRNAME: &str = ".openlake.trash";
 /// Reserved system "volume" names — these accept reads/writes without
 /// going through `make_vol`. Mirrors MinIO's `.minio.sys/{tmp,multipart}`
 /// pattern: in-progress writes land under `STAGING_VOL`, completed
 /// objects are atomically promoted via `rename_data`. Multipart upload
 /// sessions live under `MULTIPART_VOL` keyed by `sha256(bucket/key)`.
-pub const STAGING_VOL:    &str = ".openlake.staging";
-pub const MULTIPART_VOL:  &str = ".openlake.multipart";
+pub const STAGING_VOL: &str = ".openlake.staging";
+pub const MULTIPART_VOL: &str = ".openlake.multipart";
 /// Holds bucket-meta and other engine-internal config as ordinary
 /// objects under it. Mirrors MinIO's `.minio.sys`. Bootstrapped at
 /// `LocalFsBackend::new` and never created/deleted via the user API.
-pub const SYSTEM_BUCKET:  &str = ".openlake.sys";
+pub const SYSTEM_BUCKET: &str = ".openlake.sys";
 
 fn is_system_vol(volume: &str) -> bool {
     volume == STAGING_VOL || volume == MULTIPART_VOL || volume == SYSTEM_BUCKET
@@ -78,12 +77,12 @@ const O_DIRECT_ALIGN: usize = 512;
 #[cfg(target_os = "linux")]
 mod open_flags {
     pub const DIRECT_FLAG: libc::c_int = libc::O_DIRECT;
-    pub const SYNC_FLAG:   libc::c_int = libc::O_SYNC;
+    pub const SYNC_FLAG: libc::c_int = libc::O_SYNC;
 }
 #[cfg(not(target_os = "linux"))]
 mod open_flags {
     pub const DIRECT_FLAG: libc::c_int = 0;
-    pub const SYNC_FLAG:   libc::c_int = 0;
+    pub const SYNC_FLAG: libc::c_int = 0;
 }
 use open_flags::{DIRECT_FLAG, SYNC_FLAG};
 
@@ -94,13 +93,19 @@ pub struct CachedFile {
 
 impl CachedFile {
     pub fn pick_write_fd(&self, buf_ptr: *const u8, len: usize, file_offset: u64) -> &File {
-        let aligned = (len % O_DIRECT_ALIGN == 0)
-                   && (file_offset as usize % O_DIRECT_ALIGN == 0)
-                   && (buf_ptr as usize % O_DIRECT_ALIGN == 0);
-        if aligned { &self.direct } else { &self.normal }
+        let aligned = len.is_multiple_of(O_DIRECT_ALIGN)
+            && (file_offset as usize).is_multiple_of(O_DIRECT_ALIGN)
+            && (buf_ptr as usize).is_multiple_of(O_DIRECT_ALIGN);
+        if aligned {
+            &self.direct
+        } else {
+            &self.normal
+        }
     }
 
-    pub fn read_fd(&self) -> &File { &self.direct }
+    pub fn read_fd(&self) -> &File {
+        &self.direct
+    }
 }
 
 pub struct FileHandleCache {
@@ -110,31 +115,44 @@ pub struct FileHandleCache {
 impl FileHandleCache {
     pub fn new(capacity: usize) -> Self {
         let cap = std::num::NonZeroUsize::new(capacity).expect("cache capacity must be > 0");
-        Self { inner: std::cell::RefCell::new(lru::LruCache::new(cap)) }
+        Self {
+            inner: std::cell::RefCell::new(lru::LruCache::new(cap)),
+        }
     }
 
     pub fn get(&self, path: &Path) -> Option<std::rc::Rc<CachedFile>> {
         self.inner.borrow_mut().get(path).cloned()
     }
 
-    pub async fn get_or_open(&self, path: &Path, create: bool) -> std::io::Result<std::rc::Rc<CachedFile>> {
+    pub async fn get_or_open(
+        &self,
+        path: &Path,
+        create: bool,
+    ) -> std::io::Result<std::rc::Rc<CachedFile>> {
         if let Some(file) = self.inner.borrow_mut().get(path) {
             return Ok(file.clone());
         }
         let direct = Self::open_with_flag(path, create, DIRECT_FLAG).await?;
         let normal = Self::open_with_flag(path, create, SYNC_FLAG).await?;
         let cached = std::rc::Rc::new(CachedFile { direct, normal });
-        self.inner.borrow_mut().put(path.to_path_buf(), cached.clone());
+        self.inner
+            .borrow_mut()
+            .put(path.to_path_buf(), cached.clone());
         Ok(cached)
     }
 
-    async fn open_with_flag(path: &Path, create: bool, _extra_flag: libc::c_int) -> std::io::Result<File> {
+    async fn open_with_flag(
+        path: &Path,
+        create: bool,
+        _extra_flag: libc::c_int,
+    ) -> std::io::Result<File> {
         let mut opts = OpenOptions::new();
         opts.read(true).write(true);
-        if create { opts.create(true); }
+        if create {
+            opts.create(true);
+        }
         #[cfg(target_os = "linux")]
         {
-            use std::os::unix::fs::OpenOptionsExt;
             opts.custom_flags(_extra_flag);
         }
         opts.open(path).await
@@ -146,7 +164,7 @@ impl FileHandleCache {
 }
 
 pub struct LocalFsBackend {
-    root:  PathBuf,
+    root: PathBuf,
     trash: PathBuf,
     fd_cache: FileHandleCache,
 }
@@ -165,10 +183,16 @@ impl LocalFsBackend {
         std::fs::create_dir_all(root.join(SYSTEM_BUCKET))?;
         crate::purge::init_purge_worker();
         crate::purge::register_drive(&trash);
-        Ok(Self { root, trash, fd_cache: FileHandleCache::new(HANDLE_CACHE_CAPACITY) })
+        Ok(Self {
+            root,
+            trash,
+            fd_cache: FileHandleCache::new(HANDLE_CACHE_CAPACITY),
+        })
     }
 
-    pub fn fd_cache(&self) -> &FileHandleCache { &self.fd_cache }
+    pub fn fd_cache(&self) -> &FileHandleCache {
+        &self.fd_cache
+    }
 
     /// Sweep `STAGING_VOL` (and `MULTIPART_VOL` later) for orphan
     /// `{staging_id}/` dirs older than `min_age`. Each entry is the
@@ -194,8 +218,14 @@ impl LocalFsBackend {
         let now = std::time::SystemTime::now();
         let mut purged = 0usize;
         for ent in rd {
-            let ent  = match ent { Ok(e) => e, Err(_) => continue };
-            let meta = match ent.metadata() { Ok(m) => m, Err(_) => continue };
+            let ent = match ent {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let meta = match ent.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
             if !meta.is_dir() {
                 // Stray non-dir under STAGING_VOL — unlink unconditionally.
                 let _ = std::fs::remove_file(ent.path());
@@ -218,17 +248,21 @@ impl LocalFsBackend {
     pub async fn write_chunk_at(
         &self,
         volume: &str,
-        path:   &str,
+        path: &str,
         offset: u64,
-        data:   bytes::Bytes,
+        data: bytes::Bytes,
     ) -> IoResult<()> {
         self.require_vol(volume).await?;
         let p = self.file_path(volume, path);
         if let Some(parent) = p.parent() {
-            compio::fs::create_dir_all(parent).await.map_err(IoError::Io)?;
+            compio::fs::create_dir_all(parent)
+                .await
+                .map_err(IoError::Io)?;
         }
-        let cached = self.fd_cache
-            .get_or_open(&p, true).await
+        let cached = self
+            .fd_cache
+            .get_or_open(&p, true)
+            .await
             .map_err(|e| map_open_err(e, volume, path))?;
         let mut fd: &File = cached.pick_write_fd(data.as_ptr(), data.len(), offset);
         let BufResult(res, _) = fd.write_all_at(data, offset).await;
@@ -238,23 +272,29 @@ impl LocalFsBackend {
     pub async fn read_chunk_at(
         &self,
         volume: &str,
-        path:   &str,
+        path: &str,
         offset: u64,
-        dst:    &mut [u8],
+        dst: &mut [u8],
     ) -> IoResult<usize> {
         self.require_vol(volume).await?;
         let p = self.file_path(volume, path);
         let cached = match self.fd_cache.get_or_open(&p, false).await {
-            Ok(c)  => c,
+            Ok(c) => c,
             Err(e) => return Err(map_open_err(e, volume, path)),
         };
         let len = dst.len();
-        debug_assert!(dst.as_ptr() as usize % O_DIRECT_ALIGN == 0,
-            "read_chunk_at dst not {O_DIRECT_ALIGN}-aligned");
-        debug_assert!(len % O_DIRECT_ALIGN == 0,
-            "read_chunk_at len {len} not {O_DIRECT_ALIGN}-aligned");
-        debug_assert!(offset as usize % O_DIRECT_ALIGN == 0,
-            "read_chunk_at offset {offset} not {O_DIRECT_ALIGN}-aligned");
+        debug_assert!(
+            (dst.as_ptr() as usize).is_multiple_of(O_DIRECT_ALIGN),
+            "read_chunk_at dst not {O_DIRECT_ALIGN}-aligned"
+        );
+        debug_assert!(
+            len.is_multiple_of(O_DIRECT_ALIGN),
+            "read_chunk_at len {len} not {O_DIRECT_ALIGN}-aligned"
+        );
+        debug_assert!(
+            (offset as usize).is_multiple_of(O_DIRECT_ALIGN),
+            "read_chunk_at offset {offset} not {O_DIRECT_ALIGN}-aligned"
+        );
         let fd: &File = cached.read_fd();
         let borrowed = unsafe { BorrowedSliceMut::from_slice(dst) };
         let BufResult(res, _) = fd.read_at(borrowed, offset).await;
@@ -263,7 +303,9 @@ impl LocalFsBackend {
         Ok(filled)
     }
 
-    fn vol_path(&self, volume: &str) -> PathBuf { self.root.join(volume) }
+    fn vol_path(&self, volume: &str) -> PathBuf {
+        self.root.join(volume)
+    }
 
     fn file_path(&self, volume: &str, path: &str) -> PathBuf {
         let mut p = self.root.join(volume);
@@ -283,15 +325,17 @@ impl LocalFsBackend {
             // writes (STAGING_VOL) and multipart sessions (MULTIPART_VOL)
             // can land before any user action that would trigger
             // `make_vol`. Idempotent `create_dir_all`.
-            compio::fs::create_dir_all(self.vol_path(volume)).await
+            compio::fs::create_dir_all(self.vol_path(volume))
+                .await
                 .map_err(IoError::Io)?;
             return Ok(());
         }
         match compio::fs::metadata(self.vol_path(volume)).await {
             Ok(m) if m.is_dir() => Ok(()),
-            Ok(_)               => Err(IoError::VolumeNotFound(volume.to_owned())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound =>
-                Err(IoError::VolumeNotFound(volume.to_owned())),
+            Ok(_) => Err(IoError::VolumeNotFound(volume.to_owned())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Err(IoError::VolumeNotFound(volume.to_owned()))
+            }
             Err(e) => Err(IoError::Io(e)),
         }
     }
@@ -306,9 +350,15 @@ impl LocalFsBackend {
 
 fn map_open_err(e: std::io::Error, volume: &str, path: &str) -> IoError {
     match e.kind() {
-        std::io::ErrorKind::NotFound      => IoError::FileNotFound      { volume: volume.into(), path: path.into() },
-        std::io::ErrorKind::AlreadyExists => IoError::FileAlreadyExists { volume: volume.into(), path: path.into() },
-        _                                 => IoError::Io(e),
+        std::io::ErrorKind::NotFound => IoError::FileNotFound {
+            volume: volume.into(),
+            path: path.into(),
+        },
+        std::io::ErrorKind::AlreadyExists => IoError::FileAlreadyExists {
+            volume: volume.into(),
+            path: path.into(),
+        },
+        _ => IoError::Io(e),
     }
 }
 
@@ -320,32 +370,46 @@ async fn fsync_dir(dir: &Path) -> IoResult<()> {
 
 async fn atomic_write_with<F, Fut>(final_path: &Path, write_fn: F) -> IoResult<()>
 where
-    F:   FnOnce(File) -> Fut,
+    F: FnOnce(File) -> Fut,
     Fut: std::future::Future<Output = IoResult<File>>,
 {
-    let parent = final_path.parent()
-        .ok_or_else(|| IoError::InvalidArgument(
-            format!("atomic_write_with: no parent for {}", final_path.display())
-        ))?
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| {
+            IoError::InvalidArgument(format!(
+                "atomic_write_with: no parent for {}",
+                final_path.display()
+            ))
+        })?
         .to_path_buf();
-    let fname = final_path.file_name()
-        .ok_or_else(|| IoError::InvalidArgument(
-            format!("atomic_write_with: empty filename for {}", final_path.display())
-        ))?
+    let fname = final_path
+        .file_name()
+        .ok_or_else(|| {
+            IoError::InvalidArgument(format!(
+                "atomic_write_with: empty filename for {}",
+                final_path.display()
+            ))
+        })?
         .to_string_lossy()
         .into_owned();
     let tmp_path = parent.join(format!(".{fname}.{}.tmp", Uuid::new_v4().simple()));
 
     let result: IoResult<()> = async {
         let file = OpenOptions::new()
-            .create_new(true).write(true)
-            .open(&tmp_path).await.map_err(IoError::Io)?;
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .await
+            .map_err(IoError::Io)?;
         let file = write_fn(file).await?;
         file.sync_all().await.map_err(IoError::Io)?;
         file.close().await.map_err(IoError::Io)?;
-        compio::fs::rename(&tmp_path, final_path).await.map_err(IoError::Io)?;
+        compio::fs::rename(&tmp_path, final_path)
+            .await
+            .map_err(IoError::Io)?;
         fsync_dir(&parent).await
-    }.await;
+    }
+    .await;
 
     if result.is_err() {
         let _ = compio::fs::remove_file(&tmp_path).await;
@@ -358,7 +422,8 @@ async fn atomic_write_bytes(final_path: &Path, bytes: Vec<u8>) -> IoResult<()> {
         let compio::buf::BufResult(res, _) = file.write_all_at(bytes, 0).await;
         res.map_err(IoError::Io)?;
         Ok(file)
-    }).await
+    })
+    .await
 }
 
 /// `ByteStream` over an open compio `File`, bounded to `[pos, end)`.
@@ -366,8 +431,8 @@ async fn atomic_write_bytes(final_path: &Path, bytes: Vec<u8>) -> IoResult<()> {
 /// path allocates only on the first call.
 struct LocalFileStream {
     file: File,
-    pos:  u64,
-    end:  u64,
+    pos: u64,
+    end: u64,
 }
 
 #[async_trait(?Send)]
@@ -380,7 +445,7 @@ impl ByteStream for LocalFileStream {
         }
         let buf = PooledBuffer::with_capacity(want);
         let slice = buf.slice(0..want);
-        let BufResult(res, slice_back) = (&self.file).read_at(slice, self.pos).await;
+        let BufResult(res, slice_back) = self.file.read_at(slice, self.pos).await;
         let mut buf = slice_back.into_inner();
         let n = res.map_err(IoError::Io)?;
         self.pos += n as u64;
@@ -396,25 +461,22 @@ impl ByteStream for LocalFileStream {
                 break;
             }
             let want = (dst.len() - filled).min(remaining_in_range);
-            let wrapper = unsafe {
-                BorrowedSliceMut::from_slice(&mut dst[filled..filled + want])
-            };
-            let BufResult(res, _wrapper_back) =
-                (&self.file).read_at(wrapper, self.pos).await;
+            let wrapper = unsafe { BorrowedSliceMut::from_slice(&mut dst[filled..filled + want]) };
+            let BufResult(res, _wrapper_back) = self.file.read_at(wrapper, self.pos).await;
             let n = res.map_err(IoError::Io)?;
             if n == 0 {
                 break;
             }
             self.pos += n as u64;
-            filled   += n;
+            filled += n;
         }
         Ok(filled)
     }
 }
 
 struct BorrowedSliceMut {
-    ptr:  std::ptr::NonNull<u8>,
-    len:  usize,
+    ptr: std::ptr::NonNull<u8>,
+    len: usize,
     init: usize,
 }
 
@@ -452,12 +514,11 @@ impl compio::buf::IoBufMut for BorrowedSliceMut {
     }
 }
 
-
 struct LocalFileSink {
-    file:    Option<File>,
-    pos:     u64,
+    file: Option<File>,
+    pos: u64,
     expected: u64,
-    written:  u64,
+    written: u64,
 }
 
 #[async_trait(?Send)]
@@ -468,11 +529,11 @@ impl ByteSink for LocalFileSink {
         }
         let file = match self.file.as_ref() {
             Some(f) => f,
-            None    => return Err(IoError::Io(std::io::Error::other("write after finish"))),
+            None => return Err(IoError::Io(std::io::Error::other("write after finish"))),
         };
         let total = buf.len();
         write_all_bytes_at(file, buf, self.pos).await?;
-        self.pos     += total as u64;
+        self.pos += total as u64;
         self.written += total as u64;
         Ok(())
     }
@@ -481,7 +542,10 @@ impl ByteSink for LocalFileSink {
         if self.written != self.expected {
             return Err(IoError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                format!("create_file_writer: wrote {}/{}", self.written, self.expected),
+                format!(
+                    "create_file_writer: wrote {}/{}",
+                    self.written, self.expected
+                ),
             )));
         }
         if let Some(file) = self.file.take() {
@@ -494,8 +558,15 @@ impl ByteSink for LocalFileSink {
 
 #[async_trait(?Send)]
 impl StorageBackend for LocalFsBackend {
-    fn label(&self) -> String { format!("local_fs:{}", self.root.display()) }
+    fn label(&self) -> String {
+        format!("local_fs:{}", self.root.display())
+    }
 
+    // libc::statvfs field widths differ by platform: glibc has fsblkcnt_t and
+    // fsfilcnt_t as u64, darwin has them as u32. The `as u64` casts widen
+    // uniformly on darwin and are a no-op on glibc. clippy's
+    // `unnecessary_cast` is a false positive on glibc.
+    #[allow(clippy::unnecessary_cast)]
     async fn disk_info(&self) -> IoResult<DiskInfo> {
         let cpath = CString::new(self.root.as_os_str().as_bytes())
             .map_err(|_| IoError::InvalidArgument("root path contains NUL".into()))?;
@@ -505,19 +576,19 @@ impl StorageBackend for LocalFsBackend {
         }
         let bsize = s.f_frsize as u64;
         let total = s.f_blocks as u64 * bsize;
-        let free  = s.f_bavail as u64 * bsize;
+        let free = s.f_bavail as u64 * bsize;
         Ok(DiskInfo {
             total,
             free,
-            used:        total.saturating_sub(free),
+            used: total.saturating_sub(free),
             used_inodes: (s.f_files as u64).saturating_sub(s.f_favail as u64),
             free_inodes: s.f_favail as u64,
-            fs_type:     String::new(),
-            root_disk:   false,
-            healing:     false,
-            endpoint:    String::new(),
-            mount_path:  self.root.display().to_string(),
-            id:          self.root.display().to_string(),
+            fs_type: String::new(),
+            root_disk: false,
+            healing: false,
+            endpoint: String::new(),
+            mount_path: self.root.display().to_string(),
+            id: self.root.display().to_string(),
         })
     }
 
@@ -526,9 +597,11 @@ impl StorageBackend for LocalFsBackend {
             return Err(IoError::InvalidArgument(format!("volume {volume:?}")));
         }
         match compio::fs::create_dir(self.vol_path(volume)).await {
-            Ok(())                                                  => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(IoError::VolumeExists(volume.into())),
-            Err(e)                                                  => Err(IoError::Io(e)),
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(IoError::VolumeExists(volume.into()))
+            }
+            Err(e) => Err(IoError::Io(e)),
         }
     }
 
@@ -540,14 +613,18 @@ impl StorageBackend for LocalFsBackend {
         };
         let mut out = Vec::new();
         for ent in rd {
-            let ent  = ent.map_err(IoError::Io)?;
+            let ent = ent.map_err(IoError::Io)?;
             let name = match ent.file_name().into_string() {
-                Ok(s)  => s,
+                Ok(s) => s,
                 Err(_) => continue,
             };
-            if name.starts_with('.') { continue; }
+            if name.starts_with('.') {
+                continue;
+            }
             let meta = ent.metadata().map_err(IoError::Io)?;
-            if !meta.is_dir() { continue; }
+            if !meta.is_dir() {
+                continue;
+            }
             out.push(VolInfo { name });
         }
         Ok(out)
@@ -556,9 +633,11 @@ impl StorageBackend for LocalFsBackend {
     async fn stat_vol(&self, volume: &str) -> IoResult<VolInfo> {
         match compio::fs::metadata(self.vol_path(volume)).await {
             Ok(m) if m.is_dir() => {}
-            _                   => return Err(IoError::VolumeNotFound(volume.into())),
+            _ => return Err(IoError::VolumeNotFound(volume.into())),
         }
-        Ok(VolInfo { name: volume.into() })
+        Ok(VolInfo {
+            name: volume.into(),
+        })
     }
 
     async fn delete_vol(&self, volume: &str, force_delete: bool) -> IoResult<()> {
@@ -566,16 +645,21 @@ impl StorageBackend for LocalFsBackend {
         let result = if force_delete {
             match self.move_to_trash(&p).await {
                 Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound =>
-                    Err(IoError::VolumeNotFound(volume.into())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Err(IoError::VolumeNotFound(volume.into()))
+                }
                 Err(e) => Err(IoError::Io(e)),
             }
         } else {
             match compio::fs::remove_dir(&p).await {
-                Ok(())                                                   => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound       => Err(IoError::VolumeNotFound(volume.into())),
-                Err(e) if e.raw_os_error() == Some(libc::ENOTEMPTY)      => Err(IoError::VolumeNotEmpty(volume.into())),
-                Err(e)                                                   => Err(IoError::Io(e)),
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Err(IoError::VolumeNotFound(volume.into()))
+                }
+                Err(e) if e.raw_os_error() == Some(libc::ENOTEMPTY) => {
+                    Err(IoError::VolumeNotEmpty(volume.into()))
+                }
+                Err(e) => Err(IoError::Io(e)),
             }
         };
         result
@@ -592,9 +676,13 @@ impl StorageBackend for LocalFsBackend {
         let limit = if count == 0 { usize::MAX } else { count };
         let mut out = Vec::new();
         for ent in rd {
-            if out.len() >= limit { break; }
+            if out.len() >= limit {
+                break;
+            }
             let ent = ent.map_err(IoError::Io)?;
-            if let Ok(s) = ent.file_name().into_string() { out.push(s); }
+            if let Ok(s) = ent.file_name().into_string() {
+                out.push(s);
+            }
         }
         Ok(out)
     }
@@ -614,7 +702,6 @@ impl StorageBackend for LocalFsBackend {
         opts.read(true);
         #[cfg(target_os = "linux")]
         {
-            use std::os::unix::fs::OpenOptionsExt;
             opts.custom_flags(libc::O_DIRECT);
         }
         let file = opts
@@ -623,8 +710,8 @@ impl StorageBackend for LocalFsBackend {
             .map_err(|e| map_open_err(e, volume, path))?;
         Ok(Box::new(LocalFileStream {
             file,
-            pos:     offset,
-            end:     offset + length,
+            pos: offset,
+            end: offset + length,
         }))
     }
 
@@ -641,41 +728,61 @@ impl StorageBackend for LocalFsBackend {
         self.require_vol(volume).await?;
         let p = self.file_path(volume, path);
         if let Some(parent) = p.parent() {
-            compio::fs::create_dir_all(parent).await.map_err(IoError::Io)?;
+            compio::fs::create_dir_all(parent)
+                .await
+                .map_err(IoError::Io)?;
         }
         let file = OpenOptions::new()
-            .create(true).truncate(true).write(true).read(true)
-            .open(&p).await.map_err(|e| map_open_err(e, volume, path))?;
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .read(true)
+            .open(&p)
+            .await
+            .map_err(|e| map_open_err(e, volume, path))?;
         Ok(Box::new(LocalFileSink {
-            file:     Some(file),
-            pos:      0,
+            file: Some(file),
+            pos: 0,
             expected: size,
-            written:  0,
+            written: 0,
         }))
     }
 
     async fn rename_file(
-        &self, src_volume: &str, src_path: &str, dst_volume: &str, dst_path: &str,
+        &self,
+        src_volume: &str,
+        src_path: &str,
+        dst_volume: &str,
+        dst_path: &str,
     ) -> IoResult<()> {
         self.require_vol(src_volume).await?;
         self.require_vol(dst_volume).await?;
         let src = self.file_path(src_volume, src_path);
         let dst = self.file_path(dst_volume, dst_path);
         if let Some(parent) = dst.parent() {
-            compio::fs::create_dir_all(parent).await.map_err(IoError::Io)?;
+            compio::fs::create_dir_all(parent)
+                .await
+                .map_err(IoError::Io)?;
         }
-        compio::fs::rename(&src, &dst).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => IoError::FileNotFound { volume: src_volume.into(), path: src_path.into() },
-            _                            => IoError::Io(e),
-        })
+        compio::fs::rename(&src, &dst)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => IoError::FileNotFound {
+                    volume: src_volume.into(),
+                    path: src_path.into(),
+                },
+                _ => IoError::Io(e),
+            })
     }
 
     async fn check_file(&self, volume: &str, path: &str) -> IoResult<()> {
         self.require_vol(volume).await?;
         match compio::fs::metadata(self.file_path(volume, path)).await {
-            Ok(_)                                              => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound =>
-                Err(IoError::FileNotFound { volume: volume.into(), path: path.into() }),
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(IoError::FileNotFound {
+                volume: volume.into(),
+                path: path.into(),
+            }),
             Err(e) => Err(IoError::Io(e)),
         }
     }
@@ -685,13 +792,20 @@ impl StorageBackend for LocalFsBackend {
         let p = self.file_path(volume, path);
         let meta = match compio::fs::metadata(&p).await {
             Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound =>
-                return Err(IoError::FileNotFound { volume: volume.into(), path: path.into() }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(IoError::FileNotFound {
+                    volume: volume.into(),
+                    path: path.into(),
+                })
+            }
             Err(e) => return Err(IoError::Io(e)),
         };
         if meta.is_dir() {
-            if recursive { self.move_to_trash(&p).await.map_err(IoError::Io) }
-            else         { compio::fs::remove_dir(&p).await.map_err(IoError::Io) }
+            if recursive {
+                self.move_to_trash(&p).await.map_err(IoError::Io)
+            } else {
+                compio::fs::remove_dir(&p).await.map_err(IoError::Io)
+            }
         } else {
             compio::fs::remove_file(&p).await.map_err(IoError::Io)
         }
@@ -706,37 +820,50 @@ impl StorageBackend for LocalFsBackend {
         self.require_vol(volume).await?;
         let futs = paths.iter().map(|p| {
             let path = (*p).to_owned();
-            async move {
-                self.delete(volume, &path, recursive).await
-            }
+            async move { self.delete(volume, &path, recursive).await }
         });
         let results = futures_util::future::join_all(futs).await;
         Ok(results)
     }
 
     async fn write_metadata(
-        &self, _orig_volume: &str, volume: &str, path: &str, fi: &FileInfo,
+        &self,
+        _orig_volume: &str,
+        volume: &str,
+        path: &str,
+        fi: &FileInfo,
     ) -> IoResult<()> {
         self.require_vol(volume).await?;
-        let dir        = self.file_path(volume, path);
-        compio::fs::create_dir_all(&dir).await.map_err(IoError::Io)?;
-        let encoded    = xl_meta::encode(fi)?;
+        let dir = self.file_path(volume, path);
+        compio::fs::create_dir_all(&dir)
+            .await
+            .map_err(IoError::Io)?;
+        let encoded = xl_meta::encode(fi)?;
         let final_path = dir.join(META_FILENAME);
         atomic_write_with(&final_path, |file| async move {
             write_xl_meta_vectored(&file, encoded).await?;
             Ok(file)
-        }).await
+        })
+        .await
     }
 
     async fn read_version(
-        &self, _orig_volume: &str, volume: &str, path: &str,
-        version_id: Option<&str>, read_data: bool,
+        &self,
+        _orig_volume: &str,
+        volume: &str,
+        path: &str,
+        version_id: Option<&str>,
+        read_data: bool,
     ) -> IoResult<FileInfo> {
         self.require_vol(volume).await?;
         let bytes = match compio::fs::read(self.meta_path(volume, path)).await {
             Ok(b) => bytes::Bytes::from(b),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound =>
-                return Err(IoError::FileNotFound { volume: volume.into(), path: path.into() }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(IoError::FileNotFound {
+                    volume: volume.into(),
+                    path: path.into(),
+                })
+            }
             Err(e) => return Err(IoError::Io(e)),
         };
         // Pick the right version. `None` (latest) goes through
@@ -750,18 +877,27 @@ impl StorageBackend for LocalFsBackend {
             None => xl_meta::decode(bytes),
             Some(id) => match xl_meta::find_version(bytes, id)? {
                 Some(r) => Ok(r),
-                None    => return Err(IoError::FileVersionNotFound {
-                    volume: volume.into(), path: path.into(), version_id: id.into(),
-                }),
+                None => {
+                    return Err(IoError::FileVersionNotFound {
+                        volume: volume.into(),
+                        path: path.into(),
+                        version_id: id.into(),
+                    })
+                }
             },
-        }.map_err(|e| match e {
+        }
+        .map_err(|e| match e {
             IoError::CorruptMetadata { msg, .. } => IoError::CorruptMetadata {
-                volume: volume.to_owned(), path: path.to_owned(), msg,
+                volume: volume.to_owned(),
+                path: path.to_owned(),
+                msg,
             },
             other => other,
         })?;
         let mut fi = xl_meta::file_info_from_record(rec, volume, path);
-        if !read_data { fi.data = None; }
+        if !read_data {
+            fi.data = None;
+        }
         Ok(fi)
     }
 
@@ -777,14 +913,25 @@ impl StorageBackend for LocalFsBackend {
         self.require_vol(volume).await?;
         let mut out: Vec<(String, FileInfo)> = Vec::new();
         walk_dir_local_inner(
-            self, volume, base_dir, prefix_filter, recursive,
-            start_after, max_keys, &mut out,
-        ).await?;
+            self,
+            volume,
+            base_dir,
+            prefix_filter,
+            recursive,
+            start_after,
+            max_keys,
+            &mut out,
+        )
+        .await?;
         Ok(out)
     }
 
     async fn update_metadata(
-        &self, volume: &str, path: &str, fi: &FileInfo, _opts: &UpdateMetadataOpts,
+        &self,
+        volume: &str,
+        path: &str,
+        fi: &FileInfo,
+        _opts: &UpdateMetadataOpts,
     ) -> IoResult<()> {
         self.write_metadata("", volume, path, fi).await
     }
@@ -794,27 +941,31 @@ impl StorageBackend for LocalFsBackend {
     /// `fi.data_dir`. No bkp on disk → fall through to hard-delete.
     /// `undo_write=false` is the legacy recursive remove.
     async fn delete_version(
-        &self, volume: &str, path: &str, fi: &FileInfo,
-        _force_del_marker: bool, opts: &DeleteOptions,
+        &self,
+        volume: &str,
+        path: &str,
+        fi: &FileInfo,
+        _force_del_marker: bool,
+        opts: &DeleteOptions,
     ) -> IoResult<()> {
         if !opts.undo_write {
             return self.delete(volume, path, true).await;
         }
 
         let object_dir = self.file_path(volume, path);
-        let bkp_path   = object_dir.join(META_BACKUP_FILENAME);
-        let live_meta  = object_dir.join(META_FILENAME);
+        let bkp_path = object_dir.join(META_BACKUP_FILENAME);
+        let live_meta = object_dir.join(META_FILENAME);
 
         // Step 1 (commit point of the undo): atomically restore prior
         // xl.meta from bkp. NotFound here means there is no backup to
         // restore — fall back to hard-delete so the engine's caller
         // sees a consistent "version is gone" outcome.
         match compio::fs::rename(&bkp_path, &live_meta).await {
-            Ok(())                                                 => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound     => {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return self.delete(volume, path, true).await;
             }
-            Err(e)                                                 => return Err(IoError::Io(e)),
+            Err(e) => return Err(IoError::Io(e)),
         }
         // Persist the rename's dir-entry change.
         fsync_dir(&object_dir).await?;
@@ -829,7 +980,7 @@ impl StorageBackend for LocalFsBackend {
         Ok(())
     }
 
-    /// Atomic per-disk promotion 
+    /// Atomic per-disk promotion
     /// Reads the live
     /// xl.meta at `dst`, merges `fi` into the versions array
     /// (preserving prior versions with different `version_id`),
@@ -853,8 +1004,13 @@ impl StorageBackend for LocalFsBackend {
     /// caller's quorum check + per-disk undo handles minority
     /// successes.
     async fn rename_data(
-        &self, src_volume: &str, src_path: &str, fi: &FileInfo,
-        dst_volume: &str, dst_path: &str, _opts: &RenameOptions,
+        &self,
+        src_volume: &str,
+        src_path: &str,
+        fi: &FileInfo,
+        dst_volume: &str,
+        dst_path: &str,
+        _opts: &RenameOptions,
     ) -> IoResult<RenameDataResp> {
         if !is_system_vol(src_volume) {
             return Err(IoError::InvalidArgument(format!(
@@ -865,14 +1021,15 @@ impl StorageBackend for LocalFsBackend {
 
         let dst_meta_path = self.meta_path(dst_volume, dst_path);
 
-        let (pre_xl_meta_raw, existing_versions):
-            (Option<bytes::Bytes>, Vec<DecodedRecord>) =
+        let (pre_xl_meta_raw, existing_versions): (Option<bytes::Bytes>, Vec<DecodedRecord>) =
             match compio::fs::read(&dst_meta_path).await {
                 Ok(b) => {
                     let raw = bytes::Bytes::from(b);
                     let all = xl_meta::decode_all(raw.clone()).map_err(|e| match e {
                         IoError::CorruptMetadata { msg, .. } => IoError::CorruptMetadata {
-                            volume: dst_volume.to_owned(), path: dst_path.to_owned(), msg,
+                            volume: dst_volume.to_owned(),
+                            path: dst_path.to_owned(),
+                            msg,
                         },
                         other => other,
                     })?;
@@ -882,9 +1039,11 @@ impl StorageBackend for LocalFsBackend {
                 Err(e) => return Err(IoError::Io(e)),
             };
 
-        let prior_same_vid_existed = existing_versions.iter()
+        let prior_same_vid_existed = existing_versions
+            .iter()
             .any(|r| r.version_id == fi.version_id);
-        let old_data_dir: Option<String> = existing_versions.iter()
+        let old_data_dir: Option<String> = existing_versions
+            .iter()
             .find(|r| r.version_id == fi.version_id)
             .map(|r| r.data_dir.clone())
             .filter(|s| !s.is_empty() && s != &fi.data_dir);
@@ -906,12 +1065,18 @@ impl StorageBackend for LocalFsBackend {
 
         let encoded = xl_meta::encode_versions(&merged)?;
         let staged_object_dir = self.file_path(src_volume, src_path);
-        compio::fs::create_dir_all(&staged_object_dir).await.map_err(IoError::Io)?;
+        compio::fs::create_dir_all(&staged_object_dir)
+            .await
+            .map_err(IoError::Io)?;
         let staged_meta_path = staged_object_dir.join(META_FILENAME);
         {
             let f = OpenOptions::new()
-                .create(true).truncate(true).write(true)
-                .open(&staged_meta_path).await.map_err(IoError::Io)?;
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&staged_meta_path)
+                .await
+                .map_err(IoError::Io)?;
             write_xl_meta_vectored(&f, encoded).await?;
             f.sync_all().await.map_err(IoError::Io)?;
             f.close().await.map_err(IoError::Io)?;
@@ -923,24 +1088,35 @@ impl StorageBackend for LocalFsBackend {
         //              only the prior versions — orphan window.
         let src_data_dir = staged_object_dir.join(&fi.data_dir);
         let has_data_dir = !fi.data_dir.is_empty()
-            && compio::fs::metadata(&src_data_dir).await
-                .map(|m| m.is_dir()).unwrap_or(false);
+            && compio::fs::metadata(&src_data_dir)
+                .await
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
         if has_data_dir {
             let dst_object_dir = self.file_path(dst_volume, dst_path);
-            compio::fs::create_dir_all(&dst_object_dir).await.map_err(IoError::Io)?;
+            compio::fs::create_dir_all(&dst_object_dir)
+                .await
+                .map_err(IoError::Io)?;
             let dst_data_dir = dst_object_dir.join(&fi.data_dir);
-            compio::fs::rename(&src_data_dir, &dst_data_dir).await
+            compio::fs::rename(&src_data_dir, &dst_data_dir)
+                .await
                 .map_err(IoError::Io)?;
         }
 
         if prior_same_vid_existed {
             if let Some(raw) = pre_xl_meta_raw.as_ref() {
                 let dst_object_dir = self.file_path(dst_volume, dst_path);
-                compio::fs::create_dir_all(&dst_object_dir).await.map_err(IoError::Io)?;
+                compio::fs::create_dir_all(&dst_object_dir)
+                    .await
+                    .map_err(IoError::Io)?;
                 let bkp_path = dst_object_dir.join(META_BACKUP_FILENAME);
                 let f = OpenOptions::new()
-                    .create(true).truncate(true).write(true)
-                    .open(&bkp_path).await.map_err(IoError::Io)?;
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(&bkp_path)
+                    .await
+                    .map_err(IoError::Io)?;
                 write_all_bytes_at(&f, raw.clone(), 0).await?;
                 f.sync_all().await.map_err(IoError::Io)?;
                 f.close().await.map_err(IoError::Io)?;
@@ -949,15 +1125,18 @@ impl StorageBackend for LocalFsBackend {
 
         // Atomic rename
         let dst_object_dir = self.file_path(dst_volume, dst_path);
-        compio::fs::create_dir_all(&dst_object_dir).await.map_err(IoError::Io)?;
-        compio::fs::rename(&staged_meta_path, &dst_meta_path).await
+        compio::fs::create_dir_all(&dst_object_dir)
+            .await
+            .map_err(IoError::Io)?;
+        compio::fs::rename(&staged_meta_path, &dst_meta_path)
+            .await
             .map_err(IoError::Io)?;
         fsync_dir(&dst_object_dir).await?;
 
         let _ = compio::fs::remove_dir(&staged_object_dir).await;
 
         Ok(RenameDataResp {
-            sign:         Vec::new(),
+            sign: Vec::new(),
             old_data_dir: old_data_dir.unwrap_or_default(),
         })
     }
@@ -979,12 +1158,13 @@ impl StorageBackend for LocalFsBackend {
         }
     }
 
-
     async fn write_file(&self, volume: &str, path: &str, bytes: Vec<u8>) -> IoResult<()> {
         self.require_vol(volume).await?;
         let final_path = self.file_path(volume, path);
         if let Some(parent) = final_path.parent() {
-            compio::fs::create_dir_all(parent).await.map_err(IoError::Io)?;
+            compio::fs::create_dir_all(parent)
+                .await
+                .map_err(IoError::Io)?;
         }
         atomic_write_bytes(&final_path, bytes).await
     }
@@ -1019,10 +1199,7 @@ impl StorageBackend for LocalFsBackend {
 /// is no inline tail, falls back to a single `write_at`. Partial
 /// writes are handled by compio's `write_vectored_all_at`, which
 /// loops the SQE for whatever the kernel didn't drain.
-async fn write_xl_meta_vectored(
-    mut file: &File,
-    encoded: xl_meta::EncodedXlMeta,
-) -> IoResult<()> {
+async fn write_xl_meta_vectored(mut file: &File, encoded: xl_meta::EncodedXlMeta) -> IoResult<()> {
     let xl_meta::EncodedXlMeta { head, tail } = encoded;
 
     if tail.is_empty() {
@@ -1041,6 +1218,7 @@ async fn write_all_bytes_at(mut file: &File, buf: bytes::Bytes, base_offset: u64
     res.map_err(IoError::Io)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_dir_local_inner<'a>(
     backend: &'a LocalFsBackend,
     volume: &'a str,
@@ -1053,17 +1231,28 @@ fn walk_dir_local_inner<'a>(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = IoResult<()>> + 'a>> {
     Box::pin(async move {
         if let Some(n) = max_keys {
-            if out.len() >= n { return Ok(()); }
+            if out.len() >= n {
+                return Ok(());
+            }
         }
         let mut entries = backend.list_dir(volume, dir, 0).await?;
         entries.sort();
         for name in entries {
             if let Some(n) = max_keys {
-                if out.len() >= n { return Ok(()); }
+                if out.len() >= n {
+                    return Ok(());
+                }
             }
-            let child = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+            let child = if dir.is_empty() {
+                name.clone()
+            } else {
+                format!("{dir}/{name}")
+            };
             if let Some(after) = start_after {
-                if child.as_str() < after && !after.starts_with(&format!("{child}/")) && after != child {
+                if child.as_str() < after
+                    && !after.starts_with(&format!("{child}/"))
+                    && after != child
+                {
                     continue;
                 }
             }
@@ -1081,16 +1270,25 @@ fn walk_dir_local_inner<'a>(
                         continue;
                     }
                     if let Some(after) = start_after {
-                        if fi.name.as_str() <= after { continue; }
+                        if fi.name.as_str() <= after {
+                            continue;
+                        }
                     }
                     out.push((fi.name.clone(), fi));
                 }
                 Err(IoError::FileNotFound { .. }) => {
                     if recursive {
                         walk_dir_local_inner(
-                            backend, volume, &child, prefix_filter, recursive,
-                            start_after, max_keys, out,
-                        ).await?;
+                            backend,
+                            volume,
+                            &child,
+                            prefix_filter,
+                            recursive,
+                            start_after,
+                            max_keys,
+                            out,
+                        )
+                        .await?;
                     }
                 }
                 Err(_) => continue,
@@ -1099,7 +1297,6 @@ fn walk_dir_local_inner<'a>(
         Ok(())
     })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1113,42 +1310,43 @@ mod tests {
     /// non-EC paths and what the engine fan-out does per backend.
     async fn put_bytes(be: &LocalFsBackend, vol: &str, path: &str, bytes: &[u8]) -> IoResult<()> {
         let mut sink = be.create_file_writer(vol, path, bytes.len() as u64).await?;
-        let mut src  = VecByteStream::new(bytes.to_vec());
+        let mut src = VecByteStream::new(bytes.to_vec());
         pump_n(&mut src, sink.as_mut(), bytes.len() as u64).await?;
         sink.finish().await
     }
 
     fn fi_inline(volume: &str, name: &str, data: &[u8]) -> FileInfo {
         use crate::types::{ErasureInfo, ObjectPartInfo};
-        let mut fi = FileInfo::default();
-        fi.volume       = volume.into();
-        fi.name         = name.into();
-        fi.size         = data.len() as i64;
-        fi.mod_time_ms  = 1_700_000_000_000;
-        fi.data         = Some(vec![Bytes::copy_from_slice(data)]);
-        fi.is_latest    = true;
-        fi.num_versions = 1;
-        fi.fresh        = true;
-        fi.parts        = vec![ObjectPartInfo {
-            etag:        "x".into(),
-            number:      1,
-            size:        data.len() as i64,
-            actual_size: data.len() as i64,
-            mod_time_ms: 1_700_000_000_000,
-            ..Default::default()
-        }];
         // EC[1+0] is the minimal valid erasure layout that satisfies
         // the strict validator for a single-disk test backend.
-        fi.erasure = ErasureInfo {
-            algorithm:    "ReedSolomon".into(),
-            data_blocks:  1,
-            parity_blocks: 0,
-            index:        1,
-            block_size:   1_048_576,
-            distribution: vec![1],
-            checksums:    Vec::new(),
-        };
-        fi
+        FileInfo {
+            volume: volume.into(),
+            name: name.into(),
+            size: data.len() as i64,
+            mod_time_ms: 1_700_000_000_000,
+            data: Some(vec![Bytes::copy_from_slice(data)]),
+            is_latest: true,
+            num_versions: 1,
+            fresh: true,
+            parts: vec![ObjectPartInfo {
+                etag: "x".into(),
+                number: 1,
+                size: data.len() as i64,
+                actual_size: data.len() as i64,
+                mod_time_ms: 1_700_000_000_000,
+                ..Default::default()
+            }],
+            erasure: ErasureInfo {
+                algorithm: "ReedSolomon".into(),
+                data_blocks: 1,
+                parity_blocks: 0,
+                index: 1,
+                block_size: 1_048_576,
+                distribution: vec![1],
+                checksums: Vec::new(),
+            },
+            ..Default::default()
+        }
     }
 
     /// Small helper: drain a `ByteStream` into a Vec for assertions.
@@ -1165,18 +1363,27 @@ mod tests {
         let dir = tempdir().unwrap();
         let be = LocalFsBackend::new(dir.path()).unwrap();
         be.make_vol("b").await.unwrap();
-        assert!(matches!(be.make_vol("b").await, Err(IoError::VolumeExists(_))));
+        assert!(matches!(
+            be.make_vol("b").await,
+            Err(IoError::VolumeExists(_))
+        ));
         assert_eq!(be.stat_vol("b").await.unwrap().name, "b");
         assert_eq!(be.list_vols().await.unwrap().len(), 1);
         be.delete_vol("b", false).await.unwrap();
     }
 
-#[compio::test]
+    #[compio::test]
     async fn list_vols_hides_trash_dir() {
         let dir = tempdir().unwrap();
-        let be  = LocalFsBackend::new(dir.path()).unwrap();
+        let be = LocalFsBackend::new(dir.path()).unwrap();
         be.make_vol("b").await.unwrap();
-        let names: Vec<String> = be.list_vols().await.unwrap().into_iter().map(|v| v.name).collect();
+        let names: Vec<String> = be
+            .list_vols()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|v| v.name)
+            .collect();
         assert_eq!(names, vec!["b".to_string()]);
     }
 
@@ -1189,10 +1396,20 @@ mod tests {
         be.write_metadata("", "b", "k", &fi).await.unwrap();
         let back = be.read_version("", "b", "k", None, true).await.unwrap();
         assert_eq!(back.size, 5);
-        let inline_concat: Vec<u8> = back.data.as_ref().unwrap().iter()
-            .flat_map(|f| f.iter().copied()).collect();
+        let inline_concat: Vec<u8> = back
+            .data
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|f| f.iter().copied())
+            .collect();
         assert_eq!(inline_concat, b"hello".to_vec());
-        assert!(be.read_version("", "b", "k", None, false).await.unwrap().data.is_none());
+        assert!(be
+            .read_version("", "b", "k", None, false)
+            .await
+            .unwrap()
+            .data
+            .is_none());
     }
 
     #[compio::test]
@@ -1200,7 +1417,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let be = LocalFsBackend::new(dir.path()).unwrap();
         be.make_vol("b").await.unwrap();
-        be.write_metadata("", "b", "k", &fi_inline("b", "k", b"x")).await.unwrap();
+        be.write_metadata("", "b", "k", &fi_inline("b", "k", b"x"))
+            .await
+            .unwrap();
         let entries: Vec<String> = std::fs::read_dir(dir.path().join("b").join("k"))
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
@@ -1215,7 +1434,10 @@ mod tests {
         be.make_vol("b").await.unwrap();
         let payload: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
         put_bytes(&be, "b", "obj/part.1", &payload).await.unwrap();
-        let stream = be.read_file_stream("b", "obj/part.1", 0, 4096).await.unwrap();
+        let stream = be
+            .read_file_stream("b", "obj/part.1", 0, 4096)
+            .await
+            .unwrap();
         let read = drain(stream, 4096).await;
         assert_eq!(read, payload);
     }
@@ -1231,7 +1453,10 @@ mod tests {
         let size = 3 * 1024 * 1024 + 17;
         let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
         put_bytes(&be, "b", "big", &payload).await.unwrap();
-        let stream = be.read_file_stream("b", "big", 0, size as u64).await.unwrap();
+        let stream = be
+            .read_file_stream("b", "big", 0, size as u64)
+            .await
+            .unwrap();
         let read = drain(stream, size).await;
         assert_eq!(read.len(), payload.len());
         assert_eq!(read, payload);
@@ -1244,7 +1469,10 @@ mod tests {
         be.make_vol("b").await.unwrap();
         put_bytes(&be, "b", "stage/x", b"abc").await.unwrap();
         be.rename_file("b", "stage/x", "b", "live/x").await.unwrap();
-        assert!(matches!(be.check_file("b", "stage/x").await, Err(IoError::FileNotFound { .. })));
+        assert!(matches!(
+            be.check_file("b", "stage/x").await,
+            Err(IoError::FileNotFound { .. })
+        ));
         be.check_file("b", "live/x").await.unwrap();
     }
 
@@ -1253,14 +1481,21 @@ mod tests {
         let dir = tempdir().unwrap();
         let be = LocalFsBackend::new(dir.path()).unwrap();
         be.make_vol("b").await.unwrap();
-        let err = be.read_version("", "b", "nope", None, true).await.unwrap_err();
+        let err = be
+            .read_version("", "b", "nope", None, true)
+            .await
+            .unwrap_err();
         assert!(matches!(err, IoError::FileNotFound { .. }));
     }
 
     #[compio::test]
     async fn disk_info_reports_real_capacity() {
         let dir = tempdir().unwrap();
-        let info = LocalFsBackend::new(dir.path()).unwrap().disk_info().await.unwrap();
+        let info = LocalFsBackend::new(dir.path())
+            .unwrap()
+            .disk_info()
+            .await
+            .unwrap();
         assert!(info.total > 0);
         assert!(info.free <= info.total);
     }
@@ -1268,7 +1503,7 @@ mod tests {
     #[compio::test]
     async fn force_delete_vol_uses_trash_and_purges() {
         let dir = tempdir().unwrap();
-        let be  = LocalFsBackend::new(dir.path()).unwrap();
+        let be = LocalFsBackend::new(dir.path()).unwrap();
         be.make_vol("b").await.unwrap();
         put_bytes(&be, "b", "k/part.1", b"xyz").await.unwrap();
         be.delete_vol("b", true).await.unwrap();
@@ -1278,7 +1513,9 @@ mod tests {
                 .unwrap()
                 .next()
                 .is_none();
-            if empty { return; }
+            if empty {
+                return;
+            }
             compio::runtime::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("trash dir still has entries after purge window");
@@ -1294,7 +1531,7 @@ mod tests {
     async fn rename_data_writes_xl_meta_bkp_on_same_version_overwrite() {
         use crate::types::{ErasureInfo, ObjectPartInfo};
         let dir = tempdir().unwrap();
-        let be  = LocalFsBackend::new(dir.path()).unwrap();
+        let be = LocalFsBackend::new(dir.path()).unwrap();
         be.make_vol("b").await.unwrap();
 
         // Helper: build an EC-style FileInfo with the given data_dir
@@ -1302,35 +1539,37 @@ mod tests {
         // STAGING_VOL/{staging_id}/{data_dir}/ before calling
         // rename_data.
         fn fi_ec(data_dir: &str, version_id: &str, etag: &str, mtime: u64) -> FileInfo {
-            let mut fi = FileInfo::default();
-            fi.volume       = "b".into();
-            fi.name         = "obj".into();
-            fi.size         = 8;
-            fi.mod_time_ms  = mtime;
-            fi.version_id   = version_id.into();
-            fi.data_dir     = data_dir.into();
-            fi.is_latest    = true;
-            fi.num_versions = 1;
-            fi.fresh        = true;
-            fi.parts = vec![ObjectPartInfo {
-                etag:        etag.into(),
-                number:      1,
-                size:        8,
-                actual_size: 8,
+            let mut fi = FileInfo {
+                volume: "b".into(),
+                name: "obj".into(),
+                size: 8,
                 mod_time_ms: mtime,
-                index:       Vec::new(),
-                checksums:   Default::default(),
-            }];
-            fi.metadata.insert("etag".into(), etag.into());
-            fi.erasure = ErasureInfo {
-                algorithm:    "ReedSolomon".into(),
-                data_blocks:  3,
-                parity_blocks: 1,
-                index:        1,
-                block_size:   4096,
-                distribution: vec![1, 2, 3, 4],
-                checksums:    Vec::new(),
+                version_id: version_id.into(),
+                data_dir: data_dir.into(),
+                is_latest: true,
+                num_versions: 1,
+                fresh: true,
+                parts: vec![ObjectPartInfo {
+                    etag: etag.into(),
+                    number: 1,
+                    size: 8,
+                    actual_size: 8,
+                    mod_time_ms: mtime,
+                    index: Vec::new(),
+                    checksums: Default::default(),
+                }],
+                erasure: ErasureInfo {
+                    algorithm: "ReedSolomon".into(),
+                    data_blocks: 3,
+                    parity_blocks: 1,
+                    index: 1,
+                    block_size: 4096,
+                    distribution: vec![1, 2, 3, 4],
+                    checksums: Vec::new(),
+                },
+                ..Default::default()
             };
+            fi.metadata.insert("etag".into(), etag.into());
             fi
         }
 
@@ -1338,19 +1577,24 @@ mod tests {
         // STAGING_VOL/{staging_id}/{data_dir}/.
         async fn stage(be: &LocalFsBackend, staging_id: &str, data_dir: &str, bytes: &[u8]) {
             let p = format!("{staging_id}/{data_dir}/part.1");
-            let mut sink = be.create_file_writer(STAGING_VOL, &p, bytes.len() as u64).await.unwrap();
+            let mut sink = be
+                .create_file_writer(STAGING_VOL, &p, bytes.len() as u64)
+                .await
+                .unwrap();
             sink.write_all(Bytes::copy_from_slice(bytes)).await.unwrap();
             sink.finish().await.unwrap();
         }
 
         // First PUT: version_id=V, data_dir=D1.
         let v_id = "11111111-1111-1111-1111-111111111111";
-        let d1   = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
-        let s1   = "1111111111111111ffffffffffffffff";
+        let d1 = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let s1 = "1111111111111111ffffffffffffffff";
         stage(&be, s1, d1, b"version1").await;
-        let fi1  = fi_ec(d1, v_id, "etag-v1", 1_700_000_000_000);
-        let r1 = be.rename_data(STAGING_VOL, s1, &fi1, "b", "obj", &Default::default())
-            .await.unwrap();
+        let fi1 = fi_ec(d1, v_id, "etag-v1", 1_700_000_000_000);
+        let r1 = be
+            .rename_data(STAGING_VOL, s1, &fi1, "b", "obj", &Default::default())
+            .await
+            .unwrap();
         assert!(r1.old_data_dir.is_empty(), "first PUT has no prior version");
 
         // Second PUT: SAME version_id=V (idempotent overwrite),
@@ -1359,15 +1603,23 @@ mod tests {
         let s2 = "2222222222222222ffffffffffffffff";
         stage(&be, s2, d2, b"version2").await;
         let fi2 = fi_ec(d2, v_id, "etag-v2", 1_700_000_000_001);
-        let r2 = be.rename_data(STAGING_VOL, s2, &fi2, "b", "obj", &Default::default())
-            .await.unwrap();
+        let r2 = be
+            .rename_data(STAGING_VOL, s2, &fi2, "b", "obj", &Default::default())
+            .await
+            .unwrap();
         // Same version_id → old_data_dir is set so the engine cleans D1.
-        assert_eq!(r2.old_data_dir, d1, "same-version_id overwrite must surface old_data_dir");
+        assert_eq!(
+            r2.old_data_dir, d1,
+            "same-version_id overwrite must surface old_data_dir"
+        );
 
         // S-6: xl.meta.bkp at `{dst_object_dir}/xl.meta.bkp` holds the
         // pre-second-PUT bytes (the xl.meta written after the first PUT).
         let bkp_path = dir.path().join("b").join("obj").join("xl.meta.bkp");
-        assert!(bkp_path.exists(), "xl.meta.bkp must exist at object dir top after same-version overwrite");
+        assert!(
+            bkp_path.exists(),
+            "xl.meta.bkp must exist at object dir top after same-version overwrite"
+        );
         // Backup contents = the live xl.meta written after the FIRST PUT.
         // Our rename_data writes a new xl.meta after the first PUT
         // (only one version: V/D1). Decode it to confirm.
@@ -1389,37 +1641,41 @@ mod tests {
     async fn rename_data_multi_version_inline_no_spill() {
         use crate::types::{ErasureInfo, ObjectPartInfo};
         let dir = tempdir().unwrap();
-        let be  = LocalFsBackend::new(dir.path()).unwrap();
+        let be = LocalFsBackend::new(dir.path()).unwrap();
         be.make_vol("b").await.unwrap();
 
         fn fi_inline_for_rename(vid: &str, body: &[u8], mtime: u64) -> FileInfo {
-            let mut fi = FileInfo::default();
-            fi.volume       = "b".into();
-            fi.name         = "obj".into();
-            fi.version_id   = vid.into();
-            fi.size         = body.len() as i64;
-            fi.mod_time_ms  = mtime;
-            fi.data         = Some(vec![Bytes::copy_from_slice(body)]);
-            fi.is_latest    = true;
-            fi.num_versions = 1;
-            fi.fresh        = true;
-            fi.parts = vec![ObjectPartInfo {
-                etag:        "etag".into(),
-                number:      1,
-                size:        body.len() as i64,
-                actual_size: body.len() as i64,
+            let mut fi = FileInfo {
+                volume: "b".into(),
+                name: "obj".into(),
+                version_id: vid.into(),
+                size: body.len() as i64,
                 mod_time_ms: mtime,
-                index:       Vec::new(),
-                checksums:   Default::default(),
-            }];
-            fi.metadata.insert("etag".into(), "etag".into());
-            fi.erasure = ErasureInfo {
-                algorithm:    "ReedSolomon".into(),
-                data_blocks:  1, parity_blocks: 0, index: 1,
-                block_size:   1_048_576,
-                distribution: vec![1],
-                checksums:    Vec::new(),
+                data: Some(vec![Bytes::copy_from_slice(body)]),
+                is_latest: true,
+                num_versions: 1,
+                fresh: true,
+                parts: vec![ObjectPartInfo {
+                    etag: "etag".into(),
+                    number: 1,
+                    size: body.len() as i64,
+                    actual_size: body.len() as i64,
+                    mod_time_ms: mtime,
+                    index: Vec::new(),
+                    checksums: Default::default(),
+                }],
+                erasure: ErasureInfo {
+                    algorithm: "ReedSolomon".into(),
+                    data_blocks: 1,
+                    parity_blocks: 0,
+                    index: 1,
+                    block_size: 1_048_576,
+                    distribution: vec![1],
+                    checksums: Vec::new(),
+                },
+                ..Default::default()
             };
+            fi.metadata.insert("etag".into(), "etag".into());
             fi
         }
 
@@ -1431,39 +1687,74 @@ mod tests {
         let s1 = "11111111111111110000000000000000";
         let s2 = "22222222222222220000000000000000";
 
-        let r1 = be.rename_data(
-            STAGING_VOL, s1,
-            &fi_inline_for_rename(v1, b"hello-v1", 1_700_000_000_000),
-            "b", "obj", &Default::default(),
-        ).await.unwrap();
+        let r1 = be
+            .rename_data(
+                STAGING_VOL,
+                s1,
+                &fi_inline_for_rename(v1, b"hello-v1", 1_700_000_000_000),
+                "b",
+                "obj",
+                &Default::default(),
+            )
+            .await
+            .unwrap();
         assert!(r1.old_data_dir.is_empty());
 
-        let r2 = be.rename_data(
-            STAGING_VOL, s2,
-            &fi_inline_for_rename(v2, b"world-v2-longer-than-v1", 1_700_000_000_001),
-            "b", "obj", &Default::default(),
-        ).await.unwrap();
-        assert!(r2.old_data_dir.is_empty(), "different version_id → no old data_dir");
+        let r2 = be
+            .rename_data(
+                STAGING_VOL,
+                s2,
+                &fi_inline_for_rename(v2, b"world-v2-longer-than-v1", 1_700_000_000_001),
+                "b",
+                "obj",
+                &Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            r2.old_data_dir.is_empty(),
+            "different version_id → no old data_dir"
+        );
 
         // No spill: object dir holds exactly `xl.meta`. No data_dir
         // subdirectories, no part.1 files. (Different version_id
         // means no xl.meta.bkp either.)
         let object_dir = dir.path().join("b").join("obj");
-        let mut entries: Vec<String> = std::fs::read_dir(&object_dir).unwrap()
+        let mut entries: Vec<String> = std::fs::read_dir(&object_dir)
+            .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         entries.sort();
-        assert_eq!(entries, vec![META_FILENAME.to_string()],
-            "multi-version inline must not spill anything to disk");
+        assert_eq!(
+            entries,
+            vec![META_FILENAME.to_string()],
+            "multi-version inline must not spill anything to disk"
+        );
 
         // Both versions' bytes round-trip through their own
         // inline_offset/inline_length slice — no part.N reads.
-        let got_v1 = be.read_version("", "b", "obj", Some(v1), true).await.unwrap();
-        let got_v2 = be.read_version("", "b", "obj", Some(v2), true).await.unwrap();
-        let body1: Vec<u8> = got_v1.data.as_ref().unwrap().iter()
-            .flat_map(|f| f.iter().copied()).collect();
-        let body2: Vec<u8> = got_v2.data.as_ref().unwrap().iter()
-            .flat_map(|f| f.iter().copied()).collect();
+        let got_v1 = be
+            .read_version("", "b", "obj", Some(v1), true)
+            .await
+            .unwrap();
+        let got_v2 = be
+            .read_version("", "b", "obj", Some(v2), true)
+            .await
+            .unwrap();
+        let body1: Vec<u8> = got_v1
+            .data
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|f| f.iter().copied())
+            .collect();
+        let body2: Vec<u8> = got_v2
+            .data
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|f| f.iter().copied())
+            .collect();
         assert_eq!(body1, b"hello-v1");
         assert_eq!(body2, b"world-v2-longer-than-v1");
     }
@@ -1474,7 +1765,7 @@ mod tests {
     #[compio::test]
     async fn scrub_staging_purges_old_orphan_dirs_only() {
         let dir = tempdir().unwrap();
-        let be  = LocalFsBackend::new(dir.path()).unwrap();
+        let be = LocalFsBackend::new(dir.path()).unwrap();
         let staging = dir.path().join(STAGING_VOL);
 
         // Plant two orphan staging dirs:
@@ -1500,19 +1791,22 @@ mod tests {
         assert_eq!(purged, 2, "both orphan dirs should be reaped");
         // Wait for detached purges to drain.
         for _ in 0..50 {
-            let still = std::fs::metadata(&old).is_ok()
-                || std::fs::metadata(&fresh).is_ok();
-            if !still { break; }
+            let still = std::fs::metadata(&old).is_ok() || std::fs::metadata(&fresh).is_ok();
+            if !still {
+                break;
+            }
             compio::runtime::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(!std::fs::metadata(&old).is_ok());
-        assert!(!std::fs::metadata(&fresh).is_ok());
+        assert!(std::fs::metadata(&old).is_err());
+        assert!(std::fs::metadata(&fresh).is_err());
 
         // Now plant a fresh dir AND a stale one, threshold=10 minutes.
         std::fs::create_dir_all(&fresh).unwrap();
-        let purged_high = be.scrub_staging(std::time::Duration::from_secs(600)).await.unwrap();
+        let purged_high = be
+            .scrub_staging(std::time::Duration::from_secs(600))
+            .await
+            .unwrap();
         assert_eq!(purged_high, 0, "young dirs must be left alone");
         assert!(std::fs::metadata(&fresh).is_ok());
     }
 }
-

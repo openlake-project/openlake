@@ -47,7 +47,7 @@ pub fn shard_size(block_size: usize, data_shards: usize) -> usize {
 /// `data_shards + parity_shards`.
 #[derive(Clone)]
 pub struct Erasure {
-    pub data_shards:   usize,
+    pub data_shards: usize,
     pub parity_shards: usize,
 }
 
@@ -58,7 +58,10 @@ impl Erasure {
                 "EC requires data_shards>=1 and parity_shards>=1 (got {data_shards}+{parity_shards})"
             )));
         }
-        Ok(Self { data_shards, parity_shards })
+        Ok(Self {
+            data_shards,
+            parity_shards,
+        })
     }
 
     /// Encode one full stripe (`data_shards * unit` bytes, already
@@ -70,13 +73,13 @@ impl Erasure {
         let n = self.data_shards;
         let m = self.parity_shards;
         let total_len = stripe.len();
-        if total_len == 0 || total_len % n != 0 {
+        if total_len == 0 || !total_len.is_multiple_of(n) {
             return Err(io::Error::other(format!(
                 "encode_stripe: stripe len {total_len} not divisible by {n} data shards"
             )));
         }
         let unit = total_len / n;
-        if unit % 2 != 0 {
+        if !unit.is_multiple_of(2) {
             return Err(io::Error::other(format!(
                 "encode_stripe: shard unit {unit} must be even"
             )));
@@ -93,12 +96,14 @@ impl Erasure {
         let mut out: Vec<Bytes> = Vec::with_capacity(n + m);
         for i in 0..n {
             let shard = stripe.slice(i * unit..(i + 1) * unit);
-            encoder.add_original_shard(&shard)
+            encoder
+                .add_original_shard(&shard)
                 .map_err(|e| io::Error::other(format!("RS add original {i}: {e:?}")))?;
             out.push(shard);
         }
 
-        let result = encoder.encode()
+        let result = encoder
+            .encode()
             .map_err(|e| io::Error::other(format!("RS encode: {e:?}")))?;
 
         // Recovery shards come back as `&[u8]` borrowed from the
@@ -108,9 +113,9 @@ impl Erasure {
         // pool recycles each parity shard's allocation when the sink
         // drops the `Bytes` after writev completes.
         for i in 0..m {
-            let parity = result.recovery(i).ok_or_else(|| {
-                io::Error::other(format!("encode: recovery shard {i} missing"))
-            })?;
+            let parity = result
+                .recovery(i)
+                .ok_or_else(|| io::Error::other(format!("encode: recovery shard {i} missing")))?;
             let mut pb = PooledBuffer::with_capacity(parity.len());
             pb.extend_from_slice(parity);
             out.push(pb.freeze());
@@ -130,11 +135,7 @@ impl Erasure {
     /// Caller composes the stripe payload by concatenating the
     /// returned shards, or serves them as separate frames from a
     /// `RopeByteStream`-style reader.
-    pub fn decode_stripe(
-        &self,
-        shards: Vec<Option<Bytes>>,
-        unit: usize,
-    ) -> io::Result<Vec<Bytes>> {
+    pub fn decode_stripe(&self, shards: Vec<Option<Bytes>>, unit: usize) -> io::Result<Vec<Bytes>> {
         let n = self.data_shards;
         let m = self.parity_shards;
         if shards.len() != n + m {
@@ -144,7 +145,7 @@ impl Erasure {
                 shards.len()
             )));
         }
-        if unit == 0 || unit % 2 != 0 {
+        if unit == 0 || !unit.is_multiple_of(2) {
             return Err(io::Error::other(format!(
                 "decode_stripe: shard unit {unit} must be non-zero and even"
             )));
@@ -155,7 +156,9 @@ impl Erasure {
         if originals_present == n {
             // All D data shards available — no decoding needed.
             // Return them as zero-copy clones; ignore parity.
-            return Ok(shards.into_iter().take(n)
+            return Ok(shards
+                .into_iter()
+                .take(n)
                 .map(|s| s.expect("checked is_some"))
                 .collect());
         }
@@ -169,10 +172,12 @@ impl Erasure {
             if let Some(s) = slot {
                 if s.len() != unit {
                     return Err(io::Error::other(format!(
-                        "decode_stripe: original shard {i} len {} != unit {unit}", s.len()
+                        "decode_stripe: original shard {i} len {} != unit {unit}",
+                        s.len()
                     )));
                 }
-                decoder.add_original_shard(i, s)
+                decoder
+                    .add_original_shard(i, s)
                     .map_err(|e| io::Error::other(format!("RS add original {i}: {e:?}")))?;
             }
         }
@@ -180,15 +185,18 @@ impl Erasure {
             if let Some(s) = slot {
                 if s.len() != unit {
                     return Err(io::Error::other(format!(
-                        "decode_stripe: recovery shard {i} len {} != unit {unit}", s.len()
+                        "decode_stripe: recovery shard {i} len {} != unit {unit}",
+                        s.len()
                     )));
                 }
-                decoder.add_recovery_shard(i - n, s)
+                decoder
+                    .add_recovery_shard(i - n, s)
                     .map_err(|e| io::Error::other(format!("RS add recovery {i}: {e:?}")))?;
             }
         }
 
-        let result = decoder.decode()
+        let result = decoder
+            .decode()
             .map_err(|e| io::Error::other(format!("RS decode: {e:?}")))?;
 
         // Build the D data shards. Originals we had are zero-copy
@@ -196,8 +204,8 @@ impl Erasure {
         // out of the decoder's internal buffer into a fresh
         // pool-backed allocation.
         let mut out: Vec<Bytes> = Vec::with_capacity(n);
-        for i in 0..n {
-            match &shards[i] {
+        for (i, shard) in shards.iter().enumerate().take(n) {
+            match shard {
                 Some(orig) => out.push(orig.clone()),
                 None => {
                     let restored = result.restored_original(i).ok_or_else(|| {
@@ -239,7 +247,9 @@ mod tests {
         let opts: Vec<Option<Bytes>> = shards.into_iter().map(Some).collect();
         let restored = ec.decode_stripe(opts, unit).unwrap();
         let mut concat: Vec<u8> = Vec::new();
-        for s in &restored { concat.extend_from_slice(s); }
+        for s in &restored {
+            concat.extend_from_slice(s);
+        }
         concat.truncate(data.len());
         assert_eq!(concat, data);
     }
@@ -255,7 +265,9 @@ mod tests {
         opts[3] = None;
         let restored = ec.decode_stripe(opts, unit).unwrap();
         let mut concat: Vec<u8> = Vec::new();
-        for s in &restored { concat.extend_from_slice(s); }
+        for s in &restored {
+            concat.extend_from_slice(s);
+        }
         concat.truncate(data.len());
         assert_eq!(concat, data);
     }
@@ -284,6 +296,8 @@ mod tests {
         let shards = ec.encode_stripe(stripe).unwrap();
         let opts: Vec<Option<Bytes>> = shards.into_iter().map(Some).collect();
         let restored = ec.decode_stripe(opts, unit).unwrap();
-        for s in &restored { assert!(s.iter().all(|&b| b == 0)); }
+        for s in &restored {
+            assert!(s.iter().all(|&b| b == 0));
+        }
     }
 }
