@@ -230,6 +230,7 @@ impl ChunkedBodyStream {
 
 #[async_trait(?Send)]
 impl ByteStream for ChunkedBodyStream {
+    #[allow(clippy::collapsible_if)]
     async fn read(&mut self) -> IoResult<Bytes> {
         if self.finished {
             return Ok(Bytes::new());

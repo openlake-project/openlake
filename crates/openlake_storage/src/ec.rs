@@ -69,6 +69,7 @@ impl Erasure {
     /// the shards in slot order: D data shards first (zero-copy slices
     /// of `stripe`), then P parity shards (fresh pool-backed buffers
     /// frozen to `Bytes`).
+    #[allow(clippy::manual_is_multiple_of)]
     pub fn encode_stripe(&self, stripe: Bytes) -> io::Result<Vec<Bytes>> {
         let n = self.data_shards;
         let m = self.parity_shards;
@@ -135,6 +136,8 @@ impl Erasure {
     /// Caller composes the stripe payload by concatenating the
     /// returned shards, or serves them as separate frames from a
     /// `RopeByteStream`-style reader.
+    #[allow(clippy::manual_is_multiple_of)]
+    #[allow(clippy::needless_range_loop)]
     pub fn decode_stripe(&self, shards: Vec<Option<Bytes>>, unit: usize) -> io::Result<Vec<Bytes>> {
         let n = self.data_shards;
         let m = self.parity_shards;

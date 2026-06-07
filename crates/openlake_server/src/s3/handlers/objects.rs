@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! Object-scoped S3 endpoints.
 //!
 //!   * `GET    /{bucket}/{key}`   stream object body to client
@@ -182,6 +184,7 @@ pub async fn delete_object(
 
 const DELETE_OBJECTS_MAX_KEYS: usize = 1000;
 
+#[allow(clippy::unnecessary_map_or)]
 pub async fn delete_objects(
     State(state): State<AppState>,
     Path(bucket): Path<String>,

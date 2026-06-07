@@ -232,6 +232,7 @@ pub async fn get_bucket_query(
 }
 
 // todo: @arnav this is inefficient but works, move to node local lsm in future
+#[allow(clippy::redundant_field_names)]
 async fn list_objects_v2(
     state: AppState,
     bucket: String,

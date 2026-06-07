@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! S3 HTTP frontend.
 //!
 //! Submodules:

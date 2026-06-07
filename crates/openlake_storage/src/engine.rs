@@ -369,6 +369,7 @@ impl Engine {
         .map_err(Into::into)
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     pub async fn create_multipart_upload(
         &self,
         bucket: &str,
@@ -581,6 +582,8 @@ impl Engine {
         result
     }
 
+    #[allow(clippy::field_reassign_with_default)]
+    #[allow(clippy::iter_cloned_collect)]
     pub async fn complete_multipart_upload(
         &self,
         bucket: &str,
@@ -1002,6 +1005,7 @@ impl Engine {
     }
 
     // todo: @arnav this should not be an engine specific concern, the respective backend can optianlly accept a version id for get, and can serve it instead of the head.
+    #[allow(clippy::manual_is_multiple_of)]
     async fn get_versioned(
         &self,
         bucket: &str,
@@ -1282,6 +1286,8 @@ impl Engine {
         Ok(merged)
     }
 
+    #[allow(clippy::manual_flatten)]
+    #[allow(clippy::manual_div_ceil)]
     async fn list_one_set(
         &self,
         set_idx: usize,
@@ -1366,6 +1372,8 @@ impl Engine {
     /// (Gate 1 + parity vote + etag quorum + content-hash). Each
     /// backend's `read_version` call passes the `version_id` through;
     /// the consensus picks the record version that reaches quorum.
+    #[allow(clippy::unnecessary_unwrap)]
+    #[allow(clippy::iter_kv_map)]
     async fn read_with_consensus(
         &self,
         backends: &[Rc<dyn StorageBackend>],
@@ -1598,6 +1606,7 @@ fn clone_io_error(e: &IoError) -> IoError {
 /// parity value whose record-count meets its corresponding read
 /// quorum (`D = N - parity`), or `None` if no value reaches its
 /// quorum. Mirrors MinIO's `commonParity` (`erasure-metadata.go:460`).
+#[allow(clippy::unnecessary_map_or)]
 fn common_parity(metas: &[Option<FileInfo>], n: usize) -> Option<u8> {
     let mut parity_counts: HashMap<u8, usize> = HashMap::new();
     for m in metas.iter().flatten() {
@@ -1883,6 +1892,7 @@ impl EcReadStream {
 /// `EcReadStream` ready to yield that part's bytes. Shared by single-
 /// part and multipart reads — single-shot PUTs invoke this once
 /// (parts == 1); multipart-assembled objects invoke once per part.
+#[allow(clippy::too_many_arguments)]
 async fn open_ec_part_stream(
     backends: &[Rc<dyn StorageBackend>],
     bucket: &str,
@@ -2145,6 +2155,8 @@ fn require_quorum<T>(
     Err(modal.unwrap_or_else(|| IoError::InvalidArgument("no results".into())))
 }
 
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::field_reassign_with_default)]
 fn build_file_info(
     volume: &str,
     name: &str,
@@ -2191,6 +2203,7 @@ fn to_object_info(bucket: &str, fi: &FileInfo) -> ObjectInfo {
     }
 }
 
+#[allow(clippy::unnecessary_map_or)]
 fn merge_within_set(
     streams: Vec<Vec<(String, FileInfo)>>,
     quorum: usize,
@@ -2256,6 +2269,7 @@ fn vote_fileinfo(candidates: &[FileInfo], quorum: usize) -> Option<FileInfo> {
         .map(|(_, (_, fi))| fi)
 }
 
+#[allow(clippy::unnecessary_map_or)]
 fn merge_across_sets(streams: Vec<Vec<ObjectInfo>>) -> Vec<ObjectInfo> {
     let mut heads: Vec<usize> = vec![0; streams.len()];
     let mut out: Vec<ObjectInfo> = Vec::new();

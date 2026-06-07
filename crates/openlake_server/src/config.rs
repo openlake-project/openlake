@@ -257,6 +257,7 @@ where
 }
 
 impl Config {
+    #[allow(clippy::collapsible_if)]
     pub fn from_toml(text: &str) -> anyhow::Result<Self> {
         let cfg: Config = toml::from_str(text)?;
         if !cfg.nodes.iter().any(|n| n.id == cfg.self_id) {

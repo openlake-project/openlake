@@ -132,6 +132,7 @@ pub enum VersionType {
     DeleteMarker = 1,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for VersionType {
     fn default() -> Self {
         VersionType::Object
@@ -415,6 +416,7 @@ pub enum BitrotAlgorithm {
     HighwayHash256,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for BitrotAlgorithm {
     fn default() -> Self {
         BitrotAlgorithm::HighwayHash256

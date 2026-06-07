@@ -113,6 +113,7 @@ async fn run_tls(args: &ClientArgs, block_bytes: &[u64]) -> Result<Report> {
     Ok(Report { cells })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_cell_tls(
     client: &cyper::Client,
     url_base: &str,
@@ -168,6 +169,7 @@ async fn run_cell_tls(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive(
     client: &cyper::Client,
     url_base: &str,
@@ -202,6 +204,7 @@ async fn drive(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn worker(
     client: cyper::Client,
     url_base: String,

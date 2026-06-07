@@ -486,7 +486,8 @@ pub fn find_version(bytes: Bytes, version_id: &str) -> IoResult<Option<DecodedRe
 
 /// Build a `FileInfo` from a `DecodedRecord` plus the caller's bucket
 /// + key context. Identity (volume, name) is **not** read from disk —
-/// it comes from the path the caller used to fetch the file.
+///   it comes from the path the caller used to fetch the file.
+#[allow(clippy::field_reassign_with_default)]
 pub fn file_info_from_record(rec: DecodedRecord, volume: &str, path: &str) -> FileInfo {
     let mut fi = FileInfo::default();
     fi.volume = volume.to_owned();
@@ -853,6 +854,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     fn sample() -> FileInfo {
         let mut fi = FileInfo::default();
         fi.volume = "photos".into();
@@ -1049,6 +1051,7 @@ mod tests {
 
     /// Build a small inline FileInfo with the given version id, body
     /// bytes, and mod time. Used to compose multi-version test fixtures.
+    #[allow(clippy::field_reassign_with_default)]
     fn fi_inline(vid: &str, body: &[u8], mod_time_ms: u64) -> FileInfo {
         let mut fi = FileInfo::default();
         fi.volume = "photos".into();

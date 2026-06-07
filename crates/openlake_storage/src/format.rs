@@ -30,6 +30,7 @@ pub enum FormatError {
     Io(#[from] IoError),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn bootstrap_format(
     local: &[Rc<dyn StorageBackend>],
     peers: &[Rc<dyn StorageBackend>],
@@ -114,6 +115,7 @@ fn all_ok_none(results: &[Result<Option<FormatJson>, IoError>]) -> bool {
     results.iter().all(|r| matches!(r, Ok(None)))
 }
 
+#[allow(clippy::redundant_closure)]
 async fn write_all_disks(
     local: &[Rc<dyn StorageBackend>],
     peers: &[Rc<dyn StorageBackend>],

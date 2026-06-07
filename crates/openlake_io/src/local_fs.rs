@@ -92,6 +92,7 @@ pub struct CachedFile {
 }
 
 impl CachedFile {
+    #[allow(clippy::manual_is_multiple_of)]
     pub fn pick_write_fd(&self, buf_ptr: *const u8, len: usize, file_offset: u64) -> &File {
         let aligned = (len % O_DIRECT_ALIGN == 0)
             && (file_offset as usize % O_DIRECT_ALIGN == 0)
@@ -153,6 +154,7 @@ impl FileHandleCache {
         }
         #[cfg(target_os = "linux")]
         {
+            #[allow(unused_imports)]
             use std::os::unix::fs::OpenOptionsExt;
             opts.custom_flags(_extra_flag);
         }
@@ -270,6 +272,7 @@ impl LocalFsBackend {
         res.map_err(IoError::Io)
     }
 
+    #[allow(clippy::manual_is_multiple_of)]
     pub async fn read_chunk_at(
         &self,
         volume: &str,
@@ -438,6 +441,7 @@ struct LocalFileStream {
 
 #[async_trait(?Send)]
 impl ByteStream for LocalFileStream {
+    #[allow(clippy::needless_borrow)]
     async fn read(&mut self) -> IoResult<bytes::Bytes> {
         use compio::buf::IoBuf;
         let want = (self.end - self.pos).min(crate::tuning::STREAM_CHUNK_BYTES as u64) as usize;
@@ -454,6 +458,7 @@ impl ByteStream for LocalFileStream {
         Ok(buf.freeze())
     }
 
+    #[allow(clippy::needless_borrow)]
     async fn read_buffer(&mut self, dst: &mut [u8]) -> IoResult<usize> {
         let mut filled = 0;
         while filled < dst.len() {
@@ -563,6 +568,7 @@ impl StorageBackend for LocalFsBackend {
         format!("local_fs:{}", self.root.display())
     }
 
+    #[allow(clippy::unnecessary_cast)]
     async fn disk_info(&self) -> IoResult<DiskInfo> {
         let cpath = CString::new(self.root.as_os_str().as_bytes())
             .map_err(|_| IoError::InvalidArgument("root path contains NUL".into()))?;
@@ -698,6 +704,7 @@ impl StorageBackend for LocalFsBackend {
         opts.read(true);
         #[cfg(target_os = "linux")]
         {
+            #[allow(unused_imports)]
             use std::os::unix::fs::OpenOptionsExt;
             opts.custom_flags(libc::O_DIRECT);
         }
@@ -1215,6 +1222,7 @@ async fn write_all_bytes_at(mut file: &File, buf: bytes::Bytes, base_offset: u64
     res.map_err(IoError::Io)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk_dir_local_inner<'a>(
     backend: &'a LocalFsBackend,
     volume: &'a str,
@@ -1311,6 +1319,7 @@ mod tests {
         sink.finish().await
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     fn fi_inline(volume: &str, name: &str, data: &[u8]) -> FileInfo {
         use crate::types::{ErasureInfo, ObjectPartInfo};
         let mut fi = FileInfo::default();
@@ -1533,6 +1542,7 @@ mod tests {
         // and version_id. Caller must place a real `part.1` in
         // STAGING_VOL/{staging_id}/{data_dir}/ before calling
         // rename_data.
+        #[allow(clippy::field_reassign_with_default)]
         fn fi_ec(data_dir: &str, version_id: &str, etag: &str, mtime: u64) -> FileInfo {
             let mut fi = FileInfo::default();
             fi.volume = "b".into();
@@ -1637,6 +1647,7 @@ mod tests {
         let be = LocalFsBackend::new(dir.path()).unwrap();
         be.make_vol("b").await.unwrap();
 
+        #[allow(clippy::field_reassign_with_default)]
         fn fi_inline_for_rename(vid: &str, body: &[u8], mtime: u64) -> FileInfo {
             let mut fi = FileInfo::default();
             fi.volume = "b".into();
@@ -1754,6 +1765,7 @@ mod tests {
     /// older than the threshold while leaving fresh ones alone.
     /// Mirrors MinIO's startup `cleanupTmpUploads` semantics.
     #[compio::test]
+    #[allow(clippy::nonminimal_bool)]
     async fn scrub_staging_purges_old_orphan_dirs_only() {
         let dir = tempdir().unwrap();
         let be = LocalFsBackend::new(dir.path()).unwrap();

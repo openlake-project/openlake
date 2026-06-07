@@ -2,6 +2,7 @@ use hdrhistogram::Histogram;
 
 use super::mode::BenchMode;
 
+#[allow(dead_code)]
 pub struct Cell {
     pub block_bytes: u64,
     pub batch: u32,
@@ -17,6 +18,7 @@ pub struct Report {
     pub cells: Vec<Cell>,
 }
 
+#[allow(dead_code)]
 pub struct ClientPreamble {
     pub target: String,
     pub mode: BenchMode,
@@ -29,6 +31,7 @@ const RULE: &str =
 
 pub fn print_preamble(_p: &ClientPreamble) {}
 
+#[allow(clippy::manual_is_multiple_of)]
 fn fmt_block(n: u64) -> String {
     const K: u64 = 1u64 << 10;
     const M: u64 = 1u64 << 20;

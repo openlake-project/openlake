@@ -108,6 +108,7 @@ async fn sink(body: axum::body::Body) -> impl IntoResponse {
     (StatusCode::OK, total.to_string()).into_response()
 }
 
+#[allow(clippy::unnecessary_cast)]
 pub(crate) fn primary_ip() -> Option<std::net::IpAddr> {
     use std::ffi::CStr;
     use std::net::Ipv4Addr;

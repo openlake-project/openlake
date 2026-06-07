@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! Cluster-wide TLS material — mirrors `rustfs/src/server/tls_material.rs`.
 //!
 //! `TlsMaterial` is a single value holding the three optional TLS handles
