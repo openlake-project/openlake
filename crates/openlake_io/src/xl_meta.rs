@@ -485,26 +485,25 @@ pub fn find_version(bytes: Bytes, version_id: &str) -> IoResult<Option<DecodedRe
 }
 
 /// Build a `FileInfo` from a `DecodedRecord` plus the caller's bucket
-/// and key context. Identity (volume, name) is not read from disk.
-/// It comes from the path the caller used to fetch the file.
+/// + key context. Identity (volume, name) is **not** read from disk —
+/// it comes from the path the caller used to fetch the file.
 pub fn file_info_from_record(rec: DecodedRecord, volume: &str, path: &str) -> FileInfo {
-    FileInfo {
-        volume: volume.to_owned(),
-        name: path.to_owned(),
-        version_id: rec.version_id,
-        data_dir: rec.data_dir,
-        deleted: rec.deleted,
-        size: rec.size,
-        mod_time_ms: rec.mod_time_ms,
-        metadata: rec.metadata,
-        meta_sys: rec.meta_sys,
-        erasure: rec.erasure,
-        parts: rec.parts,
-        data: rec.inline,
-        is_latest: true,
-        num_versions: rec.num_versions.max(1),
-        ..Default::default()
-    }
+    let mut fi = FileInfo::default();
+    fi.volume = volume.to_owned();
+    fi.name = path.to_owned();
+    fi.version_id = rec.version_id;
+    fi.data_dir = rec.data_dir;
+    fi.deleted = rec.deleted;
+    fi.size = rec.size;
+    fi.mod_time_ms = rec.mod_time_ms;
+    fi.metadata = rec.metadata;
+    fi.meta_sys = rec.meta_sys;
+    fi.erasure = rec.erasure;
+    fi.parts = rec.parts;
+    fi.data = rec.inline;
+    fi.is_latest = true;
+    fi.num_versions = rec.num_versions.max(1);
+    fi
 }
 
 // ---------------------------------------------------------------------
@@ -855,24 +854,22 @@ mod tests {
     }
 
     fn sample() -> FileInfo {
-        let mut fi = FileInfo {
-            volume: "photos".into(),
-            name: "dog.jpg".into(),
+        let mut fi = FileInfo::default();
+        fi.volume = "photos".into();
+        fi.name = "dog.jpg".into();
+        fi.size = 5;
+        fi.mod_time_ms = 1_700_000_000_000;
+        fi.data = Some(vec![Bytes::from_static(b"hello")]);
+        fi.parts = vec![ObjectPartInfo {
+            etag: "deadbeef".into(),
+            number: 1,
             size: 5,
+            actual_size: 5,
             mod_time_ms: 1_700_000_000_000,
-            data: Some(vec![Bytes::from_static(b"hello")]),
-            parts: vec![ObjectPartInfo {
-                etag: "deadbeef".into(),
-                number: 1,
-                size: 5,
-                actual_size: 5,
-                mod_time_ms: 1_700_000_000_000,
-                index: Vec::new(),
-                checksums: BTreeMap::new(),
-            }],
-            erasure: sample_erasure(),
-            ..Default::default()
-        };
+            index: Vec::new(),
+            checksums: BTreeMap::new(),
+        }];
+        fi.erasure = sample_erasure();
         fi.metadata.insert("etag".into(), "deadbeef".into());
         fi.metadata
             .insert("content-type".into(), "image/jpeg".into());
@@ -1053,25 +1050,23 @@ mod tests {
     /// Build a small inline FileInfo with the given version id, body
     /// bytes, and mod time. Used to compose multi-version test fixtures.
     fn fi_inline(vid: &str, body: &[u8], mod_time_ms: u64) -> FileInfo {
-        let mut fi = FileInfo {
-            volume: "photos".into(),
-            name: "dog.jpg".into(),
-            version_id: vid.into(),
+        let mut fi = FileInfo::default();
+        fi.volume = "photos".into();
+        fi.name = "dog.jpg".into();
+        fi.version_id = vid.into();
+        fi.size = body.len() as i64;
+        fi.mod_time_ms = mod_time_ms;
+        fi.data = Some(vec![Bytes::copy_from_slice(body)]);
+        fi.parts = vec![ObjectPartInfo {
+            etag: "etag".into(),
+            number: 1,
             size: body.len() as i64,
+            actual_size: body.len() as i64,
             mod_time_ms,
-            data: Some(vec![Bytes::copy_from_slice(body)]),
-            parts: vec![ObjectPartInfo {
-                etag: "etag".into(),
-                number: 1,
-                size: body.len() as i64,
-                actual_size: body.len() as i64,
-                mod_time_ms,
-                index: Vec::new(),
-                checksums: BTreeMap::new(),
-            }],
-            erasure: sample_erasure(),
-            ..Default::default()
-        };
+            index: Vec::new(),
+            checksums: BTreeMap::new(),
+        }];
+        fi.erasure = sample_erasure();
         fi.metadata.insert("etag".into(), "etag".into());
         fi
     }

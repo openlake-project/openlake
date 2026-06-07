@@ -73,13 +73,13 @@ impl Erasure {
         let n = self.data_shards;
         let m = self.parity_shards;
         let total_len = stripe.len();
-        if total_len == 0 || !total_len.is_multiple_of(n) {
+        if total_len == 0 || total_len % n != 0 {
             return Err(io::Error::other(format!(
                 "encode_stripe: stripe len {total_len} not divisible by {n} data shards"
             )));
         }
         let unit = total_len / n;
-        if !unit.is_multiple_of(2) {
+        if unit % 2 != 0 {
             return Err(io::Error::other(format!(
                 "encode_stripe: shard unit {unit} must be even"
             )));
@@ -145,7 +145,7 @@ impl Erasure {
                 shards.len()
             )));
         }
-        if unit == 0 || !unit.is_multiple_of(2) {
+        if unit == 0 || unit % 2 != 0 {
             return Err(io::Error::other(format!(
                 "decode_stripe: shard unit {unit} must be non-zero and even"
             )));
@@ -204,8 +204,8 @@ impl Erasure {
         // out of the decoder's internal buffer into a fresh
         // pool-backed allocation.
         let mut out: Vec<Bytes> = Vec::with_capacity(n);
-        for (i, shard) in shards.iter().enumerate().take(n) {
-            match shard {
+        for i in 0..n {
+            match &shards[i] {
                 Some(orig) => out.push(orig.clone()),
                 None => {
                     let restored = result.restored_original(i).ok_or_else(|| {

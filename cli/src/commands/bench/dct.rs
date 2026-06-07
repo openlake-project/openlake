@@ -173,6 +173,10 @@ pub async fn run_client(args: &ClientArgs, block_bytes: &[u64]) -> Result<Report
 
     let warmup = Duration::from_secs(args.warmup_secs);
     let duration = Duration::from_secs(args.duration_secs);
+    let op_str: &'static str = match args.op {
+        OpArg::Read => "read",
+        OpArg::Write => "write",
+    };
 
     let mut cells: Vec<Cell> = Vec::new();
     for &threads in &args.threads {
@@ -191,6 +195,7 @@ pub async fn run_client(args: &ClientArgs, block_bytes: &[u64]) -> Result<Report
                     batch,
                     threads,
                     args.op,
+                    op_str,
                     warmup,
                     duration,
                 )
@@ -216,6 +221,7 @@ async fn run_cell(
     batch: u32,
     threads: u32,
     op: OpArg,
+    op_str: &'static str,
     warmup: Duration,
     duration: Duration,
 ) -> Result<Cell> {
@@ -223,6 +229,7 @@ async fn run_cell(
         1, 60_000_000, 3,
     )?));
     let iters = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     if !warmup.is_zero() {
         drive(
@@ -239,6 +246,7 @@ async fn run_cell(
             threads,
             op,
             warmup,
+            None,
             None,
             None,
         )
@@ -261,6 +269,7 @@ async fn run_cell(
         duration,
         Some(hist.clone()),
         Some(iters.clone()),
+        Some(bytes.clone()),
     )
     .await?;
     let elapsed_us = started.elapsed().as_micros();
@@ -273,7 +282,9 @@ async fn run_cell(
         block_bytes: block,
         batch,
         threads,
+        op: op_str,
         iters: iters.load(std::sync::atomic::Ordering::Relaxed),
+        bytes: bytes.load(std::sync::atomic::Ordering::Relaxed) as u128,
         elapsed_us,
         lat: h,
     })
@@ -296,6 +307,7 @@ async fn drive(
     duration: Duration,
     hist: Option<Arc<Mutex<Histogram<u64>>>>,
     iters: Option<Arc<std::sync::atomic::AtomicU64>>,
+    bytes: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<()> {
     let deadline = Instant::now() + duration;
     let sock = node.sock.clone();
@@ -304,6 +316,7 @@ async fn drive(
         let sock = sock.clone();
         let hist = hist.clone();
         let iters = iters.clone();
+        let bytes = bytes.clone();
         let thread_local_off = (t as u64) * block * batch as u64;
         let thread_remote_off = thread_local_off;
         tasks.push(compio::runtime::spawn(async move {
@@ -322,6 +335,7 @@ async fn drive(
                 deadline,
                 hist,
                 iters,
+                bytes,
             )
             .await
         }));
@@ -349,6 +363,7 @@ async fn worker(
     deadline: Instant,
     hist: Option<Arc<Mutex<Histogram<u64>>>>,
     iters: Option<Arc<std::sync::atomic::AtomicU64>>,
+    bytes: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<()> {
     while Instant::now() < deadline {
         let start = Instant::now();
@@ -399,6 +414,9 @@ async fn worker(
         }
         if let Some(c) = &iters {
             c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(c) = &bytes {
+            c.fetch_add(block * batch as u64, std::sync::atomic::Ordering::Relaxed);
         }
     }
     Ok(())

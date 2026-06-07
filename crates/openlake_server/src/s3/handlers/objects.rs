@@ -1,10 +1,10 @@
 //! Object-scoped S3 endpoints.
 //!
-//! * `GET    /{bucket}/{key}`   stream object body to client
-//! * `HEAD   /{bucket}/{key}`   stat (size + etag + last-modified)
-//! * `DELETE /{bucket}/{key}`   tombstone object
-//! * `PUT    /{bucket}/{key}`   pending, needs streaming SigV4
-//!   body adapter (returns 501 for now)
+//!   * `GET    /{bucket}/{key}`   stream object body to client
+//!   * `HEAD   /{bucket}/{key}`   stat (size + etag + last-modified)
+//!   * `DELETE /{bucket}/{key}`   tombstone object
+//!   * `PUT    /{bucket}/{key}`   pending — needs streaming SigV4
+//!                                body adapter (returns 501 for now)
 
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
@@ -238,7 +238,7 @@ pub async fn delete_objects(
     if request.objects.iter().any(|o| {
         o.version_id
             .as_deref()
-            .is_some_and(|v| !v.is_empty() && v != "null")
+            .map_or(false, |v| !v.is_empty() && v != "null")
     }) {
         return Err(AppError::NotImplemented(
             "DeleteObjects with non-null <VersionId> entries is not yet implemented",

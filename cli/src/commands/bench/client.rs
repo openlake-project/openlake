@@ -7,7 +7,9 @@ use futures::future::join_all;
 use hdrhistogram::Histogram;
 
 use super::mode::{resolve_mode, BenchMode};
-use super::report::{print_header, print_row, print_table, Cell, Report};
+use super::report::{
+    print_header, print_preamble, print_row, print_table, Cell, ClientPreamble, Report,
+};
 use super::{parse_size, ClientArgs, OpArg};
 
 pub async fn run(args: ClientArgs) -> Result<()> {
@@ -17,6 +19,13 @@ pub async fn run(args: ClientArgs) -> Result<()> {
         .iter()
         .map(|s| parse_size(s))
         .collect::<Result<_>>()?;
+
+    print_preamble(&ClientPreamble {
+        target: args.target.clone(),
+        mode,
+        duration_secs: args.duration_secs,
+        warmup_secs: args.warmup_secs,
+    });
 
     let _report = match mode {
         BenchMode::Tls => run_tls(&args, &block_bytes).await?,
@@ -60,6 +69,11 @@ async fn run_tls(args: &ClientArgs, block_bytes: &[u64]) -> Result<Report> {
 
     let warmup = Duration::from_secs(args.warmup_secs);
     let duration = Duration::from_secs(args.duration_secs);
+    let op_str: &'static str = match args.op {
+        OpArg::Read => "read",
+        OpArg::Write => "write",
+    };
+
     let probe_started = std::time::Instant::now();
     let probe = async {
         let resp = client
@@ -88,7 +102,7 @@ async fn run_tls(args: &ClientArgs, block_bytes: &[u64]) -> Result<Report> {
         for &batch in &args.batch_sizes {
             for &block in block_bytes {
                 let cell = run_cell_tls(
-                    &client, &url_base, block, batch, threads, args.op, warmup, duration,
+                    &client, &url_base, block, batch, threads, args.op, op_str, warmup, duration,
                 )
                 .await?;
                 print_row(&cell);
@@ -99,7 +113,6 @@ async fn run_tls(args: &ClientArgs, block_bytes: &[u64]) -> Result<Report> {
     Ok(Report { cells })
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_cell_tls(
     client: &cyper::Client,
     url_base: &str,
@@ -107,6 +120,7 @@ async fn run_cell_tls(
     batch: u32,
     threads: u32,
     op: OpArg,
+    op_str: &'static str,
     warmup: Duration,
     duration: Duration,
 ) -> Result<Cell> {
@@ -114,10 +128,11 @@ async fn run_cell_tls(
         1, 60_000_000, 3,
     )?));
     let iters = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     if !warmup.is_zero() {
         drive(
-            client, url_base, block, batch, threads, op, warmup, None, None,
+            client, url_base, block, batch, threads, op, warmup, None, None, None,
         )
         .await?;
     }
@@ -132,6 +147,7 @@ async fn run_cell_tls(
         duration,
         Some(hist.clone()),
         Some(iters.clone()),
+        Some(bytes.clone()),
     )
     .await?;
     let elapsed_us = started.elapsed().as_micros();
@@ -144,13 +160,14 @@ async fn run_cell_tls(
         block_bytes: block,
         batch,
         threads,
+        op: op_str,
         iters: iters.load(std::sync::atomic::Ordering::Relaxed),
+        bytes: bytes.load(std::sync::atomic::Ordering::Relaxed) as u128,
         elapsed_us,
         lat: h,
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn drive(
     client: &cyper::Client,
     url_base: &str,
@@ -161,6 +178,7 @@ async fn drive(
     duration: Duration,
     hist: Option<Arc<Mutex<Histogram<u64>>>>,
     iters: Option<Arc<std::sync::atomic::AtomicU64>>,
+    bytes: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<()> {
     let deadline = Instant::now() + duration;
     let mut tasks = Vec::with_capacity(threads as usize);
@@ -169,8 +187,12 @@ async fn drive(
         let url_base = url_base.to_string();
         let hist = hist.clone();
         let iters = iters.clone();
+        let bytes = bytes.clone();
         tasks.push(compio::runtime::spawn(async move {
-            worker(client, url_base, block, batch, op, deadline, hist, iters).await
+            worker(
+                client, url_base, block, batch, op, deadline, hist, iters, bytes,
+            )
+            .await
         }));
     }
     for t in tasks {
@@ -180,7 +202,6 @@ async fn drive(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn worker(
     client: cyper::Client,
     url_base: String,
@@ -190,6 +211,7 @@ async fn worker(
     deadline: Instant,
     hist: Option<Arc<Mutex<Histogram<u64>>>>,
     iters: Option<Arc<std::sync::atomic::AtomicU64>>,
+    bytes: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<()> {
     let put_body: Option<Bytes> = match op {
         OpArg::Write => Some(Bytes::from(vec![0u8; block as usize])),
@@ -212,6 +234,9 @@ async fn worker(
         }
         if let Some(c) = &iters {
             c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(c) = &bytes {
+            c.fetch_add(block * batch as u64, std::sync::atomic::Ordering::Relaxed);
         }
     }
     Ok(())

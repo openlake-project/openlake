@@ -126,7 +126,7 @@ pub(crate) fn primary_ip() -> Option<std::net::IpAddr> {
             }
             let family = (*ifa.ifa_addr).sa_family as libc::c_int;
             let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy();
-            let flags = ifa.ifa_flags;
+            let flags = ifa.ifa_flags as u32;
             if family == libc::AF_INET
                 && name != "lo"
                 && (flags & libc::IFF_UP as u32) != 0

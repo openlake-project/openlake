@@ -93,9 +93,9 @@ pub struct CachedFile {
 
 impl CachedFile {
     pub fn pick_write_fd(&self, buf_ptr: *const u8, len: usize, file_offset: u64) -> &File {
-        let aligned = len.is_multiple_of(O_DIRECT_ALIGN)
-            && (file_offset as usize).is_multiple_of(O_DIRECT_ALIGN)
-            && (buf_ptr as usize).is_multiple_of(O_DIRECT_ALIGN);
+        let aligned = (len % O_DIRECT_ALIGN == 0)
+            && (file_offset as usize % O_DIRECT_ALIGN == 0)
+            && (buf_ptr as usize % O_DIRECT_ALIGN == 0);
         if aligned {
             &self.direct
         } else {
@@ -153,6 +153,7 @@ impl FileHandleCache {
         }
         #[cfg(target_os = "linux")]
         {
+            use std::os::unix::fs::OpenOptionsExt;
             opts.custom_flags(_extra_flag);
         }
         opts.open(path).await
@@ -284,15 +285,15 @@ impl LocalFsBackend {
         };
         let len = dst.len();
         debug_assert!(
-            (dst.as_ptr() as usize).is_multiple_of(O_DIRECT_ALIGN),
+            dst.as_ptr() as usize % O_DIRECT_ALIGN == 0,
             "read_chunk_at dst not {O_DIRECT_ALIGN}-aligned"
         );
         debug_assert!(
-            len.is_multiple_of(O_DIRECT_ALIGN),
+            len % O_DIRECT_ALIGN == 0,
             "read_chunk_at len {len} not {O_DIRECT_ALIGN}-aligned"
         );
         debug_assert!(
-            (offset as usize).is_multiple_of(O_DIRECT_ALIGN),
+            offset as usize % O_DIRECT_ALIGN == 0,
             "read_chunk_at offset {offset} not {O_DIRECT_ALIGN}-aligned"
         );
         let fd: &File = cached.read_fd();
@@ -445,7 +446,7 @@ impl ByteStream for LocalFileStream {
         }
         let buf = PooledBuffer::with_capacity(want);
         let slice = buf.slice(0..want);
-        let BufResult(res, slice_back) = self.file.read_at(slice, self.pos).await;
+        let BufResult(res, slice_back) = (&self.file).read_at(slice, self.pos).await;
         let mut buf = slice_back.into_inner();
         let n = res.map_err(IoError::Io)?;
         self.pos += n as u64;
@@ -462,7 +463,7 @@ impl ByteStream for LocalFileStream {
             }
             let want = (dst.len() - filled).min(remaining_in_range);
             let wrapper = unsafe { BorrowedSliceMut::from_slice(&mut dst[filled..filled + want]) };
-            let BufResult(res, _wrapper_back) = self.file.read_at(wrapper, self.pos).await;
+            let BufResult(res, _wrapper_back) = (&self.file).read_at(wrapper, self.pos).await;
             let n = res.map_err(IoError::Io)?;
             if n == 0 {
                 break;
@@ -562,11 +563,6 @@ impl StorageBackend for LocalFsBackend {
         format!("local_fs:{}", self.root.display())
     }
 
-    // libc::statvfs field widths differ by platform: glibc has fsblkcnt_t and
-    // fsfilcnt_t as u64, darwin has them as u32. The `as u64` casts widen
-    // uniformly on darwin and are a no-op on glibc. clippy's
-    // `unnecessary_cast` is a false positive on glibc.
-    #[allow(clippy::unnecessary_cast)]
     async fn disk_info(&self) -> IoResult<DiskInfo> {
         let cpath = CString::new(self.root.as_os_str().as_bytes())
             .map_err(|_| IoError::InvalidArgument("root path contains NUL".into()))?;
@@ -702,6 +698,7 @@ impl StorageBackend for LocalFsBackend {
         opts.read(true);
         #[cfg(target_os = "linux")]
         {
+            use std::os::unix::fs::OpenOptionsExt;
             opts.custom_flags(libc::O_DIRECT);
         }
         let file = opts
@@ -1218,7 +1215,6 @@ async fn write_all_bytes_at(mut file: &File, buf: bytes::Bytes, base_offset: u64
     res.map_err(IoError::Io)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn walk_dir_local_inner<'a>(
     backend: &'a LocalFsBackend,
     volume: &'a str,
@@ -1317,36 +1313,35 @@ mod tests {
 
     fn fi_inline(volume: &str, name: &str, data: &[u8]) -> FileInfo {
         use crate::types::{ErasureInfo, ObjectPartInfo};
+        let mut fi = FileInfo::default();
+        fi.volume = volume.into();
+        fi.name = name.into();
+        fi.size = data.len() as i64;
+        fi.mod_time_ms = 1_700_000_000_000;
+        fi.data = Some(vec![Bytes::copy_from_slice(data)]);
+        fi.is_latest = true;
+        fi.num_versions = 1;
+        fi.fresh = true;
+        fi.parts = vec![ObjectPartInfo {
+            etag: "x".into(),
+            number: 1,
+            size: data.len() as i64,
+            actual_size: data.len() as i64,
+            mod_time_ms: 1_700_000_000_000,
+            ..Default::default()
+        }];
         // EC[1+0] is the minimal valid erasure layout that satisfies
         // the strict validator for a single-disk test backend.
-        FileInfo {
-            volume: volume.into(),
-            name: name.into(),
-            size: data.len() as i64,
-            mod_time_ms: 1_700_000_000_000,
-            data: Some(vec![Bytes::copy_from_slice(data)]),
-            is_latest: true,
-            num_versions: 1,
-            fresh: true,
-            parts: vec![ObjectPartInfo {
-                etag: "x".into(),
-                number: 1,
-                size: data.len() as i64,
-                actual_size: data.len() as i64,
-                mod_time_ms: 1_700_000_000_000,
-                ..Default::default()
-            }],
-            erasure: ErasureInfo {
-                algorithm: "ReedSolomon".into(),
-                data_blocks: 1,
-                parity_blocks: 0,
-                index: 1,
-                block_size: 1_048_576,
-                distribution: vec![1],
-                checksums: Vec::new(),
-            },
-            ..Default::default()
-        }
+        fi.erasure = ErasureInfo {
+            algorithm: "ReedSolomon".into(),
+            data_blocks: 1,
+            parity_blocks: 0,
+            index: 1,
+            block_size: 1_048_576,
+            distribution: vec![1],
+            checksums: Vec::new(),
+        };
+        fi
     }
 
     /// Small helper: drain a `ByteStream` into a Vec for assertions.
@@ -1539,37 +1534,35 @@ mod tests {
         // STAGING_VOL/{staging_id}/{data_dir}/ before calling
         // rename_data.
         fn fi_ec(data_dir: &str, version_id: &str, etag: &str, mtime: u64) -> FileInfo {
-            let mut fi = FileInfo {
-                volume: "b".into(),
-                name: "obj".into(),
+            let mut fi = FileInfo::default();
+            fi.volume = "b".into();
+            fi.name = "obj".into();
+            fi.size = 8;
+            fi.mod_time_ms = mtime;
+            fi.version_id = version_id.into();
+            fi.data_dir = data_dir.into();
+            fi.is_latest = true;
+            fi.num_versions = 1;
+            fi.fresh = true;
+            fi.parts = vec![ObjectPartInfo {
+                etag: etag.into(),
+                number: 1,
                 size: 8,
+                actual_size: 8,
                 mod_time_ms: mtime,
-                version_id: version_id.into(),
-                data_dir: data_dir.into(),
-                is_latest: true,
-                num_versions: 1,
-                fresh: true,
-                parts: vec![ObjectPartInfo {
-                    etag: etag.into(),
-                    number: 1,
-                    size: 8,
-                    actual_size: 8,
-                    mod_time_ms: mtime,
-                    index: Vec::new(),
-                    checksums: Default::default(),
-                }],
-                erasure: ErasureInfo {
-                    algorithm: "ReedSolomon".into(),
-                    data_blocks: 3,
-                    parity_blocks: 1,
-                    index: 1,
-                    block_size: 4096,
-                    distribution: vec![1, 2, 3, 4],
-                    checksums: Vec::new(),
-                },
-                ..Default::default()
-            };
+                index: Vec::new(),
+                checksums: Default::default(),
+            }];
             fi.metadata.insert("etag".into(), etag.into());
+            fi.erasure = ErasureInfo {
+                algorithm: "ReedSolomon".into(),
+                data_blocks: 3,
+                parity_blocks: 1,
+                index: 1,
+                block_size: 4096,
+                distribution: vec![1, 2, 3, 4],
+                checksums: Vec::new(),
+            };
             fi
         }
 
@@ -1645,37 +1638,35 @@ mod tests {
         be.make_vol("b").await.unwrap();
 
         fn fi_inline_for_rename(vid: &str, body: &[u8], mtime: u64) -> FileInfo {
-            let mut fi = FileInfo {
-                volume: "b".into(),
-                name: "obj".into(),
-                version_id: vid.into(),
+            let mut fi = FileInfo::default();
+            fi.volume = "b".into();
+            fi.name = "obj".into();
+            fi.version_id = vid.into();
+            fi.size = body.len() as i64;
+            fi.mod_time_ms = mtime;
+            fi.data = Some(vec![Bytes::copy_from_slice(body)]);
+            fi.is_latest = true;
+            fi.num_versions = 1;
+            fi.fresh = true;
+            fi.parts = vec![ObjectPartInfo {
+                etag: "etag".into(),
+                number: 1,
                 size: body.len() as i64,
+                actual_size: body.len() as i64,
                 mod_time_ms: mtime,
-                data: Some(vec![Bytes::copy_from_slice(body)]),
-                is_latest: true,
-                num_versions: 1,
-                fresh: true,
-                parts: vec![ObjectPartInfo {
-                    etag: "etag".into(),
-                    number: 1,
-                    size: body.len() as i64,
-                    actual_size: body.len() as i64,
-                    mod_time_ms: mtime,
-                    index: Vec::new(),
-                    checksums: Default::default(),
-                }],
-                erasure: ErasureInfo {
-                    algorithm: "ReedSolomon".into(),
-                    data_blocks: 1,
-                    parity_blocks: 0,
-                    index: 1,
-                    block_size: 1_048_576,
-                    distribution: vec![1],
-                    checksums: Vec::new(),
-                },
-                ..Default::default()
-            };
+                index: Vec::new(),
+                checksums: Default::default(),
+            }];
             fi.metadata.insert("etag".into(), "etag".into());
+            fi.erasure = ErasureInfo {
+                algorithm: "ReedSolomon".into(),
+                data_blocks: 1,
+                parity_blocks: 0,
+                index: 1,
+                block_size: 1_048_576,
+                distribution: vec![1],
+                checksums: Vec::new(),
+            };
             fi
         }
 
@@ -1797,8 +1788,8 @@ mod tests {
             }
             compio::runtime::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(std::fs::metadata(&old).is_err());
-        assert!(std::fs::metadata(&fresh).is_err());
+        assert!(!std::fs::metadata(&old).is_ok());
+        assert!(!std::fs::metadata(&fresh).is_ok());
 
         // Now plant a fresh dir AND a stale one, threshold=10 minutes.
         std::fs::create_dir_all(&fresh).unwrap();

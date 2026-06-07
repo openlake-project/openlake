@@ -1,10 +1,14 @@
 use hdrhistogram::Histogram;
 
+use super::mode::BenchMode;
+
 pub struct Cell {
     pub block_bytes: u64,
     pub batch: u32,
     pub threads: u32,
+    pub op: &'static str,
     pub iters: u64,
+    pub bytes: u128,
     pub elapsed_us: u128,
     pub lat: Histogram<u64>,
 }
@@ -13,18 +17,27 @@ pub struct Report {
     pub cells: Vec<Cell>,
 }
 
+pub struct ClientPreamble {
+    pub target: String,
+    pub mode: BenchMode,
+    pub duration_secs: u64,
+    pub warmup_secs: u64,
+}
+
 const RULE: &str =
     "----------------------------------------------------------------------------------------------------------------------------------------------------------------";
+
+pub fn print_preamble(_p: &ClientPreamble) {}
 
 fn fmt_block(n: u64) -> String {
     const K: u64 = 1u64 << 10;
     const M: u64 = 1u64 << 20;
     const G: u64 = 1u64 << 30;
-    if n >= G && n.is_multiple_of(G) {
+    if n >= G && n % G == 0 {
         format!("{} GiB", n / G)
-    } else if n >= M && n.is_multiple_of(M) {
+    } else if n >= M && n % M == 0 {
         format!("{} MiB", n / M)
-    } else if n >= K && n.is_multiple_of(K) {
+    } else if n >= K && n % K == 0 {
         format!("{} KiB", n / K)
     } else {
         format!("{n} B")

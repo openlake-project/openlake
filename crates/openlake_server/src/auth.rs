@@ -922,7 +922,6 @@ mod tests {
     /// Drive `aws_sigv4::http_request::sign` with `QueryParams` to
     /// produce the same signature an SDK would compute for a presigned
     /// URL. Returns the URI shape `path?X-Amz-... &X-Amz-Signature=hex`.
-    #[allow(clippy::too_many_arguments)]
     fn presign(
         method: &str,
         path_and_query: &str,

@@ -290,9 +290,9 @@ async fn list_objects_v2(
     let body = ListBucketResult {
         xmlns: S3_NS,
         name: bucket,
-        prefix,
+        prefix: prefix,
         key_count: contents.len() as u32,
-        max_keys,
+        max_keys: max_keys,
         is_truncated: truncated,
         continuation_token: query.continuation_token,
         next_continuation_token: next_token,

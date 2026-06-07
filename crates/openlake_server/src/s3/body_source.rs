@@ -234,9 +234,11 @@ impl ByteStream for ChunkedBodyStream {
         if self.finished {
             return Ok(Bytes::new());
         }
-        if self.chunk_pos >= self.chunk_buf.len() && !self.fetch_chunk().await? {
-            self.finished = true;
-            return Ok(Bytes::new());
+        if self.chunk_pos >= self.chunk_buf.len() {
+            if !self.fetch_chunk().await? {
+                self.finished = true;
+                return Ok(Bytes::new());
+            }
         }
         let avail = self.chunk_buf.len() - self.chunk_pos;
         // Slice + memcpy out of `chunk_buf: Vec<u8>` is the one

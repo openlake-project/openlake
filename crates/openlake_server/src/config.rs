@@ -374,11 +374,12 @@ impl Config {
         if cfg.transport == TransportMode::Rdma && cfg.rdma.is_none() {
             anyhow::bail!("transport = \"rdma\" requires an [rdma] config block");
         }
-        if cfg.transport == TransportMode::Rdma && !cfg!(all(feature = "rdma", target_os = "linux"))
-        {
-            anyhow::bail!(
-                "transport = \"rdma\" requires the `rdma` cargo feature on a Linux build"
-            );
+        if cfg.transport == TransportMode::Rdma {
+            if !cfg!(all(feature = "rdma", target_os = "linux")) {
+                anyhow::bail!(
+                    "transport = \"rdma\" requires the `rdma` cargo feature on a Linux build"
+                );
+            }
         }
         Ok(cfg)
     }

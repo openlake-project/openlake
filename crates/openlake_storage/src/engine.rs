@@ -392,16 +392,14 @@ impl Engine {
         let data_shards = n - parity_shards;
 
         let session_path = format!("{bucket}/{key}/{upload_id}");
-        let mut session_fi = FileInfo {
-            volume: MULTIPART_VOL.to_owned(),
-            name: session_path.clone(),
-            version_id,
-            is_latest: true,
-            mod_time_ms,
-            data_dir,
-            fresh: true,
-            ..Default::default()
-        };
+        let mut session_fi = FileInfo::default();
+        session_fi.volume = MULTIPART_VOL.to_owned();
+        session_fi.name = session_path.clone();
+        session_fi.version_id = version_id;
+        session_fi.is_latest = true;
+        session_fi.mod_time_ms = mod_time_ms;
+        session_fi.data_dir = data_dir;
+        session_fi.fresh = true;
         if let Some(ct) = content_type {
             session_fi
                 .metadata
@@ -660,24 +658,22 @@ impl Engine {
         let assembled_etag = format!("{}-{}", blake3::hash(&etag_concat).to_hex(), parts.len());
         let mod_time_ms = now_ms();
 
-        let parts_for_fi: Vec<ObjectPartInfo> = part_infos.to_vec();
-        let mut assembled_fi = FileInfo {
-            volume: bucket.to_owned(),
-            name: key.to_owned(),
-            version_id: session_fi.version_id.clone(),
-            is_latest: true,
-            size: total_actual_size,
-            mod_time_ms,
-            data_dir: data_dir.clone(),
-            fresh: true,
-            parts: parts_for_fi,
-            metadata: session_fi.metadata.clone(),
-            num_versions: 1,
-            ..Default::default()
-        };
+        let parts_for_fi: Vec<ObjectPartInfo> = part_infos.iter().cloned().collect();
+        let mut assembled_fi = FileInfo::default();
+        assembled_fi.volume = bucket.to_owned();
+        assembled_fi.name = key.to_owned();
+        assembled_fi.version_id = session_fi.version_id.clone();
+        assembled_fi.is_latest = true;
+        assembled_fi.size = total_actual_size;
+        assembled_fi.mod_time_ms = mod_time_ms;
+        assembled_fi.data_dir = data_dir.clone();
+        assembled_fi.fresh = true;
+        assembled_fi.parts = parts_for_fi;
+        assembled_fi.metadata = session_fi.metadata.clone();
         assembled_fi
             .metadata
             .insert(ETAG_META_KEY.into(), assembled_etag.clone());
+        assembled_fi.num_versions = 1;
 
         let base_erasure = default_erasure_info(data_blocks as u8, parity as u8, n as u8);
         let per_disk_fis = with_per_disk_index(&assembled_fi, &base_erasure, n);
@@ -1052,7 +1048,7 @@ impl Engine {
             });
         }
         let block_size = fi.erasure.block_size as usize;
-        if block_size == 0 || !block_size.is_multiple_of(data_shards) {
+        if block_size == 0 || block_size % data_shards != 0 {
             return Err(StorageError::InconsistentMeta {
                 bucket: bucket.into(),
                 key: key.into(),
@@ -1315,10 +1311,12 @@ impl Engine {
         });
         let results = join_all(walks).await;
         let mut streams: Vec<Vec<(String, FileInfo)>> = Vec::with_capacity(n);
-        for s in results.into_iter().flatten() {
-            streams.push(s);
+        for r in results {
+            if let Ok(s) = r {
+                streams.push(s);
+            }
         }
-        let quorum = n.div_ceil(2);
+        let quorum = (n + 1) / 2;
         if streams.len() < quorum {
             return Ok(Vec::new());
         }
@@ -1407,7 +1405,8 @@ impl Engine {
         // (e.g. permission denied) verbatim via the Io variant.
         let half = (n / 2).max(1);
         let (max_err_count, dominant_err) = dominant_error(&errs);
-        if let Some(e) = dominant_err.filter(|_| max_err_count >= half) {
+        if dominant_err.is_some() && max_err_count >= half {
+            let e = dominant_err.unwrap();
             return Err(map_object_missing(bucket, key)(e));
         }
 
@@ -1457,7 +1456,11 @@ impl Engine {
             entry.0 += 1;
             entry.1.push(i);
         }
-        let (winner_count, winner_disks) = match hash_counts.into_values().max_by_key(|(c, _)| *c) {
+        let (winner_count, winner_disks) = match hash_counts
+            .into_iter()
+            .map(|(_, v)| v)
+            .max_by_key(|(c, _)| *c)
+        {
             Some(v) => v,
             None => {
                 return Err(StorageError::InconsistentMeta {
@@ -1616,7 +1619,7 @@ fn common_parity(metas: &[Option<FileInfo>], n: usize) -> Option<u8> {
         if occ < read_quorum {
             continue;
         }
-        if best.is_none_or(|(_, prev)| occ > prev) {
+        if best.map_or(true, |(_, prev)| occ > prev) {
             best = Some((p, occ));
         }
     }
@@ -1880,7 +1883,6 @@ impl EcReadStream {
 /// `EcReadStream` ready to yield that part's bytes. Shared by single-
 /// part and multipart reads — single-shot PUTs invoke this once
 /// (parts == 1); multipart-assembled objects invoke once per part.
-#[allow(clippy::too_many_arguments)]
 async fn open_ec_part_stream(
     backends: &[Rc<dyn StorageBackend>],
     bucket: &str,
@@ -2143,7 +2145,6 @@ fn require_quorum<T>(
     Err(modal.unwrap_or_else(|| IoError::InvalidArgument("no results".into())))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_file_info(
     volume: &str,
     name: &str,
@@ -2154,18 +2155,16 @@ fn build_file_info(
     inline: Option<Vec<bytes::Bytes>>,
     parts: Vec<ObjectPartInfo>,
 ) -> FileInfo {
-    let mut fi = FileInfo {
-        volume: volume.to_owned(),
-        name: name.to_owned(),
-        size,
-        mod_time_ms,
-        is_latest: true,
-        num_versions: 1,
-        fresh: true,
-        parts,
-        data: inline,
-        ..Default::default()
-    };
+    let mut fi = FileInfo::default();
+    fi.volume = volume.to_owned();
+    fi.name = name.to_owned();
+    fi.size = size;
+    fi.mod_time_ms = mod_time_ms;
+    fi.is_latest = true;
+    fi.num_versions = 1;
+    fi.fresh = true;
+    fi.parts = parts;
+    fi.data = inline;
     fi.metadata.insert(ETAG_META_KEY.into(), etag.to_owned());
     if let Some(ct) = content_type {
         fi.metadata.insert(CONTENT_TYPE_META_KEY.into(), ct);
@@ -2203,7 +2202,7 @@ fn merge_within_set(
         let mut smallest: Option<String> = None;
         for (i, &h) in heads.iter().enumerate() {
             if let Some((name, _)) = streams[i].get(h) {
-                if smallest.as_ref().is_none_or(|cur| name < cur) {
+                if smallest.as_ref().map_or(true, |cur| name < cur) {
                     smallest = Some(name.clone());
                 }
             }
@@ -2265,7 +2264,7 @@ fn merge_across_sets(streams: Vec<Vec<ObjectInfo>>) -> Vec<ObjectInfo> {
         let mut smallest_idx: Option<usize> = None;
         for (i, &h) in heads.iter().enumerate() {
             if let Some(oi) = streams[i].get(h) {
-                if smallest_key.as_ref().is_none_or(|cur| oi.key < *cur) {
+                if smallest_key.as_ref().map_or(true, |cur| oi.key < *cur) {
                     smallest_key = Some(oi.key.clone());
                     smallest_idx = Some(i);
                 }

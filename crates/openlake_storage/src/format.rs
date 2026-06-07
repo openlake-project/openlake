@@ -30,7 +30,6 @@ pub enum FormatError {
     Io(#[from] IoError),
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn bootstrap_format(
     local: &[Rc<dyn StorageBackend>],
     peers: &[Rc<dyn StorageBackend>],
@@ -141,7 +140,9 @@ async fn write_all_disks(
             set_drive_count,
             this_disk: this,
         };
-        be.write_format(&fmt).await.map_err(FormatError::Io)?;
+        be.write_format(&fmt)
+            .await
+            .map_err(|e| FormatError::Io(e))?;
     }
     Ok(())
 }

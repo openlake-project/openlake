@@ -3,10 +3,10 @@
 //! `TlsMaterial` is a single value holding the three optional TLS handles
 //! the server needs:
 //!
-//! * `s3_acceptor`   : terminates client S3 connections.
-//! * `rpc_acceptor`  : terminates inter-node RPC connections.
-//! * `rpc_connector` : used by `RemoteBackend` when this node DIALS another
-//!   node, to verify the peer's cert against the cluster CA.
+//!   * `s3_acceptor`   — terminates client S3 connections.
+//!   * `rpc_acceptor`  — terminates inter-node RPC connections.
+//!   * `rpc_connector` — used by `RemoteBackend` when this node DIALS another
+//!                       node, to verify the peer's cert against the cluster CA.
 //!
 //! The three handles are independent because the operator can choose to
 //! enable TLS on the S3 plane, the RPC plane, both, or neither. Each is

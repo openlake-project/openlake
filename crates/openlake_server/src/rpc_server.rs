@@ -481,10 +481,10 @@ fn error_response(status: StatusCode, e: IoError) -> Response {
 /// backend on success, or an `IoError::InvalidArgument` to surface
 /// in the response body when the peer references a disk this node
 /// doesn't own.
-pub(crate) fn disk_at(
-    disks: &[Rc<dyn StorageBackend>],
+pub(crate) fn disk_at<'a>(
+    disks: &'a [Rc<dyn StorageBackend>],
     disk_idx: DiskIdx,
-) -> Result<&Rc<dyn StorageBackend>, IoError> {
+) -> Result<&'a Rc<dyn StorageBackend>, IoError> {
     disks.get(disk_idx as usize).ok_or_else(|| {
         IoError::InvalidArgument(format!(
             "disk_idx {disk_idx} out of range (this node owns {} disks)",

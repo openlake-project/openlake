@@ -125,12 +125,17 @@ pub struct FileInfo {
 /// (`xl-storage-format-v2.go`). Today we only emit `Object`; the
 /// `DeleteMarker` slot is reserved for when versioned-bucket DELETE
 /// support lands.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum VersionType {
-    #[default]
     Object = 0,
     DeleteMarker = 1,
+}
+
+impl Default for VersionType {
+    fn default() -> Self {
+        VersionType::Object
+    }
 }
 
 /// Erasure-coding contract for one (object, disk) record.
@@ -403,12 +408,17 @@ pub struct RenameDataResp {
 /// is kept for large objects and non-SIMD targets, where its tree
 /// structure parallelises across cores and the portable fallback stays
 /// usable. `None` disables verification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitrotAlgorithm {
     None,
     Blake3,
-    #[default]
     HighwayHash256,
+}
+
+impl Default for BitrotAlgorithm {
+    fn default() -> Self {
+        BitrotAlgorithm::HighwayHash256
+    }
 }
 
 /// Passed to `read_file` when the caller wants per chunk bitrot checks.
