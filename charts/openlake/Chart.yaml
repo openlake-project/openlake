@@ -3,7 +3,7 @@ name: openlake
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
-description: openlake distributed object storage with h2c TLS or RDMA DCT transport
+description: openlake high performance object storage for GPU workloads
 kubeVersion: ">=1.28.0-0"
 icon: https://openlake.dev/favicon.png
 sources:
