@@ -19,19 +19,23 @@ struct AppState {
 
 pub async fn run(args: TargetArgs) -> Result<()> {
     let mode = resolve_mode(args.config.as_deref(), args.mode)?;
-    let bind: SocketAddr = args.bind.parse()
+    let bind: SocketAddr = args
+        .bind
+        .parse()
         .with_context(|| format!("parsing --bind {}", args.bind))?;
     let buf_bytes = parse_size(&args.buf_size)
         .with_context(|| format!("parsing --buf-size {}", args.buf_size))?;
 
     match mode {
-        BenchMode::Tls  => serve_tls (bind, buf_bytes as usize).await,
+        BenchMode::Tls => serve_tls(bind, buf_bytes as usize).await,
         BenchMode::Rdma => serve_rdma(bind, buf_bytes as usize).await,
     }
 }
 
 async fn serve_tls(bind: SocketAddr, buf_bytes: usize) -> Result<()> {
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0);
     tracing::info!(target: "cpu_probe", "Detected {cores} CPU cores online");
     if let Some(ip) = primary_ip() {
         tracing::info!(target: "if_addrs", "Primary IPv4 interface resolved: {ip} (first non lo, IFF_UP, IFF_RUNNING)");
@@ -51,11 +55,12 @@ async fn serve_tls(bind: SocketAddr, buf_bytes: usize) -> Result<()> {
     let state = AppState { buf };
     let app: Router = Router::new()
         .route("/bench/echo/{len}", get(echo))
-        .route("/bench/sink",       put(sink))
+        .route("/bench/sink", put(sink))
         .with_state(state);
 
     let bind_started = std::time::Instant::now();
-    let listener = TcpListener::bind(bind).await
+    let listener = TcpListener::bind(bind)
+        .await
         .with_context(|| format!("binding {bind}"))?;
     let bind_us = bind_started.elapsed().as_micros();
     let actual = listener.local_addr().unwrap_or(bind);
@@ -65,7 +70,8 @@ async fn serve_tls(bind: SocketAddr, buf_bytes: usize) -> Result<()> {
 
     print_banner_tls(actual, buf_bytes);
 
-    cyper_axum::serve(listener, app).await
+    cyper_axum::serve(listener, app)
+        .await
         .map_err(|e| anyhow::anyhow!("h2c serve exited: {e}"))?;
     Ok(())
 }
@@ -81,7 +87,10 @@ async fn echo(
     }
     let slice = state.buf.slice(..len);
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE,   "application/octet-stream".parse().unwrap());
+    headers.insert(
+        header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
     headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
     (StatusCode::OK, headers, slice).into_response()
 }
@@ -92,13 +101,14 @@ async fn sink(body: axum::body::Body) -> impl IntoResponse {
     use futures::StreamExt;
     while let Some(chunk) = stream.next().await {
         match chunk {
-            Ok(b)  => total += b.len(),
+            Ok(b) => total += b.len(),
             Err(_) => return (StatusCode::BAD_REQUEST, "body read error").into_response(),
         }
     }
     (StatusCode::OK, total.to_string()).into_response()
 }
 
+#[allow(clippy::unnecessary_cast)]
 pub(crate) fn primary_ip() -> Option<std::net::IpAddr> {
     use std::ffi::CStr;
     use std::net::Ipv4Addr;
@@ -120,17 +130,21 @@ pub(crate) fn primary_ip() -> Option<std::net::IpAddr> {
             let flags = ifa.ifa_flags as u32;
             if family == libc::AF_INET
                 && name != "lo"
-                && (flags & libc::IFF_UP      as u32) != 0
+                && (flags & libc::IFF_UP as u32) != 0
                 && (flags & libc::IFF_RUNNING as u32) != 0
             {
                 let s = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-                result = Some(std::net::IpAddr::V4(Ipv4Addr::from(u32::from_be(s.sin_addr.s_addr))));
+                result = Some(std::net::IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                    s.sin_addr.s_addr,
+                ))));
                 break;
             }
             cur = ifa.ifa_next;
         }
     }
-    unsafe { libc::freeifaddrs(ifap); }
+    unsafe {
+        libc::freeifaddrs(ifap);
+    }
     result
 }
 

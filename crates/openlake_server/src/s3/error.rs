@@ -26,10 +26,14 @@ pub enum AppError {
 }
 
 impl From<AuthError> for AppError {
-    fn from(e: AuthError) -> Self { AppError::Auth(e) }
+    fn from(e: AuthError) -> Self {
+        AppError::Auth(e)
+    }
 }
 impl From<StorageError> for AppError {
-    fn from(e: StorageError) -> Self { AppError::Storage(e) }
+    fn from(e: StorageError) -> Self {
+        AppError::Storage(e)
+    }
 }
 
 impl IntoResponse for AppError {
@@ -41,11 +45,9 @@ impl IntoResponse for AppError {
                 (status, code.to_owned(), e.to_string())
             }
             AppError::Storage(e) => map_storage(e),
-            AppError::BadRequest(msg) => (
-                StatusCode::BAD_REQUEST,
-                "BadRequest".into(),
-                (*msg).into(),
-            ),
+            AppError::BadRequest(msg) => {
+                (StatusCode::BAD_REQUEST, "BadRequest".into(), (*msg).into())
+            }
             AppError::Malformed(msg) => (
                 StatusCode::BAD_REQUEST,
                 "MalformedRequest".into(),
@@ -69,22 +71,26 @@ impl IntoResponse for AppError {
 
 fn map_storage(e: &StorageError) -> (StatusCode, String, String) {
     let (status, code) = match e {
-        StorageError::ObjectNotFound { .. }            => (StatusCode::NOT_FOUND,            "NoSuchKey"),
-        StorageError::VersionNotFound { .. }           => (StatusCode::NOT_FOUND,            "NoSuchVersion"),
-        StorageError::BucketNotFound(_)                => (StatusCode::NOT_FOUND,            "NoSuchBucket"),
-        StorageError::BucketAlreadyExists(_)           => (StatusCode::CONFLICT,             "BucketAlreadyExists"),
-        StorageError::BucketNotEmpty(_)                => (StatusCode::CONFLICT,             "BucketNotEmpty"),
-        StorageError::InvalidBucketName(_)             => (StatusCode::BAD_REQUEST,          "InvalidBucketName"),
-        StorageError::InvalidObjectKey(_)              => (StatusCode::BAD_REQUEST,          "InvalidObjectName"),
-        StorageError::LockTimeout(_)                   => (StatusCode::SERVICE_UNAVAILABLE,  "SlowDown"),
-        StorageError::LockLost(_)                      => (StatusCode::SERVICE_UNAVAILABLE,  "SlowDown"),
+        StorageError::ObjectNotFound { .. } => (StatusCode::NOT_FOUND, "NoSuchKey"),
+        StorageError::VersionNotFound { .. } => (StatusCode::NOT_FOUND, "NoSuchVersion"),
+        StorageError::BucketNotFound(_) => (StatusCode::NOT_FOUND, "NoSuchBucket"),
+        StorageError::BucketAlreadyExists(_) => (StatusCode::CONFLICT, "BucketAlreadyExists"),
+        StorageError::BucketNotEmpty(_) => (StatusCode::CONFLICT, "BucketNotEmpty"),
+        StorageError::InvalidBucketName(_) => (StatusCode::BAD_REQUEST, "InvalidBucketName"),
+        StorageError::InvalidObjectKey(_) => (StatusCode::BAD_REQUEST, "InvalidObjectName"),
+        StorageError::LockTimeout(_) => (StatusCode::SERVICE_UNAVAILABLE, "SlowDown"),
+        StorageError::LockLost(_) => (StatusCode::SERVICE_UNAVAILABLE, "SlowDown"),
         // Both consensus failures map to 503 (transient — the cluster
         // is currently unable to satisfy this read; retry may succeed
         // once heal restores quorum). Distinct error codes so operators
         // can tell the two failure modes apart in S3 logs.
-        StorageError::InsufficientOnlineDrives { .. }  => (StatusCode::SERVICE_UNAVAILABLE,  "ServiceUnavailable"),
-        StorageError::InconsistentMeta { .. }          => (StatusCode::SERVICE_UNAVAILABLE,  "ServiceUnavailable"),
-        StorageError::Io(_)                            => (StatusCode::INTERNAL_SERVER_ERROR,"InternalError"),
+        StorageError::InsufficientOnlineDrives { .. } => {
+            (StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable")
+        }
+        StorageError::InconsistentMeta { .. } => {
+            (StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable")
+        }
+        StorageError::Io(_) => (StatusCode::INTERNAL_SERVER_ERROR, "InternalError"),
     };
     (status, code.to_owned(), e.to_string())
 }
@@ -92,13 +98,20 @@ fn map_storage(e: &StorageError) -> (StatusCode, String, String) {
 #[derive(Serialize)]
 #[serde(rename = "Error")]
 struct S3ErrorBody<'a> {
-    #[serde(rename = "Code")]     code:     &'a str,
-    #[serde(rename = "Message")]  message:  &'a str,
-    #[serde(rename = "Resource")] resource: &'a str,
+    #[serde(rename = "Code")]
+    code: &'a str,
+    #[serde(rename = "Message")]
+    message: &'a str,
+    #[serde(rename = "Resource")]
+    resource: &'a str,
 }
 
 fn encode_error_xml(code: &str, message: &str, resource: &str) -> Vec<u8> {
-    let payload = S3ErrorBody { code, message, resource };
+    let payload = S3ErrorBody {
+        code,
+        message,
+        resource,
+    };
     let mut s = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
     quick_xml::se::to_writer(&mut s, &payload).expect("xml serialize");
     s.into_bytes()

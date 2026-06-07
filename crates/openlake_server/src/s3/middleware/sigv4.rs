@@ -19,12 +19,12 @@
 //! signed body hash, and the per-chunk signature chain is validated
 //! during body decode (not in this layer).
 
+use aws_sigv4::http_request::SignableBody;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::Request;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use aws_sigv4::http_request::SignableBody;
 use http::HeaderMap;
 
 use crate::auth::{self, AuthError};
@@ -36,9 +36,9 @@ use crate::s3::state::AppState;
 // canonical request — the actual body bytes are checked separately
 // during streaming. See:
 // https://docs.aws.amazon.com/AmazonS3/latest/API/sig-v4-streaming.html
-const SHA_UNSIGNED:                   &str = "UNSIGNED-PAYLOAD";
-const SHA_STREAMING:                  &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
-const SHA_STREAMING_TRAILER:          &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
+const SHA_UNSIGNED: &str = "UNSIGNED-PAYLOAD";
+const SHA_STREAMING: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+const SHA_STREAMING_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
 const SHA_STREAMING_UNSIGNED_TRAILER: &str = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
 
 /// Pull the signed request line (method + path + query) out of the
@@ -62,11 +62,7 @@ fn path_and_query(req: &Request<Body>) -> String {
 /// borrow, and only then do we await `next.run(req)`. The captured
 /// state at the await point is just the unit-result of `run_check`,
 /// which is trivially `Send`.
-pub async fn sigv4(
-    State(state): State<AppState>,
-    req:          Request<Body>,
-    next:         Next,
-) -> Response {
+pub async fn sigv4(State(state): State<AppState>, req: Request<Body>, next: Next) -> Response {
     if let Err(e) = run_check(state.auth(), &req) {
         return AppError::Auth(e).into_response();
     }
@@ -74,10 +70,7 @@ pub async fn sigv4(
     next.run(req).await
 }
 
-fn run_check(
-    auth_state: &crate::auth::AuthState,
-    req:        &Request<Body>,
-) -> Result<(), AuthError> {
+fn run_check(auth_state: &crate::auth::AuthState, req: &Request<Body>) -> Result<(), AuthError> {
     // --- Presigned URL path --------------------------------------------
     let auth_hdr = req.headers().get(http::header::AUTHORIZATION);
     if auth_hdr.is_none() && auth::has_presigned_query_params(req.uri()) {
@@ -112,7 +105,9 @@ fn run_check(
     let request_time = auth::parse_amz_date(amz_date)?;
     auth::check_skew(request_time)?;
     if amz_date.len() < 8 || parsed.scope_date != amz_date[..8] {
-        return Err(AuthError::MalformedAuth("scope date does not match x-amz-date"));
+        return Err(AuthError::MalformedAuth(
+            "scope date does not match x-amz-date",
+        ));
     }
     let secret = auth_state
         .secret_for(&parsed.access_key)
@@ -156,9 +151,11 @@ fn signable_body_from_headers(
         // verification path in the PUT handler (per-chunk SigV4 for
         // signed variants, trailer-header checksums for the trailer
         // variants).
-        SHA_STREAMING                  => SignableBody::Precomputed(SHA_STREAMING.to_owned()),
-        SHA_STREAMING_TRAILER          => SignableBody::Precomputed(SHA_STREAMING_TRAILER.to_owned()),
-        SHA_STREAMING_UNSIGNED_TRAILER => SignableBody::Precomputed(SHA_STREAMING_UNSIGNED_TRAILER.to_owned()),
+        SHA_STREAMING => SignableBody::Precomputed(SHA_STREAMING.to_owned()),
+        SHA_STREAMING_TRAILER => SignableBody::Precomputed(SHA_STREAMING_TRAILER.to_owned()),
+        SHA_STREAMING_UNSIGNED_TRAILER => {
+            SignableBody::Precomputed(SHA_STREAMING_UNSIGNED_TRAILER.to_owned())
+        }
         hex if is_hex_sha256(hex) => SignableBody::Precomputed(raw),
         other => return Err(AuthError::UnsupportedContentSha(other.to_owned())),
     })
@@ -167,4 +164,3 @@ fn signable_body_from_headers(
 fn is_hex_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
-

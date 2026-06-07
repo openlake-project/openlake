@@ -33,17 +33,23 @@ pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
 
     Router::new()
         .route("/", get(list_buckets_unimplemented))
-        .route("/openlake/admin/v1/config", get(move || {
-            let cfg = admin_cfg.clone();
-            async move { serve_admin_config(cfg).await }
-        }))
-        .route("/{bucket}",        bucket_routes.clone())
-        .route("/{bucket}/",       bucket_routes)
-        .route("/{bucket}/{*key}", get(objects::get_object)
-                                   .head(objects::head_object)
-                                   .delete(objects::delete_object)
-                                   .put(objects::put_object)
-                                   .post(objects::post_object))
+        .route(
+            "/openlake/admin/v1/config",
+            get(move || {
+                let cfg = admin_cfg.clone();
+                async move { serve_admin_config(cfg).await }
+            }),
+        )
+        .route("/{bucket}", bucket_routes.clone())
+        .route("/{bucket}/", bucket_routes)
+        .route(
+            "/{bucket}/{*key}",
+            get(objects::get_object)
+                .head(objects::head_object)
+                .delete(objects::delete_object)
+                .put(objects::put_object)
+                .post(objects::post_object),
+        )
         .fallback(not_found)
         .layer(axum::middleware::from_fn_with_state(state.clone(), sigv4))
         .with_state(state)
@@ -56,8 +62,12 @@ async fn list_buckets_unimplemented() -> Result<axum::http::Response<axum::body:
 async fn serve_admin_config(cfg: Arc<Config>) -> axum::Json<Config> {
     let mut c = (*cfg).clone();
     c.self_id = 0;
-    if let Some(r) = c.rdma.as_mut() { r.self_node_id = 0; }
-    for cr in &mut c.credentials { cr.secret_key = "***".into(); }
+    if let Some(r) = c.rdma.as_mut() {
+        r.self_node_id = 0;
+    }
+    for cr in &mut c.credentials {
+        cr.secret_key = "***".into();
+    }
     axum::Json(c)
 }
 
@@ -78,9 +88,9 @@ impl<'a> Connected<cyper_axum::IncomingStream<'a, TlsTcpListener>> for CompioSoc
 
 pub async fn serve(
     listener: TcpListener,
-    state:    AppState,
-    tls:      Option<Rc<TlsAcceptor>>,
-    cfg:      Arc<Config>,
+    state: AppState,
+    tls: Option<Rc<TlsAcceptor>>,
+    cfg: Arc<Config>,
 ) -> Result<(), Infallible> {
     let app = build_router(state, cfg);
 

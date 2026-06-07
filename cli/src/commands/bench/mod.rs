@@ -64,7 +64,11 @@ pub struct ClientArgs {
     #[arg(long, value_enum, default_value_t = OpArg::Read)]
     pub op: OpArg,
 
-    #[arg(long, default_value = "4KiB,16KiB,32KiB,64KiB,128KiB,256KiB,512KiB,1MiB", value_delimiter = ',')]
+    #[arg(
+        long,
+        default_value = "4KiB,16KiB,32KiB,64KiB,128KiB,256KiB,512KiB,1MiB",
+        value_delimiter = ','
+    )]
     pub block_sizes: Vec<String>,
 
     #[arg(long, default_value = "1", value_delimiter = ',')]
@@ -92,12 +96,17 @@ pub async fn run(args: Args) -> Result<()> {
 
 pub fn parse_size(s: &str) -> Result<u64> {
     let s = s.trim();
-    let (num_part, mul): (&str, u64) =
-        if      let Some(p) = s.strip_suffix("GiB") { (p, 1u64 << 30) }
-        else if let Some(p) = s.strip_suffix("MiB") { (p, 1u64 << 20) }
-        else if let Some(p) = s.strip_suffix("KiB") { (p, 1u64 << 10) }
-        else if let Some(p) = s.strip_suffix("B")   { (p, 1) }
-        else { (s, 1) };
+    let (num_part, mul): (&str, u64) = if let Some(p) = s.strip_suffix("GiB") {
+        (p, 1u64 << 30)
+    } else if let Some(p) = s.strip_suffix("MiB") {
+        (p, 1u64 << 20)
+    } else if let Some(p) = s.strip_suffix("KiB") {
+        (p, 1u64 << 10)
+    } else if let Some(p) = s.strip_suffix("B") {
+        (p, 1)
+    } else {
+        (s, 1)
+    };
     let n: u64 = num_part.trim().parse()?;
     Ok(n * mul)
 }

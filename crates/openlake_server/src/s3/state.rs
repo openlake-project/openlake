@@ -37,7 +37,7 @@ pub struct AppState {
 
 struct AppStateInner {
     engine: Rc<Engine>,
-    auth:   Rc<AuthState>,
+    auth: Rc<AuthState>,
 }
 
 // SAFETY: see module-level docs — single-thread confinement.
@@ -51,6 +51,10 @@ impl AppState {
         }
     }
 
-    pub fn engine(&self) -> &Rc<Engine> { &self.inner.engine }
-    pub fn auth(&self)   -> &Rc<AuthState> { &self.inner.auth }
+    pub fn engine(&self) -> &Rc<Engine> {
+        &self.inner.engine
+    }
+    pub fn auth(&self) -> &Rc<AuthState> {
+        &self.inner.auth
+    }
 }

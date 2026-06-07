@@ -64,7 +64,7 @@ use openlake_storage::NodeAddr;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub self_id:         u16,
+    pub self_id: u16,
     /// Local disk mountpoints owned by this node, in `disk_idx`
     /// order. `data_dirs[i]` serves `disk_idx = i` on the wire. The
     /// length of this vector must equal this node's `disk_count` in
@@ -73,9 +73,9 @@ pub struct Config {
     /// `data_dir = "/path"` is also accepted via deserialization
     /// shim below for backwards compatibility.
     #[serde(deserialize_with = "deserialize_data_dirs")]
-    pub data_dirs:       Vec<PathBuf>,
-    pub s3_addr:         SocketAddr,
-    pub rpc_addr:        SocketAddr,
+    pub data_dirs: Vec<PathBuf>,
+    pub s3_addr: SocketAddr,
+    pub rpc_addr: SocketAddr,
     /// Disks per erasure set. `total_disks() % set_drive_count` must
     /// be 0, where `total_disks() = sum(node.disk_count)` across all
     /// nodes. Accept the legacy `replication` key as an alias for
@@ -98,17 +98,17 @@ pub struct Config {
     /// inside its credential scope or it is rejected with
     /// `SignatureDoesNotMatch`. The value is opaque to the storage layer —
     /// it only gates request authentication.
-    pub region:          String,
+    pub region: String,
     /// Access-key / secret-key pairs accepted by the SigV4 verifier. At
     /// least one entry is required; the server refuses to boot with an
     /// empty credential list so it cannot accidentally run open.
-    pub credentials:     Vec<Credential>,
-    pub nodes:           Vec<NodeAddr>,
+    pub credentials: Vec<Credential>,
+    pub nodes: Vec<NodeAddr>,
     /// Optional TLS for the customer-facing S3 listener. When absent
     /// the listener serves plaintext HTTP/1.1; when present it serves
     /// only HTTPS with the supplied cert chain + key.
     #[serde(default)]
-    pub s3_tls:          Option<TlsConfig>,
+    pub s3_tls: Option<TlsConfig>,
     /// TLS for the inter-node RPC plane. **Required for any cluster of
     /// `nodes.len() > 1`.** The RPC plane speaks HTTP/2 negotiated via
     /// ALPN over rustls (cyper does not expose `http2_only(true)`, so
@@ -123,38 +123,43 @@ pub struct Config {
     /// either trust everything (insecure) or trust nothing (won't
     /// connect).
     #[serde(default)]
-    pub rpc_tls:         Option<TlsConfig>,
+    pub rpc_tls: Option<TlsConfig>,
     /// Optional pool tuning. Defaults to enabled / 4 GiB / 8192-per-
     /// bucket — sane for production. Operators rarely set this.
     #[serde(default)]
-    pub memory_pool:     MemoryPoolToml,
+    pub memory_pool: MemoryPoolToml,
     #[serde(default)]
-    pub transport:       TransportMode,        // h2 (default) | rdma
+    pub transport: TransportMode, // h2 (default) | rdma
     #[serde(default)]
-    pub rdma:            Option<RdmaToml>,     // required when transport = rdma
+    pub rdma: Option<RdmaToml>, // required when transport = rdma
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportMode {
-    #[default] H2,
+    #[default]
+    H2,
     Rdma,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RdmaToml {
-    pub self_node_id:  u16,
-    pub dev_name:      String,
-    pub dc_key:        u64,
-    pub qos:           RdmaQosToml,
+    pub self_node_id: u16,
+    pub dev_name: String,
+    pub dc_key: u64,
+    pub qos: RdmaQosToml,
     #[serde(default = "default_bulk_pool_cap")]
     pub bulk_pool_cap: usize,
     #[serde(default = "default_network_timeout_secs")]
     pub network_timeout_secs: u64,
 }
 
-fn default_bulk_pool_cap() -> usize { 64 }
-fn default_network_timeout_secs() -> u64 { 10 * 60 * 60 }
+fn default_bulk_pool_cap() -> usize {
+    64
+}
+fn default_network_timeout_secs() -> u64 {
+    10 * 60 * 60
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct RdmaQosToml {
@@ -168,9 +173,9 @@ pub struct RdmaQosToml {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct MemoryPoolToml {
-    pub enabled:         bool,
+    pub enabled: bool,
     /// Total bytes the pool will hold across all buckets.
-    pub size_bytes:      usize,
+    pub size_bytes: usize,
     /// Maximum free buffers per bucket. Returns past this are dropped.
     pub bucket_capacity: usize,
 }
@@ -182,8 +187,8 @@ impl Default for MemoryPoolToml {
         // production tuning.
         let d = openlake_io::MemoryPoolConfig::default();
         Self {
-            enabled:         d.enabled,
-            size_bytes:      d.size_bytes,
+            enabled: d.enabled,
+            size_bytes: d.size_bytes,
             bucket_capacity: d.bucket_capacity,
         }
     }
@@ -192,8 +197,8 @@ impl Default for MemoryPoolToml {
 impl From<&MemoryPoolToml> for openlake_io::MemoryPoolConfig {
     fn from(t: &MemoryPoolToml) -> Self {
         Self {
-            enabled:         t.enabled,
-            size_bytes:      t.size_bytes,
+            enabled: t.enabled,
+            size_bytes: t.size_bytes,
             bucket_capacity: t.bucket_capacity,
         }
     }
@@ -211,13 +216,13 @@ pub struct Credential {
 /// CA the `RemoteBackend` connector trusts when verifying peers.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TlsConfig {
-    pub cert_path:    PathBuf,
-    pub key_path:     PathBuf,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
     /// PEM bundle of CA certs the RPC connector trusts when verifying
     /// peer node certs. Required for any cluster larger than one node;
     /// optional in single-node setups (where `RemoteBackend` is unused).
     #[serde(default)]
-    pub client_ca:    Option<PathBuf>,
+    pub client_ca: Option<PathBuf>,
 }
 
 /// Accept either a single string (`data_dir = "/path"`, legacy) or
@@ -252,6 +257,7 @@ where
 }
 
 impl Config {
+    #[allow(clippy::collapsible_if)]
     pub fn from_toml(text: &str) -> anyhow::Result<Self> {
         let cfg: Config = toml::from_str(text)?;
         if !cfg.nodes.iter().any(|n| n.id == cfg.self_id) {
@@ -279,28 +285,31 @@ impl Config {
         // boot by accident), at most `set_drive_count / 2` (the
         // `P <= D` invariant Reed-Solomon decode requires).
         if cfg.default_parity_count == 0 {
-            anyhow::bail!(
-                "default_parity_count must be >= 1; refusing to boot with no parity"
-            );
+            anyhow::bail!("default_parity_count must be >= 1; refusing to boot with no parity");
         }
         let max_parity = cfg.set_drive_count / 2;
         if cfg.default_parity_count > max_parity {
             anyhow::bail!(
                 "default_parity_count ({}) must be <= set_drive_count / 2 ({}); \
                  Reed-Solomon requires P <= D",
-                cfg.default_parity_count, max_parity,
+                cfg.default_parity_count,
+                max_parity,
             );
         }
 
         // Local-node consistency: data_dirs.len() must equal this
         // node's declared disk_count, and each path must be an
         // existing directory.
-        let self_node = cfg.nodes.iter().find(|n| n.id == cfg.self_id)
+        let self_node = cfg
+            .nodes
+            .iter()
+            .find(|n| n.id == cfg.self_id)
             .expect("self_id presence checked above");
         if cfg.data_dirs.len() != self_node.disk_count as usize {
             anyhow::bail!(
                 "data_dirs.len() ({}) must equal this node's disk_count ({})",
-                cfg.data_dirs.len(), self_node.disk_count,
+                cfg.data_dirs.len(),
+                self_node.disk_count,
             );
         }
         let mut seen: std::collections::HashSet<&PathBuf> = std::collections::HashSet::new();

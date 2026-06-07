@@ -20,14 +20,14 @@ pub fn resolve_mode(cfg_path: Option<&Path>, requested: ModeArg) -> Result<Bench
         None => false,
     };
     match (requested, rdma_in_cfg) {
-        (ModeArg::Auto, true)  => Ok(BenchMode::Rdma),
+        (ModeArg::Auto, true) => Ok(BenchMode::Rdma),
         (ModeArg::Auto, false) => Ok(BenchMode::Tls),
-        (ModeArg::Rdma, _)     => {
+        (ModeArg::Rdma, _) => {
             if cfg_path.is_some() && !rdma_in_cfg {
                 bail!("--mode rdma but supplied --config has no [rdma] section");
             }
             Ok(BenchMode::Rdma)
         }
-        (ModeArg::Tls,  _)     => Ok(BenchMode::Tls),
+        (ModeArg::Tls, _) => Ok(BenchMode::Tls),
     }
 }

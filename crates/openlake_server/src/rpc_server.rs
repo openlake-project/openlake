@@ -42,8 +42,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{post, put};
 use axum::Router;
-use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use bytes::Bytes;
 use compio::net::TcpListener;
 use compio::tls::TlsAcceptor;
@@ -98,7 +98,12 @@ pub fn bind_reuseport(addr: SocketAddr) -> std::io::Result<TcpListener> {
     socket.bind(&addr.into())?;
     socket.listen(LISTEN_BACKLOG)?;
     let std_listener: std::net::TcpListener = socket.into();
-    tracing::info!(?addr, recv_buf = TCP_BUFFER_BYTES, send_buf = TCP_BUFFER_BYTES, "rpc listener bound (SO_REUSEPORT)");
+    tracing::info!(
+        ?addr,
+        recv_buf = TCP_BUFFER_BYTES,
+        send_buf = TCP_BUFFER_BYTES,
+        "rpc listener bound (SO_REUSEPORT)"
+    );
     TcpListener::from_std(std_listener)
 }
 
@@ -118,8 +123,8 @@ pub struct RpcAppState {
 }
 
 struct RpcAppStateInner {
-    disks:     Vec<Rc<dyn StorageBackend>>,
-    locks:     Arc<LockServer>,
+    disks: Vec<Rc<dyn StorageBackend>>,
+    locks: Arc<LockServer>,
     endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
 }
 
@@ -134,10 +139,20 @@ impl RpcAppState {
         locks: Arc<LockServer>,
         endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
     ) -> Self {
-        Self { inner: Rc::new(RpcAppStateInner { disks, locks, endpoints }) }
+        Self {
+            inner: Rc::new(RpcAppStateInner {
+                disks,
+                locks,
+                endpoints,
+            }),
+        }
     }
-    fn disks(&self) -> &[Rc<dyn StorageBackend>] { &self.inner.disks }
-    fn locks(&self) -> &Arc<LockServer> { &self.inner.locks }
+    fn disks(&self) -> &[Rc<dyn StorageBackend>] {
+        &self.inner.disks
+    }
+    fn locks(&self) -> &Arc<LockServer> {
+        &self.inner.locks
+    }
     fn endpoints(&self) -> &Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>> {
         &self.inner.endpoints
     }
@@ -148,17 +163,17 @@ impl RpcAppState {
 // -----------------------------------------------------------------------------
 
 pub async fn serve(
-    listener:  TcpListener,
-    disks:     Rc<Vec<Rc<dyn StorageBackend>>>,
-    locks:     Arc<LockServer>,
-    tls:       Option<Rc<TlsAcceptor>>,
+    listener: TcpListener,
+    disks: Rc<Vec<Rc<dyn StorageBackend>>>,
+    locks: Arc<LockServer>,
+    tls: Option<Rc<TlsAcceptor>>,
     endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
 ) -> anyhow::Result<()> {
     let state = RpcAppState::new(disks.iter().cloned().collect(), locks, endpoints);
     let app: Router = Router::new()
-        .route("/v1/rpc",              post(handle_unary))
-        .route("/v1/rpc/stream-write", put (handle_stream_write))
-        .route("/v1/rpc/stream-read",  post(handle_stream_read))
+        .route("/v1/rpc", post(handle_unary))
+        .route("/v1/rpc/stream-write", put(handle_stream_write))
+        .route("/v1/rpc/stream-read", post(handle_stream_read))
         .with_state(state);
 
     match tls {
@@ -167,7 +182,8 @@ pub async fn serve(
         // this listener). cyper-axum's auto h1+h2 builder accepts
         // either side here.
         None => {
-            cyper_axum::serve(listener, app).await
+            cyper_axum::serve(listener, app)
+                .await
                 .map_err(|e| anyhow::anyhow!("rpc serve (plaintext) exited: {e}"))?;
         }
         // Multi-node deployments are TLS-only. ALPN advertises only
@@ -176,7 +192,8 @@ pub async fn serve(
         // the wire.
         Some(acceptor) => {
             let tls_listener = TlsTcpListener::new(listener, (*acceptor).clone());
-            cyper_axum::serve(tls_listener, app).await
+            cyper_axum::serve(tls_listener, app)
+                .await
                 .map_err(|e| anyhow::anyhow!("rpc serve (tls) exited: {e}"))?;
         }
     }
@@ -197,22 +214,22 @@ pub async fn serve(
 /// for the same reason `s3::state::AppState` is sound: every compio
 /// runtime is pinned to one OS thread, so the wrapper's panic-on-
 /// foreign-thread guard never fires.
-async fn handle_unary(
-    State(state): State<RpcAppState>,
-    body:         Body,
-) -> Response {
+async fn handle_unary(State(state): State<RpcAppState>, body: Body) -> Response {
     let bytes = match axum::body::to_bytes(body, UNARY_BODY_LIMIT).await {
-        Ok(b)  => b,
-        Err(e) => return error_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            IoError::Io(std::io::Error::other(e.to_string())),
-        ),
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                IoError::Io(std::io::Error::other(e.to_string())),
+            )
+        }
     };
     let req: Request = match rpc::decode(&bytes) {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
     };
-    if matches!(req,
+    if matches!(
+        req,
         Request::CreateFileStream { .. } | Request::ReadFileStream { .. }
     ) {
         return error_response(
@@ -222,7 +239,8 @@ async fn handle_unary(
     }
     let resp = SendWrapper::new(async move {
         dispatch(state.disks(), state.locks(), state.endpoints(), req).await
-    }).await;
+    })
+    .await;
     let body_bytes = rpc::encode(&resp).unwrap_or_default();
     rpc_ok(body_bytes)
 }
@@ -230,36 +248,46 @@ async fn handle_unary(
 /// `PUT /v1/rpc/stream-write` — streaming PUT.
 async fn handle_stream_write(
     State(state): State<RpcAppState>,
-    headers:      HeaderMap,
-    body:         Body,
+    headers: HeaderMap,
+    body: Body,
 ) -> Response {
     // 1. Decode the bincode `Request::CreateFileStream` envelope
     //    out of the URL-safe-base64 header.
     let env_b64 = match headers.get(HDR_RPC).and_then(|v| v.to_str().ok()) {
         Some(s) => s,
-        None    => return error_response(
-            StatusCode::BAD_REQUEST,
-            IoError::InvalidArgument(format!("missing {HDR_RPC} header")),
-        ),
+        None => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                IoError::InvalidArgument(format!("missing {HDR_RPC} header")),
+            )
+        }
     };
     let env_bytes = match URL_SAFE_NO_PAD.decode(env_b64) {
-        Ok(v)  => v,
-        Err(e) => return error_response(
-            StatusCode::BAD_REQUEST,
-            IoError::InvalidArgument(format!("decode {HDR_RPC}: {e}")),
-        ),
+        Ok(v) => v,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                IoError::InvalidArgument(format!("decode {HDR_RPC}: {e}")),
+            )
+        }
     };
     let req: Request = match rpc::decode(&env_bytes) {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
     };
     let (disk_idx, volume, path, size) = match req {
-        Request::CreateFileStream { disk_idx, volume, path, size } =>
-            (disk_idx, volume, path, size),
-        _ => return error_response(
-            StatusCode::BAD_REQUEST,
-            IoError::InvalidArgument("expected CreateFileStream envelope".into()),
-        ),
+        Request::CreateFileStream {
+            disk_idx,
+            volume,
+            path,
+            size,
+        } => (disk_idx, volume, path, size),
+        _ => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                IoError::InvalidArgument("expected CreateFileStream envelope".into()),
+            )
+        }
     };
 
     // 2. Resolve disk, open the writer, and pump body frames in.
@@ -269,49 +297,56 @@ async fn handle_stream_write(
     //    as `handle_unary` and `s3::state::AppState`.
     SendWrapper::new(async move {
         let disk = match disk_at(state.disks(), disk_idx) {
-            Ok(d)  => d.clone(),
+            Ok(d) => d.clone(),
             Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
         };
         let mut sink = match disk.create_file_writer(&volume, &path, size).await {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e),
         };
         // Always finalise even on pump failure so the local backend
         // doesn't leak partial state, but propagate the pump error
         // if the body was short.
-        let pump_result   = pump_body_into_sink(body, sink.as_mut(), size).await;
+        let pump_result = pump_body_into_sink(body, sink.as_mut(), size).await;
         let finish_result = sink.finish().await;
         match (pump_result, finish_result) {
             (Ok(()), Ok(())) => rpc_ok(rpc::encode(&RpcResponse::Ok).unwrap_or_default()),
-            (Err(e), _)      => error_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+            (Err(e), _) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e),
             (Ok(()), Err(e)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, e),
         }
-    }).await
+    })
+    .await
 }
 
 /// `POST /v1/rpc/stream-read` — streaming GET.
-async fn handle_stream_read(
-    State(state): State<RpcAppState>,
-    body:         Body,
-) -> Response {
+async fn handle_stream_read(State(state): State<RpcAppState>, body: Body) -> Response {
     let bytes = match axum::body::to_bytes(body, STREAM_REQ_LIMIT).await {
-        Ok(b)  => b,
-        Err(e) => return error_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            IoError::Io(std::io::Error::other(e.to_string())),
-        ),
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                IoError::Io(std::io::Error::other(e.to_string())),
+            )
+        }
     };
     let req: Request = match rpc::decode(&bytes) {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
     };
     let (disk_idx, volume, path, offset, length) = match req {
-        Request::ReadFileStream { disk_idx, volume, path, offset, length } =>
-            (disk_idx, volume, path, offset, length),
-        _ => return error_response(
-            StatusCode::BAD_REQUEST,
-            IoError::InvalidArgument("expected ReadFileStream envelope".into()),
-        ),
+        Request::ReadFileStream {
+            disk_idx,
+            volume,
+            path,
+            offset,
+            length,
+        } => (disk_idx, volume, path, offset, length),
+        _ => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                IoError::InvalidArgument("expected ReadFileStream envelope".into()),
+            )
+        }
     };
 
     // Disk lookup + opening the read stream both touch `Rc<dyn
@@ -320,15 +355,14 @@ async fn handle_stream_read(
     // outer handler future stays Send.
     SendWrapper::new(async move {
         let disk = match disk_at(state.disks(), disk_idx) {
-            Ok(d)  => d.clone(),
+            Ok(d) => d.clone(),
             Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
         };
-        let byte_stream: Box<dyn ByteStream> = match disk
-            .read_file_stream(&volume, &path, offset, length).await
-        {
-            Ok(s)  => s,
-            Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e),
-        };
+        let byte_stream: Box<dyn ByteStream> =
+            match disk.read_file_stream(&volume, &path, offset, length).await {
+                Ok(s) => s,
+                Err(e) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, e),
+            };
 
         // Build the response body as an axum streaming body. Same
         // SendWrapper-around-unfold pattern as
@@ -341,7 +375,9 @@ async fn handle_stream_read(
         let frames = SendWrapper::new(stream::unfold(
             (byte_stream, length, 0u64),
             move |(mut s, total, mut sent)| async move {
-                if sent >= total { return None; }
+                if sent >= total {
+                    return None;
+                }
                 match s.read().await {
                     Ok(b) if b.is_empty() => None,
                     Ok(b) => {
@@ -350,20 +386,21 @@ async fn handle_stream_read(
                         sent += frame.len() as u64;
                         Some((Ok::<Bytes, std::io::Error>(frame), (s, total, sent)))
                     }
-                    Err(e) => Some((
-                        Err(std::io::Error::other(e.to_string())),
-                        (s, total, sent),
-                    )),
+                    Err(e) => Some((Err(std::io::Error::other(e.to_string())), (s, total, sent))),
                 }
             },
         ));
 
         let body = Body::from_stream(frames);
         let mut headers = HeaderMap::new();
-        headers.insert(axum::http::header::CONTENT_LENGTH, HeaderValue::from(length));
+        headers.insert(
+            axum::http::header::CONTENT_LENGTH,
+            HeaderValue::from(length),
+        );
         headers.insert(HDR_LEN, HeaderValue::from(length));
         (StatusCode::OK, headers, body).into_response()
-    }).await
+    })
+    .await
 }
 
 // -----------------------------------------------------------------------------
@@ -376,9 +413,9 @@ async fn handle_stream_read(
 /// is sliced down to fit so we never write more bytes than the
 /// envelope declared.
 async fn pump_body_into_sink(
-    mut body:  Body,
-    sink:      &mut dyn ByteSink,
-    expected:  u64,
+    mut body: Body,
+    sink: &mut dyn ByteSink,
+    expected: u64,
 ) -> IoResult<()> {
     let mut moved = 0u64;
     while moved < expected {
@@ -386,7 +423,9 @@ async fn pump_body_into_sink(
             None => break,
             Some(Ok(frame)) => {
                 if let Ok(data) = frame.into_data() {
-                    if data.is_empty() { continue; }
+                    if data.is_empty() {
+                        continue;
+                    }
                     let take = (expected - moved).min(data.len() as u64) as usize;
                     let chunk = if take < data.len() {
                         data.slice(..take)
@@ -442,8 +481,9 @@ fn error_response(status: StatusCode, e: IoError) -> Response {
 /// backend on success, or an `IoError::InvalidArgument` to surface
 /// in the response body when the peer references a disk this node
 /// doesn't own.
+#[allow(clippy::needless_lifetimes)]
 pub(crate) fn disk_at<'a>(
-    disks:    &'a [Rc<dyn StorageBackend>],
+    disks: &'a [Rc<dyn StorageBackend>],
     disk_idx: DiskIdx,
 ) -> Result<&'a Rc<dyn StorageBackend>, IoError> {
     disks.get(disk_idx as usize).ok_or_else(|| {
@@ -458,10 +498,10 @@ pub(crate) fn disk_at<'a>(
 /// variants are handled by their dedicated routes (and rejected
 /// here as a wire-protocol bug).
 pub(crate) async fn dispatch(
-    disks:     &[Rc<dyn StorageBackend>],
-    locks:     &Arc<LockServer>,
+    disks: &[Rc<dyn StorageBackend>],
+    locks: &Arc<LockServer>,
     endpoints: &Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
-    req:       Request,
+    req: Request,
 ) -> RpcResponse {
     use openlake_io::{DeleteOptions, RenameOptions, UpdateMetadataOpts};
     use Request::*;
@@ -469,91 +509,251 @@ pub(crate) async fn dispatch(
     macro_rules! disk_or_err {
         ($idx:expr) => {
             match disk_at(disks, $idx) {
-                Ok(d)  => d,
+                Ok(d) => d,
                 Err(e) => return RpcResponse::Err(e.into()),
             }
         };
     }
 
     match req {
-        DiskInfo { disk_idx } =>
-            fold(disk_or_err!(disk_idx).disk_info().await, RpcResponse::Disk),
+        DiskInfo { disk_idx } => fold(disk_or_err!(disk_idx).disk_info().await, RpcResponse::Disk),
 
-        MakeVol      { disk_idx, volume }                         => fold_unit(disk_or_err!(disk_idx).make_vol(&volume).await),
-        StatVol      { disk_idx, volume }                         => fold(disk_or_err!(disk_idx).stat_vol(&volume).await, RpcResponse::Vol),
-        ListVols     { disk_idx }                                 => fold(disk_or_err!(disk_idx).list_vols().await, RpcResponse::Vols),
-        DeleteVol    { disk_idx, volume, force_delete }           => fold_unit(disk_or_err!(disk_idx).delete_vol(&volume, force_delete).await),
+        MakeVol { disk_idx, volume } => fold_unit(disk_or_err!(disk_idx).make_vol(&volume).await),
+        StatVol { disk_idx, volume } => fold(
+            disk_or_err!(disk_idx).stat_vol(&volume).await,
+            RpcResponse::Vol,
+        ),
+        ListVols { disk_idx } => fold(disk_or_err!(disk_idx).list_vols().await, RpcResponse::Vols),
+        DeleteVol {
+            disk_idx,
+            volume,
+            force_delete,
+        } => fold_unit(
+            disk_or_err!(disk_idx)
+                .delete_vol(&volume, force_delete)
+                .await,
+        ),
 
-        ListDir      { disk_idx, volume, dir_path, count }        => fold(disk_or_err!(disk_idx).list_dir(&volume, &dir_path, count as usize).await, RpcResponse::Strings),
-        WalkDir      { disk_idx, volume, base_dir, recursive, prefix_filter, start_after, max_keys } =>
-            fold(
-                disk_or_err!(disk_idx)
-                    .walk_dir(&volume, &base_dir, recursive, &prefix_filter,
-                              start_after.as_deref(), max_keys.map(|n| n as usize))
-                    .await,
-                RpcResponse::Walked
-            ),
+        ListDir {
+            disk_idx,
+            volume,
+            dir_path,
+            count,
+        } => fold(
+            disk_or_err!(disk_idx)
+                .list_dir(&volume, &dir_path, count as usize)
+                .await,
+            RpcResponse::Strings,
+        ),
+        WalkDir {
+            disk_idx,
+            volume,
+            base_dir,
+            recursive,
+            prefix_filter,
+            start_after,
+            max_keys,
+        } => fold(
+            disk_or_err!(disk_idx)
+                .walk_dir(
+                    &volume,
+                    &base_dir,
+                    recursive,
+                    &prefix_filter,
+                    start_after.as_deref(),
+                    max_keys.map(|n| n as usize),
+                )
+                .await,
+            RpcResponse::Walked,
+        ),
 
         // Streaming variants land on dedicated routes; if one
         // arrives here the client is misrouting and we surface a
         // clear error rather than silently doing nothing.
-        CreateFileStream { .. } | ReadFileStream { .. } =>
-            RpcResponse::Err(IoError::InvalidArgument(
-                "streaming variant routed through unary dispatch".into()
-            ).into()),
+        CreateFileStream { .. } | ReadFileStream { .. } => RpcResponse::Err(
+            IoError::InvalidArgument("streaming variant routed through unary dispatch".into())
+                .into(),
+        ),
 
-        RenameFile   { disk_idx, src_volume, src_path, dst_volume, dst_path } =>
-            fold_unit(disk_or_err!(disk_idx).rename_file(&src_volume, &src_path, &dst_volume, &dst_path).await),
-        CheckFile    { disk_idx, volume, path }                   => fold_unit(disk_or_err!(disk_idx).check_file(&volume, &path).await),
-        Delete       { disk_idx, volume, path, recursive }        => fold_unit(disk_or_err!(disk_idx).delete(&volume, &path, recursive).await),
-        DeleteBatch  { disk_idx, volume, paths, recursive }       => {
+        RenameFile {
+            disk_idx,
+            src_volume,
+            src_path,
+            dst_volume,
+            dst_path,
+        } => fold_unit(
+            disk_or_err!(disk_idx)
+                .rename_file(&src_volume, &src_path, &dst_volume, &dst_path)
+                .await,
+        ),
+        CheckFile {
+            disk_idx,
+            volume,
+            path,
+        } => fold_unit(disk_or_err!(disk_idx).check_file(&volume, &path).await),
+        Delete {
+            disk_idx,
+            volume,
+            path,
+            recursive,
+        } => fold_unit(
+            disk_or_err!(disk_idx)
+                .delete(&volume, &path, recursive)
+                .await,
+        ),
+        DeleteBatch {
+            disk_idx,
+            volume,
+            paths,
+            recursive,
+        } => {
             let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-            match disk_or_err!(disk_idx).delete_batch(&volume, &path_refs, recursive).await {
+            match disk_or_err!(disk_idx)
+                .delete_batch(&volume, &path_refs, recursive)
+                .await
+            {
                 Ok(per_key) => RpcResponse::DeleteBatchResult(
-                    per_key.into_iter().map(|r| match r {
-                        Ok(())  => None,
-                        Err(e)  => Some(e.into()),
-                    }).collect()
+                    per_key
+                        .into_iter()
+                        .map(|r| match r {
+                            Ok(()) => None,
+                            Err(e) => Some(e.into()),
+                        })
+                        .collect(),
                 ),
                 Err(e) => RpcResponse::Err(e.into()),
             }
+        }
+
+        WriteMetadata {
+            disk_idx,
+            orig_volume,
+            volume,
+            path,
+            fi,
+        } => fold_unit(
+            disk_or_err!(disk_idx)
+                .write_metadata(&orig_volume, &volume, &path, &fi)
+                .await,
+        ),
+        UpdateMetadata {
+            disk_idx,
+            volume,
+            path,
+            fi,
+            no_persistence,
+        } => fold_unit(
+            disk_or_err!(disk_idx)
+                .update_metadata(&volume, &path, &fi, &UpdateMetadataOpts { no_persistence })
+                .await,
+        ),
+        ReadVersion {
+            disk_idx,
+            orig_volume,
+            volume,
+            path,
+            version_id,
+            read_data,
+        } => fold(
+            disk_or_err!(disk_idx)
+                .read_version(
+                    &orig_volume,
+                    &volume,
+                    &path,
+                    version_id.as_deref(),
+                    read_data,
+                )
+                .await,
+            RpcResponse::File,
+        ),
+        DeleteVersion {
+            disk_idx,
+            volume,
+            path,
+            fi,
+            force_del_marker,
+            undo_write,
+        } => fold_unit(
+            disk_or_err!(disk_idx)
+                .delete_version(
+                    &volume,
+                    &path,
+                    &fi,
+                    force_del_marker,
+                    &DeleteOptions {
+                        force_del_marker,
+                        undo_write,
+                    },
+                )
+                .await,
+        ),
+        RenameData {
+            disk_idx,
+            src_volume,
+            src_path,
+            fi,
+            dst_volume,
+            dst_path,
+        } => fold(
+            disk_or_err!(disk_idx)
+                .rename_data(
+                    &src_volume,
+                    &src_path,
+                    &fi,
+                    &dst_volume,
+                    &dst_path,
+                    &RenameOptions::default(),
+                )
+                .await,
+            RpcResponse::Renamed,
+        ),
+        VerifyFile {
+            disk_idx,
+            volume,
+            path,
+            fi,
+        } => fold_unit(
+            disk_or_err!(disk_idx)
+                .verify_file(&volume, &path, &fi)
+                .await,
+        ),
+
+        ReadFormat { disk_idx } => match disk_or_err!(disk_idx).read_format().await {
+            Ok(opt) => RpcResponse::FormatOpt(opt),
+            Err(e) => RpcResponse::Err(e.into()),
         },
+        WriteFormat { disk_idx, fmt } => fold_unit(disk_or_err!(disk_idx).write_format(&fmt).await),
 
-        WriteMetadata  { disk_idx, orig_volume, volume, path, fi } =>
-            fold_unit(disk_or_err!(disk_idx).write_metadata(&orig_volume, &volume, &path, &fi).await),
-        UpdateMetadata { disk_idx, volume, path, fi, no_persistence } =>
-            fold_unit(disk_or_err!(disk_idx).update_metadata(&volume, &path, &fi, &UpdateMetadataOpts { no_persistence }).await),
-        ReadVersion    { disk_idx, orig_volume, volume, path, version_id, read_data } =>
-            fold(disk_or_err!(disk_idx).read_version(&orig_volume, &volume, &path, version_id.as_deref(), read_data).await, RpcResponse::File),
-        DeleteVersion  { disk_idx, volume, path, fi, force_del_marker, undo_write } =>
-            fold_unit(disk_or_err!(disk_idx).delete_version(&volume, &path, &fi, force_del_marker,
-                &DeleteOptions { force_del_marker, undo_write }).await),
-        RenameData     { disk_idx, src_volume, src_path, fi, dst_volume, dst_path } =>
-            fold(disk_or_err!(disk_idx).rename_data(&src_volume, &src_path, &fi, &dst_volume, &dst_path,
-                &RenameOptions::default()).await, RpcResponse::Renamed),
-        VerifyFile     { disk_idx, volume, path, fi } =>
-            fold_unit(disk_or_err!(disk_idx).verify_file(&volume, &path, &fi).await),
-
-        ReadFormat     { disk_idx } =>
-            match disk_or_err!(disk_idx).read_format().await {
-                Ok(opt) => RpcResponse::FormatOpt(opt),
-                Err(e)  => RpcResponse::Err(e.into()),
-            },
-        WriteFormat    { disk_idx, fmt } =>
-            fold_unit(disk_or_err!(disk_idx).write_format(&fmt).await),
-
-        WriteFile      { disk_idx, volume, path, bytes } =>
-            fold_unit(disk_or_err!(disk_idx).write_file(&volume, &path, bytes).await),
-        ReadFile       { disk_idx, volume, path } =>
-            match disk_or_err!(disk_idx).read_file(&volume, &path).await {
-                Ok(opt) => RpcResponse::FileBytes(opt),
-                Err(e)  => RpcResponse::Err(e.into()),
-            },
-        MakeDirAll     { disk_idx, volume, path } =>
-            fold_unit(disk_or_err!(disk_idx).make_dir_all(&volume, &path).await),
+        WriteFile {
+            disk_idx,
+            volume,
+            path,
+            bytes,
+        } => fold_unit(
+            disk_or_err!(disk_idx)
+                .write_file(&volume, &path, bytes)
+                .await,
+        ),
+        ReadFile {
+            disk_idx,
+            volume,
+            path,
+        } => match disk_or_err!(disk_idx).read_file(&volume, &path).await {
+            Ok(opt) => RpcResponse::FileBytes(opt),
+            Err(e) => RpcResponse::Err(e.into()),
+        },
+        MakeDirAll {
+            disk_idx,
+            volume,
+            path,
+        } => fold_unit(disk_or_err!(disk_idx).make_dir_all(&volume, &path).await),
 
         // Lock plane — node-scoped, no `disk_idx`.
-        LockAcquire { resource, uid, ttl_ms } => {
+        LockAcquire {
+            resource,
+            uid,
+            ttl_ms,
+        } => {
             if locks.acquire(&resource, &uid, Duration::from_millis(ttl_ms as u64)) {
                 RpcResponse::LockGranted
             } else {
@@ -572,16 +772,20 @@ pub(crate) async fn dispatch(
             }
         }
 
-        GetRdmaEndpoints => {
-            RpcResponse::RdmaEndpoints(endpoints.lock().unwrap().clone())
-        }
+        GetRdmaEndpoints => RpcResponse::RdmaEndpoints(endpoints.lock().unwrap().clone()),
     }
 }
 
 fn fold_unit(r: IoResult<()>) -> RpcResponse {
-    match r { Ok(()) => RpcResponse::Ok, Err(e) => RpcResponse::Err(e.into()) }
+    match r {
+        Ok(()) => RpcResponse::Ok,
+        Err(e) => RpcResponse::Err(e.into()),
+    }
 }
 
 fn fold<T>(r: IoResult<T>, ok: impl FnOnce(T) -> RpcResponse) -> RpcResponse {
-    match r { Ok(v) => ok(v), Err(e) => RpcResponse::Err(e.into()) }
+    match r {
+        Ok(v) => ok(v),
+        Err(e) => RpcResponse::Err(e.into()),
+    }
 }
