@@ -34,6 +34,9 @@ use crate::object::{MultipartInit, ObjectInfo, StorageClass};
 pub const DEFAULT_INLINE_THRESHOLD: usize = 128 * 1024;
 
 pub const DEFAULT_EC_PER_SHARD_BYTES: usize = 1024 * 1024;
+// O_DIRECT requires 4 KiB aligned (length, offset, buffer) on Linux.
+// Every EC shard length on the wire is a multiple of this constant.
+const _: () = assert!(DEFAULT_EC_PER_SHARD_BYTES.is_multiple_of(4096));
 
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 

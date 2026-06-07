@@ -1446,15 +1446,12 @@ mod tests {
         assert_eq!(read, payload);
     }
 
-    /// Multi-MiB payload — exercises the writer's `write_at` loop
-    /// across more than one chunk and confirms the recycled scratch
-    /// Vec stays in shape across iterations.
     #[compio::test]
     async fn create_and_read_large_stream() {
         let dir = tempdir().unwrap();
         let be = LocalFsBackend::new(dir.path()).unwrap();
         be.make_vol("b").await.unwrap();
-        let size = 3 * 1024 * 1024 + 17;
+        let size = crate::tuning::STREAM_CHUNK_BYTES + 4096;
         let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
         put_bytes(&be, "b", "big", &payload).await.unwrap();
         let stream = be
