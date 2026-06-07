@@ -2108,6 +2108,9 @@ name = "openlake_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-smithy-runtime-api",
  "axum",
  "bytes",
  "clap",
@@ -2117,6 +2120,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hdrhistogram",
+ "http 1.4.0",
  "libc",
  "openlake_io",
  "openlake_server",

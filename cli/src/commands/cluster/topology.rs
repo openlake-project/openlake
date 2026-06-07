@@ -1,14 +1,20 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use aws_credential_types::Credentials;
+use aws_sigv4::http_request::{
+    sign, PayloadChecksumKind, PercentEncodingMode, SessionTokenMode, SignableBody,
+    SignableRequest, SigningSettings, UriPathNormalizationMode,
+};
+use aws_sigv4::sign::v4;
+use aws_smithy_runtime_api::client::identity::Identity;
 use clap::Args as ClapArgs;
-use compio::net::TcpStream;
 use futures::stream::StreamExt as _;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use openlake_server::config::Config;
+use openlake_server::config::{Config, Credential};
 use openlake_storage::NodeAddr;
 
 #[derive(ClapArgs)]
@@ -48,7 +54,7 @@ pub async fn run(args: TopologyArgs) -> Result<()> {
         let secs = args
             .probe_timeout_secs
             .unwrap_or(DEFAULT_PROBE_TIMEOUT_SECS);
-        Some(probe(&cfg.nodes, Duration::from_secs(secs)).await)
+        Some(probe(&cfg, Duration::from_secs(secs)).await)
     } else {
         None
     };
@@ -62,26 +68,127 @@ pub async fn run(args: TopologyArgs) -> Result<()> {
     Ok(())
 }
 
-/// Connect to every node's RPC listener, mapping `rpc_addr -> reachable`.
+/// Path of the liveness route on the S3 listener (behind SigV4).
+const PING_PATH: &str = "/openlake/admin/v1/ping";
+
+/// Probe every node's liveness over the S3 plane, mapping `rpc_addr -> up`.
 ///
-/// A node counts as up when the TCP connect succeeds within `timeout`; any
-/// timeout or connection error counts as down. Probes run concurrently with a
-/// bounded fan-out of `MAX_CONCURRENT_PROBES`, so a large cluster stays close
-/// to one `timeout` of wall time without opening every socket at once.
-async fn probe(nodes: &[NodeAddr], timeout: Duration) -> BTreeMap<SocketAddr, bool> {
-    futures::stream::iter(nodes.iter().map(|n| {
-        let addr = n.rpc_addr;
+/// Liveness is checked against the S3 listener's `/ping` admin route, never
+/// the inter-node RPC plane: each node's S3 endpoint is derived from its
+/// `rpc_addr` IP plus the cluster-wide S3 port (`s3_port`, defaulting to this
+/// node's own `s3_addr` port). Requests are SigV4-signed with the first
+/// configured credential so the server's verifier accepts them. A node is up
+/// when `/ping` answers 2xx within `timeout`. Probes run concurrently with a
+/// bounded fan-out of `MAX_CONCURRENT_PROBES`. Results are keyed by `rpc_addr`
+/// to match how the layout table identifies nodes.
+async fn probe(cfg: &Config, timeout: Duration) -> BTreeMap<SocketAddr, bool> {
+    let s3_port = cfg.s3_port.unwrap_or_else(|| cfg.s3_addr.port());
+    let scheme = if cfg.s3_tls.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    let cred = cfg.credentials.first();
+    let client = cyper::Client::new();
+
+    futures::stream::iter(cfg.nodes.iter().map(|n| {
+        let endpoint = SocketAddr::new(n.rpc_addr.ip(), s3_port);
+        let client = client.clone();
+        let region = cfg.region.as_str();
         async move {
-            let ok = matches!(
-                compio::time::timeout(timeout, TcpStream::connect(addr)).await,
-                Ok(Ok(_))
-            );
-            (addr, ok)
+            let up = match cred {
+                Some(c) => ping_node(&client, scheme, endpoint, c, region, timeout).await,
+                None => false,
+            };
+            (n.rpc_addr, up)
         }
     }))
     .buffer_unordered(MAX_CONCURRENT_PROBES)
     .collect()
     .await
+}
+
+/// GET the signed `/ping` route on one node's S3 endpoint; `true` on 2xx.
+async fn ping_node(
+    client: &cyper::Client,
+    scheme: &str,
+    endpoint: SocketAddr,
+    cred: &Credential,
+    region: &str,
+    timeout: Duration,
+) -> bool {
+    let host = endpoint.to_string();
+    let url = format!("{scheme}://{host}{PING_PATH}");
+
+    let signed = match sign_ping(&url, &host, cred, region) {
+        Ok(headers) => headers,
+        Err(_) => return false,
+    };
+
+    let request = match client.get(&url) {
+        Ok(builder) => builder.headers(signed),
+        Err(_) => return false,
+    };
+
+    matches!(
+        compio::time::timeout(timeout, request.send()).await,
+        Ok(Ok(resp)) if resp.status().is_success()
+    )
+}
+
+/// SigV4-sign a GET of `url` and return the headers to attach to the request.
+///
+/// Mirrors the server's verifier: service `s3`, S3-specific signing settings,
+/// and an unsigned payload. The `host` header is signed but dropped from the
+/// returned set so the HTTP client supplies its own (avoiding a duplicate).
+fn sign_ping(url: &str, host: &str, cred: &Credential, region: &str) -> Result<http::HeaderMap> {
+    let identity: Identity = Credentials::new(
+        &cred.access_key,
+        &cred.secret_key,
+        None,
+        None,
+        "openlake-cli",
+    )
+    .into();
+
+    let mut settings = SigningSettings::default();
+    settings.percent_encoding_mode = PercentEncodingMode::Single;
+    settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
+    settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
+    settings.session_token_mode = SessionTokenMode::Include;
+
+    let params = v4::SigningParams::builder()
+        .identity(&identity)
+        .region(region)
+        .name("s3")
+        .time(SystemTime::now())
+        .settings(settings)
+        .build()
+        .map_err(|e| anyhow!("build signing params: {e}"))?;
+
+    let signable = SignableRequest::new(
+        "GET",
+        url,
+        std::iter::once(("host", host)),
+        SignableBody::UnsignedPayload,
+    )
+    .map_err(|e| anyhow!("build signable request: {e}"))?;
+
+    let (instructions, _signature) = sign(signable, &params.into())
+        .map_err(|e| anyhow!("sign request: {e}"))?
+        .into_parts();
+
+    let mut request = http::Request::builder()
+        .method("GET")
+        .uri(url)
+        .header(http::header::HOST, host)
+        .body(())
+        .map_err(|e| anyhow!("build request: {e}"))?;
+    instructions.apply_to_request_http1x(&mut request);
+
+    let mut headers = request.headers().clone();
+    headers.remove(http::header::HOST);
+    Ok(headers)
 }
 
 /// Render the declared cluster layout, sorted by node id.
@@ -239,6 +346,32 @@ mod tests {
         let (report, _) = render(&[node(0, "127.0.0.1:9000", 1)], None);
         assert!(!report.contains("state"));
         assert!(!report.contains("alive"));
+    }
+
+    #[test]
+    fn sign_ping_produces_sigv4_headers() {
+        let cred = Credential {
+            access_key: "AKIDEXAMPLE".into(),
+            secret_key: "secret".into(),
+        };
+        let headers = sign_ping(
+            "http://10.0.0.1:9000/openlake/admin/v1/ping",
+            "10.0.0.1:9000",
+            &cred,
+            "us-east-1",
+        )
+        .unwrap();
+
+        let auth = headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(auth.starts_with("AWS4-HMAC-SHA256"), "got: {auth}");
+        assert!(auth.contains("/us-east-1/s3/aws4_request"));
+        assert!(headers.contains_key("x-amz-date"));
+        assert!(headers.contains_key("x-amz-content-sha256"));
+        // host is signed but left to the HTTP client, not returned here.
+        assert!(!headers.contains_key(http::header::HOST));
     }
 
     #[test]

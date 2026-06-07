@@ -75,6 +75,13 @@ pub struct Config {
     #[serde(deserialize_with = "deserialize_data_dirs")]
     pub data_dirs: Vec<PathBuf>,
     pub s3_addr: SocketAddr,
+    /// Shared S3 listener port across every node in the cluster. Cluster
+    /// tooling (e.g. the CLI liveness probe) derives a node's S3 endpoint
+    /// from its `rpc_addr` IP plus this port, since the `nodes` table only
+    /// carries each peer's RPC address. Optional: defaults to this node's
+    /// own `s3_addr` port, which is the common all-nodes-same-port case.
+    #[serde(default)]
+    pub s3_port: Option<u16>,
     pub rpc_addr: SocketAddr,
     /// Disks per erasure set. `total_disks() % set_drive_count` must
     /// be 0, where `total_disks() = sum(node.disk_count)` across all
