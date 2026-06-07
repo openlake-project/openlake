@@ -24,14 +24,14 @@ pub async fn run(args: UpArgs) -> Result<()> {
         .spawn()
         .context("failed to start openlaked process")?;
 
-    println!("openlaked process started successfully");
+    println!("Openlaked process started successfully");
 
     let status = child.wait()?;
 
     if status.success() {
-        println!("cluster exited successfully");
+        println!("Cluster exited successfully");
     } else {
-        println!("cluster exited with failure: {}", status);
+        println!("Cluster exited with failure: {}", status);
     }
 
     Ok(())
