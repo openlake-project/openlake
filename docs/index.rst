@@ -1,94 +1,116 @@
 # OpenLake Documentation Structure
 
+.. contents:: On this page
+:depth: 2
+
+## Overview
+
 This document proposes the initial documentation hierarchy for OpenLake.
 
-## Documentation Goals
+The goal is to provide a structured learning path for both developers and users,
+covering development workflows, deployment, operations, and system architecture.
 
-The documentation should help both developers and users effectively build, deploy, operate, and contribute to OpenLake.
+.. note::
 
-1. Developer Guide
+This document describes the proposed documentation organization.
+Individual pages will be implemented incrementally.
 
----
+## Documentation Layout
 
-1.1 Setting Up the Environment
+Developer Guide
+^^^^^^^^^^^^^^^
 
-* Development environment setup
-* Building OpenLake from source
-* Docker-based development workflows
-* Running local services
+Resources for contributors and developers working on OpenLake.
 
-1.2 Testing
+.. list-table::
+:header-rows: 1
+:widths: 35 65
 
-* Running unit tests
-* Running integration tests
-* Benchmarking and performance testing
+* * Section
+  * Description
+* * Environment Setup
+  * Build prerequisites, Docker configuration, dependency installation, and local development workflow.
+* * Testing
+  * Unit tests, integration tests, validation suites, and benchmarks.
+* * Contributing
+  * Contribution workflow, coding guidelines, pull request process, and code review expectations.
 
-1.3 Contributing
+User Guide
+^^^^^^^^^^
 
-* Contribution workflow
-* Coding guidelines
-* Documentation guidelines
-* Pull request process
+Documentation for deploying and operating OpenLake clusters.
 
-2. User Guide
+Cluster Setup
+"""""""""""""
 
----
+.. list-table::
+:header-rows: 1
+:widths: 35 65
 
-2.1 Setting Up a Cluster
+* * Section
+  * Description
+* * Local / Development Deployment
+  * Single-node setup for evaluation, development, and testing.
+* * Multi-Node Deployment
+  * Production deployment across multiple nodes with high availability.
 
-Prerequisites and deployment instructions.
+Examples
+""""""""
 
-2.1.1 Local / Development Cluster
+.. list-table::
+:header-rows: 1
+:widths: 35 65
 
-* Single-node setup
-* Local testing workflows
+* * Section
+  * Description
+* * Example Workloads
+  * Sample workloads demonstrating OpenLake capabilities and common use cases.
+* * Integration Examples
+  * Integrations with applications, storage workflows, and third-party tools.
 
-2.1.2 Multi-Node Cluster
+Operations
+"""""""""""
 
-* Production deployment
-* Scaling considerations
-* Network requirements
+.. list-table::
+:header-rows: 1
+:widths: 35 65
 
-2.2 Examples
+* * Section
+  * Description
+* * Benchmarks
+  * Running benchmark suites and interpreting performance results.
+* * CLI Reference
+  * Command reference with options, flags, and usage examples.
+* * Cluster Operations
+  * Monitoring, troubleshooting, maintenance procedures, and health checks.
 
-Example workloads and usage patterns.
+Architecture
+^^^^^^^^^^^^
 
-2.2.1 Example Workloads
+Technical documentation describing OpenLake internals and system design.
 
-* Example 1
-* Example 2
-* Example 3
+.. list-table::
+:header-rows: 1
+:widths: 35 65
 
-2.3 Benchmarks
+* * Topic
+  * Description
+* * System Overview
+  * High-level architecture, component interactions, and data flow.
+* * Storage Engine
+  * Object storage implementation, data layout, and I/O path.
+* * RDMA Design
+  * RDMA communication architecture, protocol details, and performance considerations.
+* * Cluster Architecture
+  * Node coordination, metadata management, consensus, and fault tolerance.
 
-* Running OpenLake benchmarks
-* Interpreting benchmark results
+## Future Additions
 
-2.4 CLI Reference
+Potential future documentation sections include:
 
-* Available CLI commands
-* Usage examples
-* Configuration options
-
-2.5 Cluster Operations
-
-* Monitoring
-* Troubleshooting
-* Common operational issues
-
-3. Architecture
-
----
-
-Technical details about OpenLake internals.
-
-* System architecture overview
-* Storage engine design
-* RDMA architecture
-* Object storage concepts
-* Performance considerations
-* Architecture diagrams
-
-## Future Expansion
-
-Additional sections may include advanced deployment guides, API references, performance tuning guides, and production best practices.
+* Performance tuning and optimization guides
+* Security, authentication, and access control
+* Upgrade and migration procedures
+* Configuration reference
+* API documentation
+* Troubleshooting playbooks and runbooks
