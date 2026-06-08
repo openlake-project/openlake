@@ -14,7 +14,7 @@ pub enum Cmd {
     Disk(disk::Args),
 
     /// Fabric microbench.
-    Bench(bench::BenchArgs),
+    Bench(bench::Args),
 
     Version(version::VersionArgs),
 }
