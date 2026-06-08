@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use std::path::PathBuf;
 
-use crate::config;
+use openlake_server::config;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -12,8 +12,12 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let cfg =
-        config::load(&args.config).with_context(|| format!("load {}", args.config.display()))?;
+
+    let text = std::fs::read_to_string(&args.config)
+	.with_context(|| format!("read {}", args.config.display()))?;
+    
+    let cfg = config::Config::from_toml(&text)
+	.with_context(|| format!("prase {}", args.config.display()))?;
 
     println!("Configuration loaded successfully");
     println!("Config file: {}", args.config.display());
