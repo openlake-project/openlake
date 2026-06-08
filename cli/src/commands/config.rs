@@ -12,8 +12,8 @@ pub struct Args {
 }
 
 pub async fn run(args: Args) -> Result<()> {
-    let cfg = config::load(&args.config)
-        .with_context(|| format!("load {}", args.config.display()))?;
+    let cfg =
+        config::load(&args.config).with_context(|| format!("load {}", args.config.display()))?;
 
     println!("Configuration loaded successfully");
     println!("Config file: {}", args.config.display());
@@ -27,11 +27,7 @@ pub async fn run(args: Args) -> Result<()> {
     println!();
 
     for node in &cfg.nodes {
-        println!(
-            "[node {:>3}] {}",
-            node.id,
-            node.rpc_addr
-        );
+        println!("[node {:>3}] {}", node.id, node.rpc_addr);
     }
 
     println!();
