@@ -32,7 +32,7 @@ Distributed object storage for GPU workloads. Built on Rust on `io_uring`, OpenL
 
 ## What is OpenLake?
 
-OpenLake is an object store for AI infrastructure. Training and inference clusters spend a large fraction of their wall clock time moving bytes from storage into GPU memory, most object stores put the host CPU, the page cache, and several userspace copies directly in that path. OpenLake is a high throughput, low latency storage engine supporting low latency and cost sensitive GPU workloads.
+OpenLake is an object store for AI infrastructure. Training and inference clusters spend a large fraction of their wall clock time moving bytes from storage into GPU memory, most object stores put the host CPU, the page cache, and several userspace copies directly in that path. OpenLake is a high throughput, low latency storage engine for high throughput GPU workloads.
 
 - **`io_uring`, thread per core.** Built on the [`compio`](https://github.com/compio-rs/compio) completion based runtime. One runtime per core, pinned, no work stealing. The HTTP frontend and the storage engine run on the *same* thread, so a request never crosses a core boundary on the hot path.
  - **No kernel involvement.** GPUDirect Storage and RDMA, data moves from peer NIC into GPU VRAM zerocopy, eliminating host memory and the page cache. see [Architecture](https://github.com/openlake-project/openlake#quickstart).
