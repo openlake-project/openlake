@@ -33,6 +33,13 @@ axum        = { workspace = true }
 bytes       = { workspace = true }
 futures     = { workspace = true }
 
+# SigV4 signing for the admin /ping liveness probe. Mirrors the server's
+# verifier so signatures the CLI produces are accepted by the S3 listener.
+http                   = { workspace = true }
+aws-sigv4              = { workspace = true }
+aws-credential-types   = { workspace = true }
+aws-smithy-runtime-api = { workspace = true }
+
 hdrhistogram = "7"
 libc         = "0.2"
 

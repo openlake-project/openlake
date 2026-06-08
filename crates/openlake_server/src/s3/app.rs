@@ -25,6 +25,7 @@ use crate::s3::state::AppState;
 
 pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
     let admin_cfg = cfg.clone();
+    let ping_cfg = cfg.clone();
     let bucket_routes = put(buckets::put_bucket)
         .delete(buckets::delete_bucket)
         .head(buckets::head_bucket)
@@ -38,6 +39,13 @@ pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
             get(move || {
                 let cfg = admin_cfg.clone();
                 async move { serve_admin_config(cfg).await }
+            }),
+        )
+        .route(
+            "/openlake/admin/v1/ping",
+            get(move || {
+                let cfg = ping_cfg.clone();
+                async move { serve_admin_ping(cfg).await }
             }),
         )
         .route("/{bucket}", bucket_routes.clone())
@@ -69,6 +77,22 @@ async fn serve_admin_config(cfg: Arc<Config>) -> axum::Json<Config> {
         cr.secret_key = "***".into();
     }
     axum::Json(c)
+}
+
+/// Liveness response for `GET /openlake/admin/v1/ping`. Served on the S3
+/// listener (behind SigV4) so cluster tooling can check a node without
+/// touching the inter-node RPC plane.
+#[derive(serde::Serialize)]
+struct Ping {
+    status: &'static str,
+    node_id: u16,
+}
+
+async fn serve_admin_ping(cfg: Arc<Config>) -> axum::Json<Ping> {
+    axum::Json(Ping {
+        status: "ok",
+        node_id: cfg.self_id,
+    })
 }
 
 #[derive(Debug, Clone, Copy)]

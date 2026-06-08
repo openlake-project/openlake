@@ -16,7 +16,7 @@ pub enum ClusterCmd {
     /// Print the live state of every node listed in --config.
     Status(status::StatusArgs),
 
-    /// Print the declared node layout from --config, without probing.
+    /// Print the declared node layout from --config; --probe adds live state.
     Topology(topology::TopologyArgs),
 
     /// Bring the cluster up.
