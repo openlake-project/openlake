@@ -1,3 +1,4 @@
+use rand::Rng;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -72,6 +73,7 @@ async fn run_tls(args: &ClientArgs, block_bytes: &[u64]) -> Result<Report> {
     let op_str: &'static str = match args.op {
         OpArg::Read => "read",
         OpArg::Write => "write",
+        OpArg::Mixed => "mixed",
     };
 
     let probe_started = std::time::Instant::now();
@@ -133,7 +135,7 @@ async fn run_cell_tls(
 
     if !warmup.is_zero() {
         drive(
-            client, url_base, block, batch, threads, op, warmup, None, None, None,
+            client, url_base, block, batch, threads, op, args.mixed, warmup, None, None, None,
         )
         .await?;
     }
@@ -145,6 +147,7 @@ async fn run_cell_tls(
         batch,
         threads,
         op,
+        args.mixed,
         duration,
         Some(hist.clone()),
         Some(iters.clone()),
@@ -177,6 +180,7 @@ async fn drive(
     batch: u32,
     threads: u32,
     op: OpArg,
+    mixed: bool,
     duration: Duration,
     hist: Option<Arc<Mutex<Histogram<u64>>>>,
     iters: Option<Arc<std::sync::atomic::AtomicU64>>,
@@ -192,7 +196,7 @@ async fn drive(
         let bytes = bytes.clone();
         tasks.push(compio::runtime::spawn(async move {
             worker(
-                client, url_base, block, batch, op, deadline, hist, iters, bytes,
+                client, url_base, block, batch, op, mixed, deadline, hist, iters, bytes,
             )
             .await
         }));
@@ -211,13 +215,14 @@ async fn worker(
     block: u64,
     batch: u32,
     op: OpArg,
+    mixed: bool,
     deadline: Instant,
     hist: Option<Arc<Mutex<Histogram<u64>>>>,
     iters: Option<Arc<std::sync::atomic::AtomicU64>>,
     bytes: Option<Arc<std::sync::atomic::AtomicU64>>,
 ) -> Result<()> {
     let put_body: Option<Bytes> = match op {
-        OpArg::Write => Some(Bytes::from(vec![0u8; block as usize])),
+        OpArg::Write | OpArg::Mixed => Some(Bytes::from(vec![0u8; block as usize])),
         OpArg::Read => None,
     };
 
@@ -225,7 +230,15 @@ async fn worker(
         let start = Instant::now();
         let mut calls = Vec::with_capacity(batch as usize);
         for _ in 0..batch {
-            calls.push(one_call(&client, &url_base, block, op, put_body.clone()));
+            let actual_op = if mixed { OpArg::Mixed } else { op };
+
+            calls.push(one_call(
+                &client,
+                &url_base,
+                block,
+                actual_op,
+                put_body.clone(),
+            ));
         }
         let results = join_all(calls).await;
         let lat_us = start.elapsed().as_micros() as u64;
@@ -252,7 +265,20 @@ async fn one_call(
     op: OpArg,
     put_body: Option<Bytes>,
 ) -> Result<()> {
-    match op {
+    let actual_op = match op {
+        OpArg::Mixed => {
+            let r = rand::thread_rng().gen_range(0..100);
+
+            if r < 60 {
+                OpArg::Read
+            } else {
+                OpArg::Write
+            }
+        }
+        _ => op,
+    };
+
+    match actual_op {
         OpArg::Read => {
             let url = format!("{url_base}/bench/echo/{block}");
             let resp = client
@@ -266,7 +292,7 @@ async fn one_call(
         }
         OpArg::Write => {
             let url = format!("{url_base}/bench/sink");
-            let body = put_body.unwrap();
+            let body = put_body.clone().unwrap();
             let resp = client
                 .put(url)
                 .context("build PUT")?

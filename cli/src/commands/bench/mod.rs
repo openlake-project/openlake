@@ -21,6 +21,7 @@ pub enum ModeArg {
 pub enum OpArg {
     Read,
     Write,
+    Mixed,
 }
 
 #[derive(ClapArgs)]
@@ -63,6 +64,9 @@ pub struct ClientArgs {
 
     #[arg(long, value_enum, default_value_t = OpArg::Read)]
     pub op: OpArg,
+
+    #[arg(long)]
+    pub mixed: bool,
 
     #[arg(
         long,
