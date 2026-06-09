@@ -1,0 +1,15 @@
+[package]
+name         = "openlake_rdma"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+description  = "Verbs-style reliable connected transport substrate for the inter-node storage data plane, with a portable software RoCE backend and a Linux ibverbs device probe"
+
+[features]
+default = []
+rdma    = []
+
+[[example]]
+name = "rdma_write_bench"
+path = "examples/rdma_write_bench.rs"

@@ -2170,6 +2170,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "openlake_rdma"
+version = "0.1.0"
+
+[[package]]
 name = "openlake_server"
 version = "0.1.0"
 dependencies = [
