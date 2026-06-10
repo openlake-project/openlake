@@ -65,9 +65,6 @@ pub struct ClientArgs {
     #[arg(long, value_enum, default_value_t = OpArg::Read)]
     pub op: OpArg,
 
-    #[arg(long)]
-    pub mixed: bool,
-
     #[arg(
         long,
         default_value = "4KiB,16KiB,32KiB,64KiB,128KiB,256KiB,512KiB,1MiB",
