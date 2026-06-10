@@ -21,12 +21,7 @@ pub struct WorkRequest {
 }
 
 impl WorkRequest {
-    pub fn rdma_write(
-        wr_id: u64,
-        local: ScatterGatherEntry,
-        remote_addr: u64,
-        rkey: u32,
-    ) -> Self {
+    pub fn rdma_write(wr_id: u64, local: ScatterGatherEntry, remote_addr: u64, rkey: u32) -> Self {
         WorkRequest {
             wr_id,
             opcode: Opcode::RdmaWrite,
@@ -36,12 +31,7 @@ impl WorkRequest {
         }
     }
 
-    pub fn rdma_read(
-        wr_id: u64,
-        local: ScatterGatherEntry,
-        remote_addr: u64,
-        rkey: u32,
-    ) -> Self {
+    pub fn rdma_read(wr_id: u64, local: ScatterGatherEntry, remote_addr: u64, rkey: u32) -> Self {
         WorkRequest {
             wr_id,
             opcode: Opcode::RdmaRead,

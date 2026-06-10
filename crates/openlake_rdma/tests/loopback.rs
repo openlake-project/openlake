@@ -32,7 +32,12 @@ fn rdma_write_places_payload_in_remote_region() {
     let (mut queue_pair, completion_queue) = ready_pair(fabric);
 
     queue_pair
-        .post_send(WorkRequest::rdma_write(7, scatter_gather, remote_addr, rkey))
+        .post_send(WorkRequest::rdma_write(
+            7,
+            scatter_gather,
+            remote_addr,
+            rkey,
+        ))
         .unwrap();
 
     let completions = completion_queue.poll(8);
@@ -60,7 +65,12 @@ fn rdma_read_pulls_remote_region_into_local() {
     let (mut queue_pair, completion_queue) = ready_pair(fabric);
 
     queue_pair
-        .post_send(WorkRequest::rdma_read(11, scatter_gather, remote_addr, rkey))
+        .post_send(WorkRequest::rdma_read(
+            11,
+            scatter_gather,
+            remote_addr,
+            rkey,
+        ))
         .unwrap();
 
     let completions = completion_queue.poll(8);
@@ -83,7 +93,12 @@ fn write_without_remote_permission_reports_access_error() {
     let (mut queue_pair, completion_queue) = ready_pair(fabric);
 
     queue_pair
-        .post_send(WorkRequest::rdma_write(1, scatter_gather, remote_addr, rkey))
+        .post_send(WorkRequest::rdma_write(
+            1,
+            scatter_gather,
+            remote_addr,
+            rkey,
+        ))
         .unwrap();
 
     let completions = completion_queue.poll(8);
@@ -105,8 +120,12 @@ fn posting_before_ready_to_send_is_rejected() {
     let fabric: Arc<dyn Fabric> = Arc::new(soft);
     let mut queue_pair = QueuePair::new(fabric, completion_queue, TransportType::ReliableConnected);
 
-    let outcome =
-        queue_pair.post_send(WorkRequest::rdma_write(1, scatter_gather, remote_addr, rkey));
+    let outcome = queue_pair.post_send(WorkRequest::rdma_write(
+        1,
+        scatter_gather,
+        remote_addr,
+        rkey,
+    ));
     assert_eq!(outcome, Err(TransportError::QueuePairNotReady));
 }
 

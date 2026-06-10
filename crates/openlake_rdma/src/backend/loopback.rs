@@ -65,7 +65,11 @@ impl Fabric for SoftFabric {
             wr_id: request.wr_id,
             opcode: request.opcode,
             status,
-            byte_len: if status == CompletionStatus::Success { gather_length } else { 0 },
+            byte_len: if status == CompletionStatus::Success {
+                gather_length
+            } else {
+                0
+            },
         })
     }
 }

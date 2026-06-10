@@ -4,11 +4,24 @@ use std::fmt;
 pub enum TransportError {
     UnknownRemoteKey(u32),
     UnknownLocalKey(u32),
-    RemoteAccessViolation { rkey: u32, requested: usize, region_len: usize },
-    LocalLengthMismatch { lkey: u32, requested: usize, region_len: usize },
-    InvalidStateTransition { from: &'static str, to: &'static str },
+    RemoteAccessViolation {
+        rkey: u32,
+        requested: usize,
+        region_len: usize,
+    },
+    LocalLengthMismatch {
+        lkey: u32,
+        requested: usize,
+        region_len: usize,
+    },
+    InvalidStateTransition {
+        from: &'static str,
+        to: &'static str,
+    },
     QueuePairNotReady,
-    CompletionQueueOverrun { depth: usize },
+    CompletionQueueOverrun {
+        depth: usize,
+    },
     BackendUnavailable(&'static str),
 }
 

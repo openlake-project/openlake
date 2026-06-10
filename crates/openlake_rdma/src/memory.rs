@@ -153,7 +153,12 @@ impl MemoryRegion {
     }
 
     pub fn fill(&self, value: u8) {
-        self.buffer.bytes.lock().unwrap().iter_mut().for_each(|slot| *slot = value);
+        self.buffer
+            .bytes
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .for_each(|slot| *slot = value);
     }
 
     pub fn write_at(&self, offset: usize, data: &[u8]) -> Result<()> {
