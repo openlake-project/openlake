@@ -552,7 +552,7 @@ Every issue listed here has been reported by real contributors. If you hit
 something not covered here, please open an issue — your pain is someone else's
 future fix.
 
-``cargo``: command not found
+1. ``cargo``: command not found
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Symptom:**
@@ -584,7 +584,7 @@ Then reload the shell without closing the terminal:
 
    exec bash
 
-PATH issues — tools installed but not found
+2. PATH issues — tools installed but not found
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Symptom:** A tool you just installed (e.g. ``rustup``, a Cargo sub-command)
@@ -602,7 +602,7 @@ neither of which is in ``PATH`` for non-login shells inside Docker containers.
 
 Add the export to ``~/.bashrc`` to make it permanent across sessions.
 
-Disk space errors during build
+3. Disk space errors during build
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Symptom:**
@@ -633,7 +633,7 @@ build artefacts across multiple projects.
       cargo install cargo-cache
       cargo cache --autoclean
 
-``rustup`` installation fails or hangs
+4. ``rustup`` installation fails or hangs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Symptom:** The ``curl | sh`` command hangs indefinitely, or exits with a
@@ -662,7 +662,7 @@ TLS handshake or certificate error.
      rm -rf ~/.rustup ~/.cargo
      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-GNU toolchain vs. MSVC confusion
+5. GNU toolchain vs. MSVC confusion
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Symptom:**
@@ -710,7 +710,7 @@ compile Linux binaries or produce the ``openlaked`` daemon.
 
    Reopen your Ubuntu terminal and verify with ``which rustc`` again.
 
-Line ending issues (``\r\n`` vs. ``\n``)
+6. Line ending issues (``\r\n`` vs. ``\n``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Symptom:** Shell scripts fail with ``/bin/bash^M: bad interpreter``, or
@@ -737,7 +737,7 @@ OpenLake ships a ``.gitattributes`` that enforces ``LF`` for all tracked text
 files. As long as you clone inside WSL2 with ``core.autocrlf=false``, you
 should not encounter this issue on a fresh clone.
 
-Windows file system slowness (``/mnt/c/``)
+7. Windows file system slowness (``/mnt/c/``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Symptom:** ``cargo build`` takes 10+ minutes even for small incremental
@@ -759,7 +759,7 @@ sensitive to this because it generates thousands of small files.
 The path ``~/openlake`` (``/home/yourname/openlake``) lives entirely on the
 WSL2 virtual disk and delivers near-native Linux I/O performance.
 
-Docker memory or CPU limits causing OOM kills
+8. Docker memory or CPU limits causing OOM kills
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Symptom:**
