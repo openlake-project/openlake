@@ -1,3 +1,4 @@
+mod down;
 mod status;
 mod topology;
 mod up;
@@ -21,6 +22,9 @@ pub enum ClusterCmd {
 
     /// Bring the cluster up.
     Up(up::UpArgs),
+
+    /// Bring the cluster down.
+    Down(down::DownArgs),
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -28,5 +32,6 @@ pub async fn run(args: Args) -> Result<()> {
         ClusterCmd::Status(a) => status::run(a).await,
         ClusterCmd::Topology(a) => topology::run(a).await,
         ClusterCmd::Up(a) => up::run(a).await,
+        ClusterCmd::Down(a) => down::run(a).await,
     }
 }
