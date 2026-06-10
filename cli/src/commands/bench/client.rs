@@ -293,6 +293,7 @@ async fn one_call(
             let _drain = resp.bytes().await.context("PUT body")?;
             anyhow::ensure!(status.is_success(), "PUT non-2xx");
         }
+        OpArg::Mixed => unreachable!("Mixed should be converted to Read or Write"),
     }
     Ok(())
 }
