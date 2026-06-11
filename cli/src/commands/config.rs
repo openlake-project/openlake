@@ -1,8 +1,16 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use aws_credential_types::Credentials;
+use aws_sigv4::http_request::{
+    sign, PayloadChecksumKind, PercentEncodingMode, SessionTokenMode, SignableBody,
+    SignableRequest, SigningSettings, UriPathNormalizationMode,
+};
+use aws_sigv4::sign::v4;
+use aws_smithy_runtime_api::client::identity::Identity;
 use clap::Args as ClapArgs;
-use std::path::PathBuf;
-
 use openlake_server::config;
+use openlake_server::config::Credential;
+use std::path::PathBuf;
+use std::time::SystemTime;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -10,31 +18,93 @@ pub struct Args {
     #[arg(long)]
     pub config: PathBuf,
 }
+const CONFIG_PATH: &str = "/openlake/admin/v1/config";
 
+fn sign_config(url: &str, host: &str, cred: &Credential, region: &str) -> Result<http::HeaderMap> {
+    let identity: Identity = Credentials::new(
+        &cred.access_key,
+        &cred.secret_key,
+        None,
+        None,
+        "openlake-cli",
+    )
+    .into();
+
+    let mut settings = SigningSettings::default();
+    settings.percent_encoding_mode = PercentEncodingMode::Single;
+    settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
+    settings.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
+    settings.session_token_mode = SessionTokenMode::Include;
+
+    let params = v4::SigningParams::builder()
+        .identity(&identity)
+        .region(region)
+        .name("s3")
+        .time(SystemTime::now())
+        .settings(settings)
+        .build()
+        .map_err(|e| anyhow!("build signing params: {e}"))?;
+
+    let signable = SignableRequest::new(
+        "GET",
+        url,
+        std::iter::once(("host", host)),
+        SignableBody::UnsignedPayload,
+    )
+    .map_err(|e| anyhow!("build signable request: {e}"))?;
+
+    let (instructions, _signature) = sign(signable, &params.into())
+        .map_err(|e| anyhow!("sign request: {e}"))?
+        .into_parts();
+
+    let mut request = http::Request::builder()
+        .method("GET")
+        .uri(url)
+        .header(http::header::HOST, host)
+        .body(())
+        .map_err(|e| anyhow!("build request: {e}"))?;
+    instructions.apply_to_request_http1x(&mut request);
+
+    let mut headers = request.headers().clone();
+    headers.remove(http::header::HOST);
+    Ok(headers)
+}
 pub async fn run(args: Args) -> Result<()> {
     let text = std::fs::read_to_string(&args.config)
         .with_context(|| format!("read {}", args.config.display()))?;
 
     let cfg = config::Config::from_toml(&text)
-        .with_context(|| format!("prase {}", args.config.display()))?;
+        .with_context(|| format!("parse {}", args.config.display()))?;
+    let s3_port = cfg.s3_port.unwrap_or_else(|| cfg.s3_addr.port());
 
-    println!("Configuration loaded successfully");
-    println!("Config file: {}", args.config.display());
-    println!("Nodes configured: {}", cfg.nodes.len());
+    let node = cfg.nodes.first().context("config contains no nodes")?;
 
-    if cfg.nodes.is_empty() {
-        println!("Warning: no nodes defined in configuration.");
-        return Ok(());
-    }
+    let endpoint = std::net::SocketAddr::new(node.rpc_addr.ip(), s3_port);
 
-    println!();
+    let scheme = if cfg.s3_tls.is_some() {
+        "https"
+    } else {
+        "http"
+    };
 
-    for node in &cfg.nodes {
-        println!("[node {:>3}] {}", node.id, node.rpc_addr);
-    }
+    let host = endpoint.to_string();
 
-    println!();
-    println!("Configuration validation passed.");
+    let url = format!("{scheme}://{host}{CONFIG_PATH}");
+
+    let cred = cfg
+        .credentials
+        .first()
+        .context("no credentials configured")?;
+
+    let signed = sign_config(&url, &host, cred, &cfg.region)?;
+
+    let client = cyper::Client::new();
+
+    let response = client.get(&url)?.headers(signed).send().await?;
+
+    let body = response.text().await?;
+
+    println!("{body}");
 
     Ok(())
 }
