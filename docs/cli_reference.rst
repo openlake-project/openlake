@@ -136,6 +136,12 @@ cluster up
 
 Starts an OpenLake cluster using a configuration file.
 
+.. note::
+
+   The ``cluster up`` command is primarily intended for local single-node
+   development and testing workflows. It should not be considered a
+   production deployment mechanism for multi-node clusters.
+
 Syntax:
 
 .. code-block:: bash
