@@ -26,6 +26,7 @@ use crate::s3::state::AppState;
 pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
     let admin_cfg = cfg.clone();
     let ping_cfg = cfg.clone();
+    let disk_cfg = cfg.clone();
     let bucket_routes = put(buckets::put_bucket)
         .delete(buckets::delete_bucket)
         .head(buckets::head_bucket)
@@ -48,6 +49,13 @@ pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
                 async move { serve_admin_ping(cfg).await }
             }),
         )
+         .route(
+    "/openlake/admin/v1/disk",
+    get(move || {
+        let cfg = disk_cfg.clone();
+        async move { serve_admin_disk(cfg).await }
+    }),
+)
         .route("/{bucket}", bucket_routes.clone())
         .route("/{bucket}/", bucket_routes)
         .route(
@@ -90,6 +98,18 @@ struct Ping {
 
 async fn serve_admin_ping(cfg: Arc<Config>) -> axum::Json<Ping> {
     axum::Json(Ping {
+        status: "ok",
+        node_id: cfg.self_id,
+    })
+}
+#[derive(serde::Serialize)]
+struct DiskInfo {
+    status: &'static str,
+    node_id: u16,
+}
+
+async fn serve_admin_disk(cfg: Arc<Config>) -> axum::Json<DiskInfo> {
+    axum::Json(DiskInfo {
         status: "ok",
         node_id: cfg.self_id,
     })
