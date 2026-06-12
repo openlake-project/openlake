@@ -1,6 +1,7 @@
-pub mod up;
+  pub mod down;
 pub mod status;
 pub mod topology;
+pub mod up;
 pub mod ping;
 
 use anyhow::Result;
@@ -16,15 +17,18 @@ pub struct Args {
 pub enum ClusterCmd {
     /// Print the live state of every node listed in --config.
     Status(status::StatusArgs),
-    
+
     /// Print the declared node layout from --config.
     Topology(topology::TopologyArgs),
-    
+
     /// Bring the cluster up.
     Up(up::UpArgs),
 
     /// Ping a specific node.
     Ping(ping::PingArgs),
+
+    /// Bring the cluster down.
+    Down(down::DownArgs),
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -33,5 +37,6 @@ pub async fn run(args: Args) -> Result<()> {
         ClusterCmd::Topology(a) => topology::run(a).await,
         ClusterCmd::Up(a) => up::run(a).await,
         ClusterCmd::Ping(a) => ping::run(a).await,
+        ClusterCmd::Down(a) => down::run(a).await,
     }
 }
