@@ -1,7 +1,7 @@
-pub mod up;
+pub mod ping;
 pub mod status;
 pub mod topology;
-pub mod ping;
+pub mod up;
 
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
@@ -16,10 +16,10 @@ pub struct Args {
 pub enum ClusterCmd {
     /// Print the live state of every node listed in --config.
     Status(status::StatusArgs),
-    
+
     /// Print the declared node layout from --config.
     Topology(topology::TopologyArgs),
-    
+
     /// Bring the cluster up.
     Up(up::UpArgs),
 
