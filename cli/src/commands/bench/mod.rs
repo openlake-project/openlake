@@ -21,6 +21,7 @@ pub enum ModeArg {
 pub enum OpArg {
     Read,
     Write,
+    Mixed,
 }
 
 #[derive(ClapArgs)]

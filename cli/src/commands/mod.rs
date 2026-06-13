@@ -2,6 +2,7 @@ pub mod bench;
 pub mod cluster;
 pub mod disk;
 pub mod version;
+
 use anyhow::Result;
 use clap::Subcommand;
 
