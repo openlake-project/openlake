@@ -4,10 +4,6 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use openlake_io::alloc::PooledBuffer;
 
-/// Process-wide in-memory blob store keyed by string. Shared across
-/// every runtime, so a value written on one core is visible on all
-/// others. Cloning is an `Arc` bump. `DashMap` shards the keyspace
-/// internally, so reads and writes on different keys do not contend.
 #[derive(Clone, Default)]
 pub struct InMemoryStore {
     inner: Arc<DashMap<String, Bytes>>,
