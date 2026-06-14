@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 
 use crate::config::Config;
 use crate::s3::error::{not_found, AppError};
-use crate::s3::handlers::{buckets, objects};
+use crate::s3::handlers::{buckets, in_memory_store, objects};
 use crate::s3::listener::TlsTcpListener;
 use crate::s3::middleware::sigv4::sigv4;
 use crate::s3::state::AppState;
@@ -60,6 +60,10 @@ pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
         )
         .fallback(not_found)
         .layer(axum::middleware::from_fn_with_state(state.clone(), sigv4))
+        .route(
+            "/openlake/cache/{*key}",
+            get(in_memory_store::get).put(in_memory_store::put),
+        )
         .with_state(state)
 }
 

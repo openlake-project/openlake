@@ -27,6 +27,7 @@ http-body-util     = { workspace = true }
 nix                = { workspace = true }
 socket2            = { workspace = true }
 bytes              = { workspace = true }
+dashmap            = { workspace = true }
 serde              = { workspace = true }
 toml               = { workspace = true }
 httparse           = { workspace = true }

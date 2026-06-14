@@ -31,6 +31,7 @@
 
 mod auth;
 mod config;
+mod in_memory_store;
 mod lock_server;
 #[cfg(all(feature = "rdma", target_os = "linux"))]
 mod rdma_server;
@@ -142,6 +143,8 @@ fn main() -> anyhow::Result<()> {
         }),
     );
 
+    let store = in_memory_store::InMemoryStore::new();
+
     let mut handles = Vec::with_capacity(num_runtimes);
     for (runtime_id, cpu) in cpus.into_iter().enumerate() {
         let cfg = cfg.clone();
@@ -150,6 +153,7 @@ fn main() -> anyhow::Result<()> {
         let tls = tls.clone();
         let bootstrap_id = bootstrap_id.clone();
         let endpoint_registry = endpoint_registry.clone();
+        let store = store.clone();
         let handle = thread::Builder::new()
             .name(format!("runtime-{runtime_id}"))
             .spawn(move || {
@@ -164,6 +168,7 @@ fn main() -> anyhow::Result<()> {
                         tls,
                         bootstrap_id,
                         endpoint_registry,
+                        store,
                     ))
                 })();
                 if let Err(e) = &result {
@@ -290,6 +295,7 @@ fn create_runtime() -> anyhow::Result<compio::runtime::Runtime> {
 ///
 /// Returns only when both accept loops exit (normally: never, until
 /// shutdown).
+#[allow(clippy::too_many_arguments)]
 async fn run_runtime(
     runtime_id: usize,
     #[cfg_attr(
@@ -302,6 +308,7 @@ async fn run_runtime(
     tls: TlsMaterial,
     bootstrap_id: Arc<OnceLock<Uuid>>,
     endpoint_registry: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+    store: in_memory_store::InMemoryStore,
 ) -> anyhow::Result<()> {
     // Extract the three TLS handles from the shared material.
     //
@@ -648,7 +655,7 @@ async fn run_runtime(
     let s3_acceptor = s3_acceptor.clone();
     let s3_cfg = cfg.clone();
     let s3_task = compio::runtime::spawn(async move {
-        let app_state = s3::state::AppState::new(s3_engine, s3_auth);
+        let app_state = s3::state::AppState::new(s3_engine, s3_auth, store);
         let _ = s3::app::serve(s3_listener, app_state, s3_acceptor, s3_cfg).await;
         tracing::error!(runtime_id, "s3 serve loop exited");
     });
