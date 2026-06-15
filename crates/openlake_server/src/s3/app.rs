@@ -49,13 +49,13 @@ pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
                 async move { serve_admin_ping(cfg).await }
             }),
         )
-         .route(
-    "/openlake/admin/v1/disk",
-    get(move || {
-        let cfg = disk_cfg.clone();
-        async move { serve_admin_disk(cfg).await }
-    }),
-)
+        .route(
+            "/openlake/admin/v1/disk",
+            get(move || {
+                let cfg = disk_cfg.clone();
+                async move { serve_admin_disk(cfg).await }
+            }),
+        )
         .route("/{bucket}", bucket_routes.clone())
         .route("/{bucket}/", bucket_routes)
         .route(
