@@ -1,27 +1,30 @@
-=====================
+===================
 Spark with OpenLake
-=====================
+===================
 
 Overview
 ========
 
-This guide demonstrates how Apache Spark can read and write data
-using OpenLake through its S3-compatible API.
+This guide demonstrates how Apache Spark can write data to and read data
+from OpenLake using its S3-compatible API.
+
+The workflow validates that OpenLake can be used as a storage backend
+for Spark jobs while preserving normal S3A-based access patterns.
 
 Prerequisites
 =============
 
 Before running Spark jobs:
 
-* OpenLake cluster is running.
-* An S3 bucket exists.
-* Access key and secret key are configured.
+* An OpenLake cluster is running.
+* A bucket has been created.
 * Spark is configured with the Hadoop S3A connector.
+* Valid OpenLake access credentials are available.
 
-Verify OpenLake
-===============
+Verifying OpenLake
+==================
 
-Check cluster status:
+Confirm that the cluster is healthy before running Spark jobs.
 
 .. code-block:: bash
 
@@ -33,10 +36,12 @@ Example output:
 
    [node   0] up    127.0.0.1:9100 (2 disks)
 
+   openlake cluster status: 1 / 1 nodes alive
+
 Creating a Bucket
 =================
 
-Create a bucket using a compatible S3 client:
+Create a bucket using an S3-compatible client.
 
 .. code-block:: bash
 
@@ -58,9 +63,17 @@ Configure Spark to use OpenLake as the S3 endpoint.
 Writing Data
 ============
 
-Example Spark code:
+Example Spark job that writes data to OpenLake.
 
 .. code-block:: python
+
+   data = [
+       (1, "alice"),
+       (2, "bob"),
+       (3, "charlie"),
+   ]
+
+   df = spark.createDataFrame(data, ["id", "name"])
 
    df.write.mode("overwrite").parquet(
        "s3a://demo/sample-data"
@@ -69,7 +82,7 @@ Example Spark code:
 Reading Data
 ============
 
-Example Spark code:
+Read the same dataset back from OpenLake.
 
 .. code-block:: python
 
@@ -79,29 +92,53 @@ Example Spark code:
 
    df.show()
 
-Checksum Requirements
-=====================
+Expected output:
 
-OpenLake validates uploads using the
+.. code-block:: text
+
+   +---+-------+
+   | id|   name|
+   +---+-------+
+   |  1|  alice|
+   |  2|    bob|
+   |  3|charlie|
+   +---+-------+
+
+Validating the Workflow
+=======================
+
+A successful workflow consists of:
+
+#. Writing data from Spark to OpenLake.
+#. Reading the same data back from OpenLake.
+#. Verifying that the expected records are returned.
+
+This demonstrates end-to-end interoperability between Spark and
+OpenLake through the S3-compatible interface.
+
+Checksum Validation
+===================
+
+OpenLake validates object uploads using the
 ``x-amz-checksum-blake3`` checksum.
 
-Clients that automatically send unsupported checksum
-algorithms may be rejected.
-
-Compatible clients such as Warp can be used for
-validation and benchmarking.
+Clients that support BLAKE3 checksums can use them to verify object
+integrity during uploads.
 
 Benchmarking with Warp
 ======================
 
-Example benchmark:
+Warp can be used to benchmark uploads and validate client interaction
+with OpenLake.
+
+Example:
 
 .. code-block:: bash
 
-   ./warp put \
+   warp put \
      --host 127.0.0.1:9000 \
      --access-key openlakeadmin \
      --secret-key openlakesecret
 
-This can be used to verify upload behavior and benchmark
-OpenLake deployments.
+The benchmark reports throughput, latency, and upload success rates,
+which can be used when evaluating OpenLake deployments.
