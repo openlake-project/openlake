@@ -1,6 +1,7 @@
 pub mod bench;
 pub mod cluster;
 pub mod disk;
+pub mod node;
 pub mod version;
 
 use anyhow::Result;
@@ -16,11 +17,14 @@ pub enum Cmd {
     /// Fabric microbench.
     Bench(bench::Args),
 
+    /// Node inspection commands.
+    Node(node::Args),
     Version(version::VersionArgs),
 }
 
 pub async fn dispatch(cmd: Cmd) -> Result<()> {
     match cmd {
+        Cmd::Node(a) => node::run(a).await,
         Cmd::Cluster(a) => cluster::run(a).await,
         Cmd::Disk(a) => disk::run(a).await,
         Cmd::Bench(a) => bench::run(a).await,
