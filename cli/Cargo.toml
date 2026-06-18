@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-rdma    = ["openlake_io/rdma", "dep:rdma-mummy-sys", "dep:serde_json"]
+rdma    = ["openlake_io/rdma", "dep:rdma-mummy-sys"]
 
 [dependencies]
 openlake_io      = { path = "../crates/openlake_io" }
@@ -46,4 +46,4 @@ rand         = "0.8"
 
 # RDMA bench path. Only pulled in when --features rdma.
 rdma-mummy-sys = { version = "0.2", optional = true }
-serde_json     = { workspace = true, optional = true }
+serde_json     = { workspace = true}
