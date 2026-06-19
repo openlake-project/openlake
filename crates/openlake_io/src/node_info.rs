@@ -28,12 +28,4 @@ impl NodeInfo {
     pub fn total_free(&self) -> u64 {
         self.disks.iter().map(|d| d.free).sum()
     }
-
-    /// Count healthy disks
-    pub fn healthy_disks(&self) -> usize {
-        self.disks
-            .iter()
-            .filter(|d| matches!(d.status, crate::types::DiskStatus::Healthy))
-            .count()
-    }
 }
