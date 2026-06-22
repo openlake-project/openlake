@@ -249,6 +249,13 @@ pub enum Response {
     Err(WireError),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlabMeta {
+    pub slab_base: u64,
+    pub rkey: u32,
+    pub slot_bytes: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalRdmaEndpoint {
     pub runtime_id: u16,
@@ -256,6 +263,8 @@ pub struct LocalRdmaEndpoint {
     pub gid: [u8; 16],
     pub dc_key: u64,
     pub lid: u16,
+    #[serde(default)]
+    pub kv_slab: Option<SlabMeta>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

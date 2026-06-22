@@ -28,6 +28,7 @@ impl ClusterRoutingTable {
                 dct_num: ep.dct_num,
                 dc_key: ep.dc_key,
                 lid: ep.lid,
+                kv_slab: ep.kv_slab,
             },
         );
     }

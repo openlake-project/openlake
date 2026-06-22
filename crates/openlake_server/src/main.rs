@@ -32,6 +32,8 @@
 mod auth;
 mod config;
 mod in_memory_store;
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+mod kv_slab;
 mod lock_server;
 #[cfg(all(feature = "rdma", target_os = "linux"))]
 mod rdma_server;
@@ -399,27 +401,47 @@ async fn run_runtime(
     }
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
-    let rdma_pending: Option<(openlake_io::rdma::RdmaSetup, openlake_io::rdma::RdmaConfig)> =
-        match cfg.transport {
-            config::TransportMode::Rdma => {
-                let rdma_cfg = build_rdma_config(
-                    cfg.rdma.as_ref().expect("rdma transport requires [rdma]"),
-                    runtime_id as u16,
-                    cfg.nodes.len() as u16,
-                );
-                let (setup, my_endpoint) = openlake_io::rdma::RdmaNode::start_local(&rdma_cfg)
-                    .context("rdma start_local")?;
-                {
-                    let mut reg = endpoint_registry.lock().unwrap();
-                    reg.endpoints.push(my_endpoint);
-                    if reg.endpoints.len() >= num_runtimes {
-                        reg.complete = true;
-                    }
-                }
-                Some((setup, rdma_cfg))
+    let rdma_pending: Option<(
+        openlake_io::rdma::RdmaSetup,
+        openlake_io::rdma::RdmaConfig,
+        Option<Rc<kv_slab::KvSlab>>,
+    )> = match cfg.transport {
+        config::TransportMode::Rdma => {
+            let rdma_cfg = build_rdma_config(
+                cfg.rdma.as_ref().expect("rdma transport requires [rdma]"),
+                runtime_id as u16,
+                cfg.nodes.len() as u16,
+            );
+            let (setup, mut my_endpoint) =
+                openlake_io::rdma::RdmaNode::start_local(&rdma_cfg).context("rdma start_local")?;
+            let kv_slab = cfg
+                .kv_slab
+                .map(|s| -> anyhow::Result<Rc<kv_slab::KvSlab>> {
+                    Ok(Rc::new(kv_slab::KvSlab::new(
+                        setup.dev.clone(),
+                        s.slot_bytes,
+                        s.slot_count,
+                    )?))
+                })
+                .transpose()?;
+            if let Some(ref slab) = kv_slab {
+                my_endpoint.kv_slab = Some(openlake_io::rpc::SlabMeta {
+                    slab_base: slab.slab_base(),
+                    rkey: slab.rkey(),
+                    slot_bytes: slab.slot_bytes(),
+                });
             }
-            config::TransportMode::H2 => None,
-        };
+            {
+                let mut reg = endpoint_registry.lock().unwrap();
+                reg.endpoints.push(my_endpoint);
+                if reg.endpoints.len() >= num_runtimes {
+                    reg.complete = true;
+                }
+            }
+            Some((setup, rdma_cfg, kv_slab))
+        }
+        config::TransportMode::H2 => None,
+    };
 
     let auth_state = Rc::new(auth::AuthState::new(cfg.region.clone(), &cfg.credentials));
 
@@ -462,8 +484,11 @@ async fn run_runtime(
     });
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
+    let mut rdma_kv_slab: Option<Rc<kv_slab::KvSlab>> = None;
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
     let rdma_node: Option<Rc<openlake_io::rdma::RdmaNode>> =
-        if let Some((setup, rdma_cfg)) = rdma_pending {
+        if let Some((setup, rdma_cfg, kv_slab)) = rdma_pending {
+            rdma_kv_slab = kv_slab;
             let mut routing = openlake_io::rdma::ClusterRoutingTable::new(cfg.self_id);
             loop {
                 let reg = endpoint_registry.lock().unwrap();
@@ -559,8 +584,10 @@ async fn run_runtime(
             let local_disks = Rc::new(local_fs_disks.clone());
             let locks = lock_server.clone();
             let endpoints = endpoint_registry.clone();
+            let kv_slab = rdma_kv_slab.clone();
             Some(compio::runtime::spawn(async move {
-                if let Err(e) = rdma_server::serve(node, disks, local_disks, locks, endpoints).await
+                if let Err(e) =
+                    rdma_server::serve(node, disks, local_disks, locks, endpoints, kv_slab).await
                 {
                     tracing::error!(runtime_id, "rdma serve error: {e:#}");
                 }

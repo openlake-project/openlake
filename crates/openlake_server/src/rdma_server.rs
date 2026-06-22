@@ -11,6 +11,7 @@ use openlake_io::rpc::{decode, encode, Response, WireError};
 use openlake_io::stream::ByteStream;
 use openlake_io::{LocalFsBackend, StorageBackend};
 
+use crate::kv_slab::KvSlab;
 use crate::lock_server::LockServer;
 use crate::rpc_server::{disk_at, dispatch};
 
@@ -20,6 +21,7 @@ pub async fn serve(
     local_disks: Rc<Vec<Rc<LocalFsBackend>>>,
     locks: Arc<LockServer>,
     endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+    kv_slab: Option<Rc<KvSlab>>,
 ) -> anyhow::Result<()> {
     let mut rx = node
         .pump
@@ -39,8 +41,9 @@ pub async fn serve(
             let ld = local_disks.clone();
             let l = locks.clone();
             let ep = endpoints.clone();
+            let slab = kv_slab.clone();
             compio::runtime::spawn(async move {
-                handle(&n, &d, &ld, &l, &ep, &bytes).await;
+                handle(&n, &d, &ld, &l, &ep, slab.as_ref(), &bytes).await;
             })
             .detach();
         }
@@ -56,6 +59,7 @@ async fn handle(
     local_disks: &Rc<Vec<Rc<LocalFsBackend>>>,
     locks: &Arc<LockServer>,
     endpoints: &Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+    kv_slab: Option<&Rc<KvSlab>>,
     bytes: &[u8],
 ) {
     let env: Envelope = match decode(bytes) {
@@ -147,6 +151,40 @@ async fn handle(
                     )
                     .await
                 }
+                RdmaRequest::BatchReserve { count } => match kv_slab {
+                    Some(s) => RdmaResponse::BatchReserved {
+                        slots: s.reserve(count),
+                    },
+                    None => RdmaResponse::Generic(Response::Err(WireError::Other(
+                        "kv_slab disabled".into(),
+                    ))),
+                },
+                RdmaRequest::BatchCommit { entries } => match kv_slab {
+                    Some(s) => {
+                        s.commit(&entries);
+                        RdmaResponse::BatchCommitted
+                    }
+                    None => RdmaResponse::Generic(Response::Err(WireError::Other(
+                        "kv_slab disabled".into(),
+                    ))),
+                },
+                RdmaRequest::BatchLookup { key_hashes } => match kv_slab {
+                    Some(s) => RdmaResponse::BatchLookedUp {
+                        slots: s.lookup(&key_hashes),
+                    },
+                    None => RdmaResponse::Generic(Response::Err(WireError::Other(
+                        "kv_slab disabled".into(),
+                    ))),
+                },
+                RdmaRequest::BatchRelease { slot_idxs } => match kv_slab {
+                    Some(s) => {
+                        s.release(&slot_idxs);
+                        RdmaResponse::BatchReleased
+                    }
+                    None => RdmaResponse::Generic(Response::Err(WireError::Other(
+                        "kv_slab disabled".into(),
+                    ))),
+                },
                 RdmaRequest::Generic(req) => {
                     RdmaResponse::Generic(dispatch(disks, locks, endpoints, req).await)
                 }

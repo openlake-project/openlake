@@ -11,6 +11,12 @@ pub struct RdmaRemoteBuf {
     pub rkey: u32,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct CommitEntry {
+    pub slot_idx: u32,
+    pub key_hash: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum RdmaRequest {
     ReadFileChunk {
@@ -29,6 +35,18 @@ pub enum RdmaRequest {
         length: u32,
         source: RdmaRemoteBuf,
     },
+    BatchReserve {
+        count: u32,
+    },
+    BatchCommit {
+        entries: Vec<CommitEntry>,
+    },
+    BatchLookup {
+        key_hashes: Vec<u64>,
+    },
+    BatchRelease {
+        slot_idxs: Vec<u32>,
+    },
     Generic(Request),
 }
 
@@ -36,6 +54,10 @@ pub enum RdmaRequest {
 pub enum RdmaResponse {
     ChunkReady { bytes_written: u32 },
     ChunkWritten { bytes_written: u32 },
+    BatchReserved { slots: Vec<u32> },
+    BatchCommitted,
+    BatchLookedUp { slots: Vec<Option<u32>> },
+    BatchReleased,
     Generic(Response),
 }
 

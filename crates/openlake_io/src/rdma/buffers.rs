@@ -109,6 +109,9 @@ impl Buffers {
     pub fn lkey(&self) -> u32 {
         self.mem.lkey()
     }
+    pub fn rkey(&self) -> u32 {
+        self.mem.rkey()
+    }
     pub fn buf_size(&self) -> usize {
         self.buf_size
     }

@@ -10,6 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use axum::extract::connect_info::Connected;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, put};
 use axum::Router;
 use compio::net::TcpListener;
@@ -64,6 +65,7 @@ pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
             "/openlake/cache/{*key}",
             get(in_memory_store::get).put(in_memory_store::put),
         )
+        .layer(DefaultBodyLimit::disable())
         .with_state(state)
 }
 
