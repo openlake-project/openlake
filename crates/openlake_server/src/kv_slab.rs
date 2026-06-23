@@ -40,6 +40,9 @@ impl SlotPool {
     }
 
     pub fn commit(&mut self, slot_idx: u32, key_hash: u64) {
+        if self.by_slot.get(&slot_idx) == Some(&key_hash) {
+            return;
+        }
         if let Some(prev_hash) = self.by_slot.insert(slot_idx, key_hash) {
             self.by_hash.remove(&prev_hash);
         }
@@ -59,8 +62,8 @@ impl SlotPool {
     pub fn release(&mut self, slot_idx: u32) {
         if let Some(hash) = self.by_slot.remove(&slot_idx) {
             self.by_hash.remove(&hash);
+            self.free.push_back(slot_idx);
         }
-        self.free.push_back(slot_idx);
     }
 
     #[cfg(test)]
@@ -193,6 +196,33 @@ mod tests {
         let drained = pool.reserve(3);
         assert!(drained.contains(&slots[0]));
         assert_eq!(drained.len(), 3);
+    }
+
+    #[test]
+    fn release_of_unowned_slot_is_noop() {
+        let mut pool = SlotPool::new(4);
+        let slots = pool.reserve(2);
+        pool.commit(slots[0], 1);
+        pool.release(slots[1]);
+        pool.release(slots[1]);
+        pool.release(99);
+        let drained = pool.reserve(4);
+        assert!(!drained.contains(&99));
+        assert_eq!(drained.len(), 3);
+    }
+
+    #[test]
+    fn idempotent_commit_does_not_grow_fifo() {
+        let mut pool = SlotPool::new(4);
+        let s = pool.reserve(1)[0];
+        pool.commit(s, 0xAA);
+        let fifo_after_first = pool.fifo.len();
+        pool.commit(s, 0xAA);
+        pool.commit(s, 0xAA);
+        pool.commit(s, 0xAA);
+        assert_eq!(pool.fifo.len(), fifo_after_first);
+        assert_eq!(pool.lookup(0xAA), Some(s));
+        assert_eq!(pool.occupancy(), 1);
     }
 
     #[test]
