@@ -1,0 +1,23 @@
+self_id = 0
+data_dirs = ["/app/data/d0", "/app/data/d1", "/app/data/d2", "/app/data/d3"]
+s3_addr = "0.0.0.0:9000"
+rpc_addr = "0.0.0.0:9100"
+set_drive_count = 4
+default_parity_count = 1
+region = "us-east-1"
+
+[[credentials]]
+access_key = "admin"
+secret_key = "password"
+
+[[nodes]]
+id = 0
+rpc_addr = "127.0.0.1:9100"
+disk_count = 4
+
+[memory_pool]
+enabled = false
+size_bytes = 1048576
+bucket_capacity = 16
+
+transport = "h2"

@@ -68,9 +68,6 @@ To spin up an OpenLake (MinIO) cluster using Docker, run the following command:
 Once running, open your browser and go to ``http://localhost:9001``.
 Login with username ``admin`` and password ``password``.
 
-.. image:: ../../assets/openlake-dashboard.png
-   :alt: OpenLake Dashboard
-
 Create a bucket named ``flink-checkpoints`` from the web console
 (used in the next steps as the checkpoint destination).
 
@@ -114,9 +111,6 @@ Then spin up a TaskManager (required to actually execute job tasks
    a29e01243c8f64225f855e3b2c77ab2e59ac909ac5f1f61d775a8e095a46ccce
 
 Access the Flink Dashboard at ``http://localhost:8081``.
-
-.. image:: ../../assets/flink-dashboard.png
-   :alt: Flink Dashboard
 
 Input and Output Examples
 --------------------------
@@ -193,22 +187,19 @@ Checking job status (input):
    19.06.2026 09:31:33 : d5909bc7099e807eb80dc843375ebf07 : State machine job (RUNNING)
    --------------------------------------------------------------
 
+The checkpoint folder (``chk-XXX``) updates with a new ``_metadata``
+file (roughly 10-11 KB) on every checkpoint cycle, confirming that
+Flink is writing checkpoint data directly to OpenLake.
+
 Screenshots
 -----------
 
 **OpenLake bucket showing checkpoint folder:**
 
-.. image:: ../../assets/flink-checkpoints-bucket.png
-   :alt: Flink checkpoints bucket in OpenLake
 
 **Checkpoint metadata file confirming a successful write:**
 
-.. image:: ../../assets/checkpoint-metadata.png
-   :alt: Checkpoint metadata file
 
-The checkpoint folder (``chk-XXX``) updates with a new ``_metadata``
-file (roughly 10-11 KB) on every checkpoint cycle, confirming that
-Flink is writing checkpoint data directly to OpenLake.
 
 Logs
 ----

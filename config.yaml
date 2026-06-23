@@ -1,0 +1,37 @@
+﻿jobmanager:
+  rpc:
+    address: flink-jobmanager
+    port: 6123
+  memory:
+    process:
+      size: 1600m
+  bind-host: 0.0.0.0
+  execution:
+    failover-strategy: region
+taskmanager:
+  bind-host: 0.0.0.0
+  numberOfTaskSlots: 1
+  memory:
+    process:
+      size: 1728m
+query:
+  server:
+    port: '6125'
+s3:
+  access-key: admin
+  secret-key: password
+  endpoint: http://openlake:9000
+  path.style.access: true
+fs:
+  s3a:
+    signing-algorithm: AWS4SignerType
+    endpoint: http://openlake:9000
+    region: us-east-1
+    access-key: admin
+    secret-key: password
+    path.style.access: true
+    connection.ssl.enabled: false
+env:
+  java:
+    opts:
+      all: --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
