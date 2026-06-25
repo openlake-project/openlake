@@ -350,6 +350,44 @@ impl LocalFsBackend {
         crate::purge::try_enqueue(slot);
         Ok(())
     }
+
+    async fn delete_object_scoped(&self, volume: &str, path: &str) -> IoResult<()> {
+        self.require_vol(volume).await?;
+        let object_dir = self.file_path(volume, path);
+        let meta = object_dir.join(META_FILENAME);
+        let raw = match compio::fs::read(&meta).await {
+            Ok(b) => bytes::Bytes::from(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(IoError::FileNotFound {
+                    volume: volume.to_owned(),
+                    path: path.to_owned(),
+                });
+            }
+            Err(e) => return Err(IoError::Io(e)),
+        };
+        if let Ok(records) = xl_meta::decode_all(raw) {
+            for rec in &records {
+                if !rec.data_dir.is_empty() {
+                    let _ = self.move_to_trash(&object_dir.join(&rec.data_dir)).await;
+                }
+            }
+        }
+        compio::fs::remove_file(&meta).await.map_err(IoError::Io)?;
+        let _ = compio::fs::remove_file(&object_dir.join(META_BACKUP_FILENAME)).await;
+
+        let vol_root = self.vol_path(volume);
+        let mut cur = object_dir;
+        while cur.starts_with(&vol_root) && cur != vol_root {
+            if compio::fs::remove_dir(&cur).await.is_err() {
+                break;
+            }
+            match cur.parent() {
+                Some(p) => cur = p.to_path_buf(),
+                None => break,
+            }
+        }
+        Ok(())
+    }
 }
 
 fn map_open_err(e: std::io::Error, volume: &str, path: &str) -> IoError {
@@ -819,12 +857,12 @@ impl StorageBackend for LocalFsBackend {
         &self,
         volume: &str,
         paths: &[&str],
-        recursive: bool,
+        _recursive: bool,
     ) -> IoResult<Vec<IoResult<()>>> {
         self.require_vol(volume).await?;
         let futs = paths.iter().map(|p| {
             let path = (*p).to_owned();
-            async move { self.delete(volume, &path, recursive).await }
+            async move { self.delete_object_scoped(volume, &path).await }
         });
         let results = futures_util::future::join_all(futs).await;
         Ok(results)
@@ -953,7 +991,7 @@ impl StorageBackend for LocalFsBackend {
         opts: &DeleteOptions,
     ) -> IoResult<()> {
         if !opts.undo_write {
-            return self.delete(volume, path, true).await;
+            return self.delete_object_scoped(volume, path).await;
         }
 
         let object_dir = self.file_path(volume, path);

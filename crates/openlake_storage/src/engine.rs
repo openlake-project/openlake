@@ -1150,7 +1150,16 @@ impl Engine {
             let b = b.clone();
             let bucket = bucket.to_owned();
             let key = key.to_owned();
-            async move { b.delete(&bucket, &key, true).await }
+            async move {
+                b.delete_version(
+                    &bucket,
+                    &key,
+                    &FileInfo::default(),
+                    false,
+                    &DeleteOptions::default(),
+                )
+                .await
+            }
         }))
         .await;
 
@@ -2912,6 +2921,37 @@ mod tests {
         e.delete("buk", "k").await.unwrap();
         assert!(matches!(
             e.get("buk", "k").await,
+            Err(StorageError::ObjectNotFound { .. })
+        ));
+    }
+
+    #[compio::test]
+    async fn delete_marker_key_preserves_nested_object() {
+        let (_dirs, e) = eng(3, 3).await;
+        put_bytes(&e, "buk", "p/", Vec::new(), None).await;
+        put_bytes(&e, "buk", "p/obj", b"body".to_vec(), None).await;
+
+        e.delete("buk", "p/").await.unwrap();
+
+        let (info, _) = e.get("buk", "p/obj").await.expect("nested object survives marker delete");
+        assert_eq!(info.size, 4);
+        assert!(matches!(
+            e.get("buk", "p/").await,
+            Err(StorageError::ObjectNotFound { .. })
+        ));
+    }
+
+    #[compio::test]
+    async fn delete_nested_object_preserves_marker() {
+        let (_dirs, e) = eng(3, 3).await;
+        put_bytes(&e, "buk", "p/", Vec::new(), None).await;
+        put_bytes(&e, "buk", "p/obj", b"body".to_vec(), None).await;
+
+        e.delete("buk", "p/obj").await.unwrap();
+
+        assert!(e.get("buk", "p/").await.is_ok());
+        assert!(matches!(
+            e.get("buk", "p/obj").await,
             Err(StorageError::ObjectNotFound { .. })
         ));
     }
