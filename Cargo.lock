@@ -2248,6 +2248,7 @@ dependencies = [
  "compio",
  "futures-util",
  "hex",
+ "md-5",
  "openlake_io",
  "reed-solomon-simd",
  "regex",

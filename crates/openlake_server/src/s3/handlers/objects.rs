@@ -669,16 +669,8 @@ fn is_hex_sha256(s: &str) -> bool {
 fn extract_blake3_claim(headers: &HeaderMap) -> Result<Option<String>, AppError> {
     let mut blake3: Option<String> = None;
     for (name, value) in headers.iter() {
-        let n = name.as_str();
-        if !n.starts_with("x-amz-checksum-") {
+        if name.as_str() != "x-amz-checksum-blake3" {
             continue;
-        }
-        if n != "x-amz-checksum-blake3" {
-            return Err(AppError::BadRequest(
-                "only x-amz-checksum-blake3 is supported; other checksum \
-                 algorithms (sha256/sha1/crc32/crc32c/crc64nvme/md5/sha512/\
-                 xxhash*) are rejected — use blake3",
-            ));
         }
         let hex = value
             .to_str()
