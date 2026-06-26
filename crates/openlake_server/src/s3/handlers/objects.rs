@@ -565,13 +565,6 @@ pub async fn put_object(
         .and_then(|s| s.parse().ok())
         .ok_or(AppError::Malformed("missing or invalid Content-Length"))?;
 
-    if parts.headers.contains_key("content-md5") {
-        return Err(AppError::BadRequest(
-            "Content-MD5 is not supported; use x-amz-checksum-blake3",
-        ));
-    }
-    let client_blake3 = extract_blake3_claim(&parts.headers)?;
-
     let (engine_size, mut body_src) =
         build_body_source(&state, &parts.headers, body, content_length)?;
 
@@ -593,19 +586,6 @@ pub async fn put_object(
     })
     .await?;
 
-    if let Some(claimed) = client_blake3 {
-        if claimed != info.etag.to_ascii_lowercase() {
-            let engine = state.engine().clone();
-            let bucket = info.bucket.clone();
-            let key = info.key.clone();
-            let _ = SendWrapper::new(async move { engine.delete(&bucket, &key).await }).await;
-            return Err(AppError::BadRequest(
-                "x-amz-checksum-blake3 mismatch: client-supplied digest does \
-                 not match server-computed BLAKE3 of the body",
-            ));
-        }
-    }
-
     let mut headers = HeaderMap::new();
     if let Ok(v) = HeaderValue::from_str(&format!("\"{}\"", info.etag)) {
         headers.insert(ETAG, v);
@@ -614,9 +594,6 @@ pub async fn put_object(
         if let Ok(v) = HeaderValue::from_str(&info.version_id) {
             headers.insert("x-amz-version-id", v);
         }
-    }
-    if let Ok(v) = HeaderValue::from_str(&info.etag) {
-        headers.insert("x-amz-checksum-blake3", v);
     }
     Ok((StatusCode::OK, headers).into_response())
 }
@@ -664,21 +641,6 @@ async fn upload_part_handler(
 
 fn is_hex_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn extract_blake3_claim(headers: &HeaderMap) -> Result<Option<String>, AppError> {
-    let mut blake3: Option<String> = None;
-    for (name, value) in headers.iter() {
-        if name.as_str() != "x-amz-checksum-blake3" {
-            continue;
-        }
-        let hex = value
-            .to_str()
-            .map_err(|_| AppError::BadRequest("x-amz-checksum-blake3 not ASCII"))?
-            .to_ascii_lowercase();
-        blake3 = Some(hex);
-    }
-    Ok(blake3)
 }
 
 fn io_error_msg(e: openlake_io::IoError) -> &'static str {
@@ -877,9 +839,6 @@ fn range_not_satisfiable(info: &ObjectInfo) -> Response {
 fn populate_object_headers(headers: &mut HeaderMap, info: &ObjectInfo) {
     if let Ok(v) = HeaderValue::from_str(&format!("\"{}\"", info.etag)) {
         headers.insert(ETAG, v);
-    }
-    if let Ok(v) = HeaderValue::from_str(&info.etag) {
-        headers.insert("x-amz-checksum-blake3", v);
     }
     if let Ok(v) = HeaderValue::from_str(&http_date_rfc1123(info.modified_ms)) {
         headers.insert(LAST_MODIFIED, v);
