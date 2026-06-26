@@ -17,13 +17,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::future::join_all;
+use md5::Digest as _;
 use openlake_io::stream::ByteSink;
 use openlake_io::{
     BucketMeta, ByteStream, DeleteOptions, ErasureInfo, FileInfo, IoError, ObjectPartInfo,
     PooledBuffer, RenameDataResp, StorageBackend, UpdateMetadataOpts, VersioningStatus,
     MULTIPART_VOL, STAGING_VOL, SYSTEM_BUCKET,
 };
-use md5::Digest as _;
 use uuid::Uuid;
 
 use crate::cluster::{ClusterConfig, DiskAddr, NodeId};
@@ -662,7 +662,11 @@ impl Engine {
             etag_concat.extend_from_slice(&raw);
         }
 
-        let assembled_etag = format!("{}-{}", hex::encode(md5::Md5::digest(&etag_concat)), parts.len());
+        let assembled_etag = format!(
+            "{}-{}",
+            hex::encode(md5::Md5::digest(&etag_concat)),
+            parts.len()
+        );
         let mod_time_ms = now_ms();
 
         let parts_for_fi: Vec<ObjectPartInfo> = part_infos.iter().cloned().collect();
@@ -2934,7 +2938,10 @@ mod tests {
 
         e.delete("buk", "p/").await.unwrap();
 
-        let (info, _) = e.get("buk", "p/obj").await.expect("nested object survives marker delete");
+        let (info, _) = e
+            .get("buk", "p/obj")
+            .await
+            .expect("nested object survives marker delete");
         assert_eq!(info.size, 4);
         assert!(matches!(
             e.get("buk", "p/").await,
