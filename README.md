@@ -99,4 +99,4 @@ Please check out [Contributing to OpenLake](https://github.com/openlake-project/
 
 ## License
 
-[Apache License 2.0](LICENSE).
+[Apache 2.0](LICENSE).

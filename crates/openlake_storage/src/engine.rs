@@ -23,6 +23,7 @@ use openlake_io::{
     PooledBuffer, RenameDataResp, StorageBackend, UpdateMetadataOpts, VersioningStatus,
     MULTIPART_VOL, STAGING_VOL, SYSTEM_BUCKET,
 };
+use md5::Digest as _;
 use uuid::Uuid;
 
 use crate::cluster::{ClusterConfig, DiskAddr, NodeId};
@@ -661,7 +662,7 @@ impl Engine {
             etag_concat.extend_from_slice(&raw);
         }
 
-        let assembled_etag = format!("{}-{}", blake3::hash(&etag_concat).to_hex(), parts.len());
+        let assembled_etag = format!("{}-{}", hex::encode(md5::Md5::digest(&etag_concat)), parts.len());
         let mod_time_ms = now_ms();
 
         let parts_for_fi: Vec<ObjectPartInfo> = part_infos.iter().cloned().collect();
@@ -1150,7 +1151,16 @@ impl Engine {
             let b = b.clone();
             let bucket = bucket.to_owned();
             let key = key.to_owned();
-            async move { b.delete(&bucket, &key, true).await }
+            async move {
+                b.delete_version(
+                    &bucket,
+                    &key,
+                    &FileInfo::default(),
+                    false,
+                    &DeleteOptions::default(),
+                )
+                .await
+            }
         }))
         .await;
 
@@ -2342,7 +2352,7 @@ async fn drain_inline_payload(
     payload_len: usize,
 ) -> openlake_io::IoResult<(Vec<bytes::Bytes>, String)> {
     let mut frames: Vec<bytes::Bytes> = Vec::new();
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = md5::Md5::new();
     let mut total = 0usize;
     while total < payload_len {
         let chunk = src.read().await?;
@@ -2362,7 +2372,7 @@ async fn drain_inline_payload(
         total += frame.len();
         frames.push(frame);
     }
-    Ok((frames, hasher.finalize().to_hex().to_string()))
+    Ok((frames, hex::encode(hasher.finalize())))
 }
 
 /// Cluster-wide nominal EC contract recorded on every persisted
@@ -2556,7 +2566,7 @@ async fn encode_and_write_stripes(
 ) -> openlake_io::IoResult<(String, Vec<Box<dyn ByteSink>>)> {
     let mut slots: Vec<Option<Box<dyn ByteSink>>> = sinks.into_iter().map(Some).collect();
     let n = slots.len();
-    let mut etag_hasher = blake3::Hasher::new();
+    let mut etag_hasher = md5::Md5::new();
     let mut consumed: u64 = 0;
     let mut carry: bytes::Bytes = bytes::Bytes::new();
 
@@ -2632,7 +2642,7 @@ async fn encode_and_write_stripes(
         .into_iter()
         .map(|s| s.expect("every sink slot must hold a sink at end of stripe loop"))
         .collect();
-    Ok((etag_hasher.finalize().to_hex().to_string(), sinks))
+    Ok((hex::encode(etag_hasher.finalize()), sinks))
 }
 
 /// Drive every sink's `finish` in parallel — flush + read the
@@ -2912,6 +2922,37 @@ mod tests {
         e.delete("buk", "k").await.unwrap();
         assert!(matches!(
             e.get("buk", "k").await,
+            Err(StorageError::ObjectNotFound { .. })
+        ));
+    }
+
+    #[compio::test]
+    async fn delete_marker_key_preserves_nested_object() {
+        let (_dirs, e) = eng(3, 3).await;
+        put_bytes(&e, "buk", "p/", Vec::new(), None).await;
+        put_bytes(&e, "buk", "p/obj", b"body".to_vec(), None).await;
+
+        e.delete("buk", "p/").await.unwrap();
+
+        let (info, _) = e.get("buk", "p/obj").await.expect("nested object survives marker delete");
+        assert_eq!(info.size, 4);
+        assert!(matches!(
+            e.get("buk", "p/").await,
+            Err(StorageError::ObjectNotFound { .. })
+        ));
+    }
+
+    #[compio::test]
+    async fn delete_nested_object_preserves_marker() {
+        let (_dirs, e) = eng(3, 3).await;
+        put_bytes(&e, "buk", "p/", Vec::new(), None).await;
+        put_bytes(&e, "buk", "p/obj", b"body".to_vec(), None).await;
+
+        e.delete("buk", "p/obj").await.unwrap();
+
+        assert!(e.get("buk", "p/").await.is_ok());
+        assert!(matches!(
+            e.get("buk", "p/obj").await,
             Err(StorageError::ObjectNotFound { .. })
         ));
     }

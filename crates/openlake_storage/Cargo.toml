@@ -8,6 +8,7 @@ license.workspace      = true
 [dependencies]
 openlake_io = { path = "../openlake_io" }
 
+md-5         = "0.10"
 compio       = { workspace = true }
 futures-util = { workspace = true }
 bytes        = { workspace = true }

@@ -611,6 +611,7 @@ fn s3_signing_settings() -> SigningSettings {
     s.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
     s.uri_path_normalization_mode = UriPathNormalizationMode::Disabled;
     s.session_token_mode = SessionTokenMode::Include;
+    s.excluded_headers = Some(Vec::new());
     s
 }
 

@@ -31,6 +31,9 @@
 
 mod auth;
 mod config;
+mod in_memory_store;
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+mod kv_slab;
 mod lock_server;
 #[cfg(all(feature = "rdma", target_os = "linux"))]
 mod rdma_server;
@@ -142,6 +145,8 @@ fn main() -> anyhow::Result<()> {
         }),
     );
 
+    let store = in_memory_store::InMemoryStore::new();
+
     let mut handles = Vec::with_capacity(num_runtimes);
     for (runtime_id, cpu) in cpus.into_iter().enumerate() {
         let cfg = cfg.clone();
@@ -150,6 +155,7 @@ fn main() -> anyhow::Result<()> {
         let tls = tls.clone();
         let bootstrap_id = bootstrap_id.clone();
         let endpoint_registry = endpoint_registry.clone();
+        let store = store.clone();
         let handle = thread::Builder::new()
             .name(format!("runtime-{runtime_id}"))
             .spawn(move || {
@@ -164,6 +170,7 @@ fn main() -> anyhow::Result<()> {
                         tls,
                         bootstrap_id,
                         endpoint_registry,
+                        store,
                     ))
                 })();
                 if let Err(e) = &result {
@@ -290,6 +297,7 @@ fn create_runtime() -> anyhow::Result<compio::runtime::Runtime> {
 ///
 /// Returns only when both accept loops exit (normally: never, until
 /// shutdown).
+#[allow(clippy::too_many_arguments)]
 async fn run_runtime(
     runtime_id: usize,
     #[cfg_attr(
@@ -302,6 +310,7 @@ async fn run_runtime(
     tls: TlsMaterial,
     bootstrap_id: Arc<OnceLock<Uuid>>,
     endpoint_registry: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+    store: in_memory_store::InMemoryStore,
 ) -> anyhow::Result<()> {
     // Extract the three TLS handles from the shared material.
     //
@@ -392,27 +401,47 @@ async fn run_runtime(
     }
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
-    let rdma_pending: Option<(openlake_io::rdma::RdmaSetup, openlake_io::rdma::RdmaConfig)> =
-        match cfg.transport {
-            config::TransportMode::Rdma => {
-                let rdma_cfg = build_rdma_config(
-                    cfg.rdma.as_ref().expect("rdma transport requires [rdma]"),
-                    runtime_id as u16,
-                    cfg.nodes.len() as u16,
-                );
-                let (setup, my_endpoint) = openlake_io::rdma::RdmaNode::start_local(&rdma_cfg)
-                    .context("rdma start_local")?;
-                {
-                    let mut reg = endpoint_registry.lock().unwrap();
-                    reg.endpoints.push(my_endpoint);
-                    if reg.endpoints.len() >= num_runtimes {
-                        reg.complete = true;
-                    }
-                }
-                Some((setup, rdma_cfg))
+    let rdma_pending: Option<(
+        openlake_io::rdma::RdmaSetup,
+        openlake_io::rdma::RdmaConfig,
+        Option<Rc<kv_slab::KvSlab>>,
+    )> = match cfg.transport {
+        config::TransportMode::Rdma => {
+            let rdma_cfg = build_rdma_config(
+                cfg.rdma.as_ref().expect("rdma transport requires [rdma]"),
+                runtime_id as u16,
+                cfg.nodes.len() as u16,
+            );
+            let (setup, mut my_endpoint) =
+                openlake_io::rdma::RdmaNode::start_local(&rdma_cfg).context("rdma start_local")?;
+            let kv_slab = cfg
+                .kv_slab
+                .map(|s| -> anyhow::Result<Rc<kv_slab::KvSlab>> {
+                    Ok(Rc::new(kv_slab::KvSlab::new(
+                        setup.dev.clone(),
+                        s.slot_bytes,
+                        s.slot_count,
+                    )?))
+                })
+                .transpose()?;
+            if let Some(ref slab) = kv_slab {
+                my_endpoint.kv_slab = Some(openlake_io::rpc::SlabMeta {
+                    slab_base: slab.slab_base(),
+                    rkey: slab.rkey(),
+                    slot_bytes: slab.slot_bytes(),
+                });
             }
-            config::TransportMode::H2 => None,
-        };
+            {
+                let mut reg = endpoint_registry.lock().unwrap();
+                reg.endpoints.push(my_endpoint);
+                if reg.endpoints.len() >= num_runtimes {
+                    reg.complete = true;
+                }
+            }
+            Some((setup, rdma_cfg, kv_slab))
+        }
+        config::TransportMode::H2 => None,
+    };
 
     let auth_state = Rc::new(auth::AuthState::new(cfg.region.clone(), &cfg.credentials));
 
@@ -455,8 +484,11 @@ async fn run_runtime(
     });
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
+    let mut rdma_kv_slab: Option<Rc<kv_slab::KvSlab>> = None;
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
     let rdma_node: Option<Rc<openlake_io::rdma::RdmaNode>> =
-        if let Some((setup, rdma_cfg)) = rdma_pending {
+        if let Some((setup, rdma_cfg, kv_slab)) = rdma_pending {
+            rdma_kv_slab = kv_slab;
             let mut routing = openlake_io::rdma::ClusterRoutingTable::new(cfg.self_id);
             loop {
                 let reg = endpoint_registry.lock().unwrap();
@@ -552,8 +584,10 @@ async fn run_runtime(
             let local_disks = Rc::new(local_fs_disks.clone());
             let locks = lock_server.clone();
             let endpoints = endpoint_registry.clone();
+            let kv_slab = rdma_kv_slab.clone();
             Some(compio::runtime::spawn(async move {
-                if let Err(e) = rdma_server::serve(node, disks, local_disks, locks, endpoints).await
+                if let Err(e) =
+                    rdma_server::serve(node, disks, local_disks, locks, endpoints, kv_slab).await
                 {
                     tracing::error!(runtime_id, "rdma serve error: {e:#}");
                 }
@@ -648,7 +682,7 @@ async fn run_runtime(
     let s3_acceptor = s3_acceptor.clone();
     let s3_cfg = cfg.clone();
     let s3_task = compio::runtime::spawn(async move {
-        let app_state = s3::state::AppState::new(s3_engine, s3_auth);
+        let app_state = s3::state::AppState::new(s3_engine, s3_auth, store);
         let _ = s3::app::serve(s3_listener, app_state, s3_acceptor, s3_cfg).await;
         tracing::error!(runtime_id, "s3 serve loop exited");
     });

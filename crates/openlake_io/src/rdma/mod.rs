@@ -18,7 +18,7 @@ pub mod wr;
 
 pub use ah_cache::AhCache;
 pub use bootstrap::{ClusterRoutingTable, LocalEndpoint};
-pub use buffers::BUF_SIZE;
+pub use buffers::{Buffers, BUF_SIZE};
 pub use device::IbDevice;
 pub use node::{PeerEndpoint, PendingResponse, RdmaConfig, RdmaNode, RdmaQos, RdmaSetup};
 pub use rdma_buf::{RdmaBuf, RdmaBufPool};

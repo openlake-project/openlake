@@ -42,6 +42,7 @@ aws-smithy-runtime-api = { workspace = true }
 
 hdrhistogram = "7"
 libc         = "0.2"
+rand         = "0.8"
 
 # RDMA bench path. Only pulled in when --features rdma.
 rdma-mummy-sys = { version = "0.2", optional = true }

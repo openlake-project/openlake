@@ -31,6 +31,7 @@ pub struct PeerEndpoint {
     pub dct_num: u32,
     pub dc_key: u64,
     pub lid: u16,
+    pub kv_slab: Option<crate::rpc::SlabMeta>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -111,6 +112,7 @@ impl RdmaNode {
             gid: self_gid,
             dc_key: cfg.dc_key,
             lid: setup.dev.port_attr.lid,
+            kv_slab: None,
         };
         Ok((setup, endpoint))
     }

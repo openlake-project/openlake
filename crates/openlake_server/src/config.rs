@@ -139,6 +139,14 @@ pub struct Config {
     pub transport: TransportMode, // h2 (default) | rdma
     #[serde(default)]
     pub rdma: Option<RdmaToml>, // required when transport = rdma
+    #[serde(default)]
+    pub kv_slab: Option<KvSlabToml>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct KvSlabToml {
+    pub slot_bytes: usize,
+    pub slot_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
