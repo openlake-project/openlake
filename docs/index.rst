@@ -71,6 +71,8 @@ Examples
      - Sample workloads demonstrating OpenLake capabilities and common use cases.
    * - Integration Examples
      - Integrations with applications, storage workflows, and third-party tools.
+   * - Spark Integration
+     - Example workflow for reading and writing data with Apache Spark.
 
 Operations
 ~~~~~~~~~~
