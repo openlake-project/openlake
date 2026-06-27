@@ -224,3 +224,24 @@ impl CompleteMultipartUploadResult {
         }
     }
 }
+/// `<CopyObjectResult>` response returned by S3 CopyObject.
+#[derive(Serialize)]
+#[serde(rename = "CopyObjectResult")]
+pub struct CopyObjectResult {
+    #[serde(rename = "@xmlns")]
+    pub xmlns: &'static str,
+    #[serde(rename = "LastModified")]
+    pub last_modified: String,
+    #[serde(rename = "ETag")]
+    pub etag: String,
+}
+
+impl CopyObjectResult {
+    pub fn new(last_modified: String, etag: String) -> Self {
+        Self {
+            xmlns: S3_NS,
+            last_modified,
+            etag,
+        }
+    }
+}
