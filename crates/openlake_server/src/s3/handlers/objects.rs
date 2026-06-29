@@ -543,9 +543,6 @@ pub async fn put_object(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, AppError> {
-    if let Some(copy_source) = headers.get("x-amz-copy-source").cloned() {
-        return copy_object(state, bucket, key, copy_source).await;
-    }
     match (query.part_number, query.upload_id.as_deref()) {
         (Some(n), Some(uid)) => {
             return upload_part_handler(state, bucket, key, uid.to_owned(), n, headers, body).await
@@ -599,65 +596,6 @@ pub async fn put_object(
         }
     }
     Ok((StatusCode::OK, headers).into_response())
-}
-fn rfc3339_from_ms(ms: u64) -> String {
-    use time::format_description::well_known::Rfc3339;
-    use time::OffsetDateTime;
-    OffsetDateTime::from_unix_timestamp_nanos((ms as i128) * 1_000_000)
-        .ok()
-        .and_then(|dt| dt.format(&Rfc3339).ok())
-        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned())
-}
-
-fn parse_copy_source(value: &HeaderValue) -> Result<(String, String), AppError> {
-    let raw = value
-        .to_str()
-        .map_err(|_| AppError::Malformed("x-amz-copy-source must be ASCII"))?;
-
-    let raw = raw.trim_start_matches('/');
-    let decoded = raw.to_owned();
-
-    let (bucket, key) = decoded
-        .split_once('/')
-        .ok_or(AppError::Malformed("x-amz-copy-source must be /bucket/key"))?;
-
-    if bucket.is_empty() || key.is_empty() {
-        return Err(AppError::Malformed("x-amz-copy-source must be /bucket/key"));
-    }
-
-    Ok((bucket.to_owned(), key.to_owned()))
-}
-
-fn copy_object(
-    state: AppState,
-    dst_bucket: String,
-    dst_key: String,
-    copy_source: HeaderValue,
-) -> SendWrapper<impl std::future::Future<Output = Result<Response, AppError>>> {
-    SendWrapper::new(async move {
-        let (src_bucket, src_key) = parse_copy_source(&copy_source)?;
-        let engine = state.engine().clone();
-
-        let (src_info, mut src_stream) = engine.get(&src_bucket, &src_key).await?;
-        let content_type = src_info.content_type.clone();
-
-        let dst_info = engine
-            .put(
-                &dst_bucket,
-                &dst_key,
-                src_info.size,
-                src_stream.as_mut(),
-                content_type,
-            )
-            .await?;
-
-        let body = crate::s3::xml::CopyObjectResult::new(
-            rfc3339_from_ms(dst_info.modified_ms),
-            format!("\"{}\"", dst_info.etag),
-        );
-
-        Ok(crate::s3::xml::Xml(body).into_response())
-    })
 }
 
 async fn upload_part_handler(
