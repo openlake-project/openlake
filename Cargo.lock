@@ -2218,6 +2218,7 @@ dependencies = [
  "nix",
  "openlake_io",
  "openlake_storage",
+ "percent-encoding",
  "quick-xml",
  "rcgen",
  "rustls",

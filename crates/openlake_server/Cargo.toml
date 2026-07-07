@@ -61,6 +61,7 @@ md-5               = "0.10"
 # rustls-pemfile is the cert/key loader.
 rustls             = { workspace = true }
 rustls-pemfile     = { workspace = true }
+percent-encoding = "2.3.2"
 
 [dev-dependencies]
 rcgen              = { workspace = true }

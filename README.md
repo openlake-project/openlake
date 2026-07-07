@@ -37,7 +37,7 @@ OpenLake is an object store for AI infrastructure. Training and inference cluste
 - **`io_uring`, thread per core.** Built on the [`compio`](https://github.com/compio-rs/compio) completion based runtime. One runtime per core, pinned, no work stealing. The HTTP frontend and the storage engine run on the *same* thread, so a request never crosses a core boundary on the hot path.
  - **No kernel involvement.** GPUDirect Storage and RDMA, data moves from peer NIC into GPU VRAM zerocopy, eliminating host memory and the page cache. see [Architecture](https://github.com/openlake-project/openlake#quickstart).
  - **Erasure coded.** SIMD Reed Solomon across striped EC. Reduced storage cost for replication, high throughput without the CPU cost of conventional replication.
- - **PacedRDMA.** Novel congestion control algorithm for high throughput RDMA. Credit based memory management to absorb request bursts, minimizing tail latencies. (Supporting S3 over RDMA)
+ - **PacedRDMA.** Credit based congestion control for high throughput RDMA. Designed to absorb request bursts, minimizing tail latencies. (Supporting S3 over RDMA)
  <br>
 
   <p align="center">
