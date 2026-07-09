@@ -1,0 +1,59 @@
+body.dark{
+    background:#111827;
+    color:white;
+    }
+    
+    body.dark .sidebar{
+    background:#1f2937;
+    }
+    
+    body.dark .nav-link{
+    color:#e5e7eb;
+    }
+    
+    body.dark .nav-link.active{
+    background:#2563eb;
+    color:white;
+    }
+    
+    body.dark .chart-card,
+    body.dark .card,
+    body.dark .storage,
+    body.dark .table,
+    body.dark .cluster-card,
+    body.dark .bucket-table,
+    body.dark .object-table,
+    body.dark .stat{
+    background:#1f2937;
+    color:white;
+    }
+    
+    body.dark table{
+    color:white;
+    }
+    
+    body.dark th{
+    border-bottom:1px solid #374151;
+    }
+    
+    body.dark td{
+    border-bottom:1px solid #374151;
+    }
+    
+    body.dark input,
+    body.dark select{
+    background:#111827;
+    color:white;
+    border:1px solid #374151;
+    }
+    
+    body.dark .search-box{
+    background:#111827;
+    }
+    
+    body.dark .modal,
+    body.dark .upload-modal,
+    body.dark .preview-panel{
+    background:#1f2937;
+    color:white;
+    }

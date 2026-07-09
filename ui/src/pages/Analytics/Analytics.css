@@ -1,0 +1,62 @@
+.analytics{
+    display:flex;
+    flex-direction:column;
+    gap:30px;
+    }
+    
+    .subtitle{
+    color:#6b7280;
+    }
+    
+    .stats{
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    gap:20px;
+    }
+    
+    .stat{
+    background:white;
+    padding:25px;
+    border-radius:16px;
+    text-align:center;
+    box-shadow:0 2px 12px rgba(0,0,0,.06);
+    }
+    
+    .stat h2{
+    font-size:32px;
+    color:#2563eb;
+    }
+    
+    .charts{
+    display:grid;
+    grid-template-columns:2fr 1fr;
+    gap:25px;
+    }
+    
+    .usage-row{
+    display:grid;
+    grid-template-columns:120px 1fr 60px;
+    align-items:center;
+    gap:15px;
+    margin-bottom:18px;
+    }
+    
+    .bar{
+    height:12px;
+    background:#e5e7eb;
+    border-radius:20px;
+    overflow:hidden;
+    }
+    
+    .fill{
+    height:100%;
+    background:#2563eb;
+    border-radius:20px;
+    }
+    
+    .summary{
+    display:flex;
+    flex-direction:column;
+    gap:18px;
+    font-size:16px;
+    }

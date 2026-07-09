@@ -1,0 +1,64 @@
+.notification-panel{
+    position:absolute;
+    top:65px;
+    right:80px;
+    width:340px;
+    background:white;
+    border-radius:16px;
+    box-shadow:0 15px 40px rgba(0,0,0,.15);
+    padding:20px;
+    z-index:1500;
+    }
+    
+    .notification-header{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin-bottom:20px;
+    }
+    
+    .notification-item{
+    display:flex;
+    gap:15px;
+    padding:15px 0;
+    border-bottom:1px solid #eee;
+    }
+    
+    .notification-item:last-child{
+    border:none;
+    }
+    
+    .notification-item h4{
+    font-size:15px;
+    margin-bottom:5px;
+    }
+    
+    .notification-item p{
+    font-size:13px;
+    color:#6b7280;
+    }
+    
+    .green{
+    color:#10b981;
+    }
+    
+    .blue{
+    color:#2563eb;
+    }
+    
+    .orange{
+    color:#f59e0b;
+    }
+    
+    body.dark .notification-panel{
+    background:#1f2937;
+    color:white;
+    }
+    
+    body.dark .notification-item{
+    border-bottom:1px solid #374151;
+    }
+    
+    body.dark .notification-item p{
+    color:#d1d5db;
+    }
