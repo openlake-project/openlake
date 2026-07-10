@@ -110,6 +110,8 @@ pub struct ListBucketResult {
     pub max_keys: u32,
     #[serde(rename = "IsTruncated")]
     pub is_truncated: bool,
+    #[serde(rename = "Delimiter", skip_serializing_if = "Option::is_none")]
+    pub delimiter: Option<String>,
     #[serde(rename = "ContinuationToken", skip_serializing_if = "Option::is_none")]
     pub continuation_token: Option<String>,
     #[serde(
@@ -119,6 +121,12 @@ pub struct ListBucketResult {
     pub next_continuation_token: Option<String>,
     #[serde(rename = "Contents", default)]
     pub contents: Vec<ListBucketObject>,
+    #[serde(
+        rename = "CommonPrefixes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub common_prefixes: Vec<CommonPrefix>,
 }
 
 /// One `<Contents>` entry inside `ListBucketResult`. Only the fields
@@ -139,6 +147,16 @@ pub struct ListBucketObject {
     pub size: u64,
     #[serde(rename = "StorageClass")]
     pub storage_class: String,
+}
+
+/// One `<CommonPrefixes><Prefix>…</Prefix></CommonPrefixes>` group. S3
+/// emits one per rolled-up "directory" when a `delimiter` is supplied;
+/// each holds a single key range that was collapsed at the delimiter.
+#[derive(Serialize)]
+#[serde(rename = "CommonPrefixes")]
+pub struct CommonPrefix {
+    #[serde(rename = "Prefix")]
+    pub prefix: String,
 }
 
 /// Body of `POST /{bucket}/{key}?uploads`, returned by

@@ -13,13 +13,15 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use openlake_io::{BucketMeta, VersioningStatus};
+use openlake_storage::ObjectInfo;
 use send_wrapper::SendWrapper;
 use serde::Deserialize;
 
 use crate::s3::error::AppError;
 use crate::s3::state::AppState;
 use crate::s3::xml::{
-    ListBucketObject, ListBucketResult, LocationConstraint, VersioningConfiguration, Xml, S3_NS,
+    CommonPrefix, ListBucketObject, ListBucketResult, LocationConstraint, VersioningConfiguration,
+    Xml, S3_NS,
 };
 
 /// Bucket-scoped sub-resources S3 defines that openlake does not yet
@@ -92,6 +94,12 @@ pub struct BucketQuery {
     /// echo-back name in the response.
     #[serde(default, rename = "start-after")]
     pub start_after: Option<String>,
+    /// `?delimiter=` — group keys that share a common substring up to the
+    /// first occurrence of this string (searched after `prefix`) into
+    /// `CommonPrefixes`, S3's "directory" rollup. Only `/` is meaningful
+    /// for filesystem-style listing; empty/absent yields a flat listing.
+    #[serde(default)]
+    pub delimiter: Option<String>,
 }
 
 impl BucketQuery {
@@ -231,7 +239,10 @@ pub async fn get_bucket_query(
     ))
 }
 
-// todo: @arnav this is inefficient but works, move to node local lsm in future
+// todo: @arnav this is inefficient but works, move to node local lsm in future.
+// The delimiter path additionally fetches the whole prefix keyspace and rolls
+// it up in-process; pushing delimiter into the engine walk (non-recursive stop
+// at the delimiter) is the follow-up optimisation.
 #[allow(clippy::redundant_field_names)]
 async fn list_objects_v2(
     state: AppState,
@@ -243,6 +254,10 @@ async fn list_objects_v2(
         .max_keys
         .unwrap_or(LIST_DEFAULT_MAX_KEYS)
         .clamp(1, LIST_HARD_CAP_MAX_KEYS);
+    let max_keys_usize = max_keys as usize;
+
+    // Absent or empty delimiter => flat recursive listing (no rollup).
+    let delimiter = query.delimiter.clone().filter(|d| !d.is_empty());
 
     let cursor = query
         .continuation_token
@@ -250,56 +265,149 @@ async fn list_objects_v2(
         .or_else(|| query.start_after.clone());
 
     let engine = state.engine().clone();
-    let bucket_for_list = bucket.clone();
-    let prefix_for_list = prefix.clone();
-    let cursor_for_engine = cursor.clone();
-    let max_keys_usize = max_keys as usize;
-    let mut infos = SendWrapper::new(async move {
-        engine
-            .list(
-                &bucket_for_list,
-                &prefix_for_list,
-                cursor_for_engine.as_deref(),
-                max_keys_usize,
-            )
-            .await
-    })
-    .await?;
-    infos.sort_by(|a, b| a.key.cmp(&b.key));
 
-    let truncated = infos.len() > max_keys_usize;
-    let take = max_keys_usize.min(infos.len());
-    let returned: Vec<_> = infos.into_iter().take(take).collect();
+    let (contents, common_prefixes, truncated, next_token) = if let Some(delim) = delimiter.clone()
+    {
+        // Delimiter path: fetch the whole prefix keyspace, roll it up into
+        // objects + common prefixes, then paginate the rolled-up entries.
+        // Paginating the rolled-up list (not the raw keys) is what makes a
+        // continuation token that is itself a common prefix resume correctly
+        // past all of that prefix's children.
+        let bucket_for_list = bucket.clone();
+        let prefix_for_list = prefix.clone();
+        let mut infos = SendWrapper::new(async move {
+            engine
+                .list(&bucket_for_list, &prefix_for_list, None, 0)
+                .await
+        })
+        .await?;
+        infos.sort_by(|a, b| a.key.cmp(&b.key));
 
-    let next_token = if truncated {
-        returned.last().map(|i| i.key.clone())
+        let entries = rollup_entries(infos, &prefix, &delim);
+        let start = match cursor.as_deref() {
+            Some(c) => entries
+                .iter()
+                .position(|e| entry_name(e) > c)
+                .unwrap_or(entries.len()),
+            None => 0,
+        };
+        let end = (start + max_keys_usize).min(entries.len());
+        let truncated = end < entries.len();
+        let next_token = if truncated {
+            Some(entry_name(&entries[end - 1]).to_owned())
+        } else {
+            None
+        };
+
+        let mut contents = Vec::new();
+        let mut common_prefixes = Vec::new();
+        for entry in entries.into_iter().skip(start).take(end - start) {
+            match entry {
+                ListEntry::Object(info) => contents.push(object_to_xml(info)),
+                ListEntry::Prefix(p) => common_prefixes.push(CommonPrefix { prefix: p }),
+            }
+        }
+        (contents, common_prefixes, truncated, next_token)
     } else {
-        None
+        // Flat path: the engine cursor + max_keys bound the work directly.
+        let bucket_for_list = bucket.clone();
+        let prefix_for_list = prefix.clone();
+        let cursor_for_engine = cursor.clone();
+        let mut infos = SendWrapper::new(async move {
+            engine
+                .list(
+                    &bucket_for_list,
+                    &prefix_for_list,
+                    cursor_for_engine.as_deref(),
+                    max_keys_usize,
+                )
+                .await
+        })
+        .await?;
+        infos.sort_by(|a, b| a.key.cmp(&b.key));
+
+        let truncated = infos.len() > max_keys_usize;
+        let take = max_keys_usize.min(infos.len());
+        let returned: Vec<_> = infos.into_iter().take(take).collect();
+        let next_token = if truncated {
+            returned.last().map(|i| i.key.clone())
+        } else {
+            None
+        };
+        let contents: Vec<ListBucketObject> = returned.into_iter().map(object_to_xml).collect();
+        (contents, Vec::new(), truncated, next_token)
     };
 
-    let contents: Vec<ListBucketObject> = returned
-        .into_iter()
-        .map(|info| ListBucketObject {
-            key: info.key,
-            last_modified: rfc3339_from_ms(info.modified_ms),
-            etag: format!("\"{}\"", info.etag),
-            size: info.size,
-            storage_class: storage_class_label(&info.storage_class).to_owned(),
-        })
-        .collect();
-
+    let key_count = (contents.len() + common_prefixes.len()) as u32;
     let body = ListBucketResult {
         xmlns: S3_NS,
         name: bucket,
         prefix: prefix,
-        key_count: contents.len() as u32,
+        key_count: key_count,
         max_keys: max_keys,
         is_truncated: truncated,
+        delimiter: delimiter,
         continuation_token: query.continuation_token,
         next_continuation_token: next_token,
-        contents,
+        contents: contents,
+        common_prefixes: common_prefixes,
     };
     Ok(Xml(body).into_response())
+}
+
+/// A single rolled-up listing entry: either a concrete object or a
+/// synthetic common-prefix "directory" produced by the delimiter.
+enum ListEntry {
+    Object(ObjectInfo),
+    Prefix(String),
+}
+
+fn entry_name(entry: &ListEntry) -> &str {
+    match entry {
+        ListEntry::Object(info) => &info.key,
+        ListEntry::Prefix(prefix) => prefix,
+    }
+}
+
+/// Roll a sorted key list up against `delimiter`: any key whose remainder
+/// after `prefix` contains the delimiter collapses to the substring up to
+/// and including that first delimiter (a `CommonPrefix`). Consecutive keys
+/// under the same prefix dedup because the input is sorted, so all keys of
+/// one prefix are contiguous.
+fn rollup_entries(infos: Vec<ObjectInfo>, prefix: &str, delim: &str) -> Vec<ListEntry> {
+    let mut out: Vec<ListEntry> = Vec::with_capacity(infos.len());
+    let mut prev_prefix: Option<String> = None;
+    for info in infos {
+        let rest = match info.key.strip_prefix(prefix) {
+            Some(rest) => rest,
+            None => {
+                out.push(ListEntry::Object(info));
+                continue;
+            }
+        };
+        match rest.find(delim) {
+            Some(idx) => {
+                let cut = idx + delim.len();
+                let common = format!("{}{}", prefix, &rest[..cut]);
+                if prev_prefix.as_deref() != Some(common.as_str()) {
+                    prev_prefix = Some(common.clone());
+                    out.push(ListEntry::Prefix(common));
+                }
+            }
+            None => out.push(ListEntry::Object(info)),
+        }
+    }
+    out
+}
+
+fn object_to_xml(info: ObjectInfo) -> ListBucketObject {
+    ListBucketObject {
+        key: info.key,
+        last_modified: rfc3339_from_ms(info.modified_ms),
+        etag: format!("\"{}\"", info.etag),
+        size: info.size,
+        storage_class: storage_class_label(&info.storage_class).to_owned(),
+    }
 }
 
 fn storage_class_label(sc: &openlake_storage::StorageClass) -> &'static str {
@@ -316,4 +424,66 @@ fn rfc3339_from_ms(ms: u64) -> String {
         .ok()
         .and_then(|dt| dt.format(&Rfc3339).ok())
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlake_storage::StorageClass;
+
+    fn obj(key: &str) -> ObjectInfo {
+        ObjectInfo {
+            bucket: "b".to_owned(),
+            key: key.to_owned(),
+            size: 0,
+            etag: "etag".to_owned(),
+            storage_class: StorageClass::Single,
+            modified_ms: 0,
+            content_type: None,
+            version_id: "null".to_owned(),
+            is_delete_marker: false,
+        }
+    }
+
+    fn sorted(keys: &[&str]) -> Vec<ObjectInfo> {
+        let mut v: Vec<ObjectInfo> = keys.iter().map(|k| obj(k)).collect();
+        v.sort_by(|a, b| a.key.cmp(&b.key));
+        v
+    }
+
+    fn names(entries: &[ListEntry]) -> Vec<String> {
+        entries.iter().map(|e| entry_name(e).to_owned()).collect()
+    }
+
+    #[test]
+    fn rollup_collapses_nested_keys_into_common_prefixes() {
+        let infos = sorted(&[
+            "photos/2024/feb/c.jpg",
+            "photos/2024/jan/a.jpg",
+            "photos/2024/jan/b.jpg",
+            "photos/2025/mar/d.jpg",
+        ]);
+        let entries = rollup_entries(infos, "photos/", "/");
+        assert_eq!(names(&entries), vec!["photos/2024/", "photos/2025/"]);
+        assert!(entries.iter().all(|e| matches!(e, ListEntry::Prefix(_))));
+    }
+
+    #[test]
+    fn rollup_root_mixes_objects_and_prefixes_in_sorted_order() {
+        let infos = sorted(&["notes.txt", "docs/readme.txt", "photos/a.jpg"]);
+        let entries = rollup_entries(infos, "", "/");
+        assert_eq!(names(&entries), vec!["docs/", "notes.txt", "photos/"]);
+        assert!(matches!(entries[0], ListEntry::Prefix(_)));
+        assert!(matches!(entries[1], ListEntry::Object(_)));
+        assert!(matches!(entries[2], ListEntry::Prefix(_)));
+    }
+
+    #[test]
+    fn rollup_direct_object_under_prefix_is_content_not_prefix() {
+        let infos = sorted(&["photos/cover.jpg", "photos/2024/a.jpg"]);
+        let entries = rollup_entries(infos, "photos/", "/");
+        assert_eq!(names(&entries), vec!["photos/2024/", "photos/cover.jpg"]);
+        assert!(matches!(entries[0], ListEntry::Prefix(_)));
+        assert!(matches!(entries[1], ListEntry::Object(_)));
+    }
 }
