@@ -266,7 +266,8 @@ async fn list_objects_v2(
 
     let engine = state.engine().clone();
 
-    let (contents, common_prefixes, truncated, next_token) = if let Some(delim) = delimiter.clone() {
+    let (contents, common_prefixes, truncated, next_token) = if let Some(delim) = delimiter.clone()
+    {
         // Delimiter path: fetch the whole prefix keyspace, roll it up into
         // objects + common prefixes, then paginate the rolled-up entries.
         // Paginating the rolled-up list (not the raw keys) is what makes a
@@ -275,7 +276,9 @@ async fn list_objects_v2(
         let bucket_for_list = bucket.clone();
         let prefix_for_list = prefix.clone();
         let mut infos = SendWrapper::new(async move {
-            engine.list(&bucket_for_list, &prefix_for_list, None, 0).await
+            engine
+                .list(&bucket_for_list, &prefix_for_list, None, 0)
+                .await
         })
         .await?;
         infos.sort_by(|a, b| a.key.cmp(&b.key));
