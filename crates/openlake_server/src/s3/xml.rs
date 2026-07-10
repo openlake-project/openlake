@@ -147,6 +147,8 @@ pub struct ListBucketObject {
     pub size: u64,
     #[serde(rename = "StorageClass")]
     pub storage_class: String,
+    #[serde(rename = "Owner", skip_serializing_if = "Option::is_none")]
+    pub owner: Option<Owner>,
 }
 
 /// One `<CommonPrefixes><Prefix>…</Prefix></CommonPrefixes>` group. S3
@@ -157,6 +159,44 @@ pub struct ListBucketObject {
 pub struct CommonPrefix {
     #[serde(rename = "Prefix")]
     pub prefix: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename = "Owner")]
+pub struct Owner {
+    #[serde(rename = "ID")]
+    pub id: String,
+    #[serde(rename = "DisplayName")]
+    pub display_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename = "ListBucketResult")]
+pub struct ListBucketResultV1 {
+    #[serde(rename = "@xmlns")]
+    pub xmlns: &'static str,
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "Prefix", skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    #[serde(rename = "Marker", skip_serializing_if = "String::is_empty")]
+    pub marker: String,
+    #[serde(rename = "NextMarker", skip_serializing_if = "Option::is_none")]
+    pub next_marker: Option<String>,
+    #[serde(rename = "MaxKeys")]
+    pub max_keys: u32,
+    #[serde(rename = "Delimiter", skip_serializing_if = "Option::is_none")]
+    pub delimiter: Option<String>,
+    #[serde(rename = "IsTruncated")]
+    pub is_truncated: bool,
+    #[serde(rename = "Contents", default)]
+    pub contents: Vec<ListBucketObject>,
+    #[serde(
+        rename = "CommonPrefixes",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub common_prefixes: Vec<CommonPrefix>,
 }
 
 /// Body of `POST /{bucket}/{key}?uploads`, returned by
