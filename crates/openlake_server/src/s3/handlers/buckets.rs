@@ -20,8 +20,8 @@ use serde::Deserialize;
 use crate::s3::error::AppError;
 use crate::s3::state::AppState;
 use crate::s3::xml::{
-    CommonPrefix, ListBucketObject, ListBucketResult, LocationConstraint, VersioningConfiguration,
-    Xml, S3_NS,
+    CommonPrefix, ListBucketObject, ListBucketResult, ListBucketResultV1, LocationConstraint,
+    Owner, VersioningConfiguration, Xml, S3_NS,
 };
 
 /// Bucket-scoped sub-resources S3 defines that openlake does not yet
@@ -100,6 +100,8 @@ pub struct BucketQuery {
     /// for filesystem-style listing; empty/absent yields a flat listing.
     #[serde(default)]
     pub delimiter: Option<String>,
+    #[serde(default)]
+    pub marker: Option<String>,
 }
 
 impl BucketQuery {
@@ -233,16 +235,76 @@ pub async fn get_bucket_query(
     if BucketQuery::flag_present(&query.list_type) {
         return list_objects_v2(state, bucket, query).await;
     }
-    let _ = bucket;
-    Err(AppError::NotImplemented(
-        "ListObjects (v1) is not implemented; use ListObjectsV2 (?list-type=2)",
-    ))
+    list_objects_v1(state, bucket, query).await
 }
 
-// todo: @arnav this is inefficient but works, move to node local lsm in future.
-// The delimiter path additionally fetches the whole prefix keyspace and rolls
-// it up in-process; pushing delimiter into the engine walk (non-recursive stop
-// at the delimiter) is the follow-up optimisation.
+async fn list_page(
+    state: &AppState,
+    bucket: &str,
+    prefix: &str,
+    delimiter: Option<&str>,
+    cursor: Option<&str>,
+    max_keys: usize,
+) -> Result<(Vec<ListEntry>, bool, Option<String>), AppError> {
+    let engine = state.engine().clone();
+
+    if let Some(delim) = delimiter {
+        let bucket_owned = bucket.to_owned();
+        let prefix_owned = prefix.to_owned();
+        let mut infos =
+            SendWrapper::new(
+                async move { engine.list(&bucket_owned, &prefix_owned, None, 0).await },
+            )
+            .await?;
+        infos.sort_by(|a, b| a.key.cmp(&b.key));
+
+        let entries = rollup_entries(infos, prefix, delim);
+        let start = match cursor {
+            Some(c) => entries
+                .iter()
+                .position(|e| entry_name(e) > c)
+                .unwrap_or(entries.len()),
+            None => 0,
+        };
+        let end = (start + max_keys).min(entries.len());
+        let truncated = end < entries.len();
+        let next = if truncated {
+            Some(entry_name(&entries[end - 1]).to_owned())
+        } else {
+            None
+        };
+        let page: Vec<ListEntry> = entries.into_iter().skip(start).take(end - start).collect();
+        Ok((page, truncated, next))
+    } else {
+        let bucket_owned = bucket.to_owned();
+        let prefix_owned = prefix.to_owned();
+        let cursor_owned = cursor.map(|c| c.to_owned());
+        let mut infos = SendWrapper::new(async move {
+            engine
+                .list(
+                    &bucket_owned,
+                    &prefix_owned,
+                    cursor_owned.as_deref(),
+                    max_keys,
+                )
+                .await
+        })
+        .await?;
+        infos.sort_by(|a, b| a.key.cmp(&b.key));
+
+        let truncated = infos.len() > max_keys;
+        let take = max_keys.min(infos.len());
+        let returned: Vec<ObjectInfo> = infos.into_iter().take(take).collect();
+        let next = if truncated {
+            returned.last().map(|i| i.key.clone())
+        } else {
+            None
+        };
+        let page: Vec<ListEntry> = returned.into_iter().map(ListEntry::Object).collect();
+        Ok((page, truncated, next))
+    }
+}
+
 #[allow(clippy::redundant_field_names)]
 async fn list_objects_v2(
     state: AppState,
@@ -254,89 +316,22 @@ async fn list_objects_v2(
         .max_keys
         .unwrap_or(LIST_DEFAULT_MAX_KEYS)
         .clamp(1, LIST_HARD_CAP_MAX_KEYS);
-    let max_keys_usize = max_keys as usize;
-
-    // Absent or empty delimiter => flat recursive listing (no rollup).
     let delimiter = query.delimiter.clone().filter(|d| !d.is_empty());
-
     let cursor = query
         .continuation_token
         .clone()
         .or_else(|| query.start_after.clone());
 
-    let engine = state.engine().clone();
-
-    let (contents, common_prefixes, truncated, next_token) = if let Some(delim) = delimiter.clone()
-    {
-        // Delimiter path: fetch the whole prefix keyspace, roll it up into
-        // objects + common prefixes, then paginate the rolled-up entries.
-        // Paginating the rolled-up list (not the raw keys) is what makes a
-        // continuation token that is itself a common prefix resume correctly
-        // past all of that prefix's children.
-        let bucket_for_list = bucket.clone();
-        let prefix_for_list = prefix.clone();
-        let mut infos = SendWrapper::new(async move {
-            engine
-                .list(&bucket_for_list, &prefix_for_list, None, 0)
-                .await
-        })
-        .await?;
-        infos.sort_by(|a, b| a.key.cmp(&b.key));
-
-        let entries = rollup_entries(infos, &prefix, &delim);
-        let start = match cursor.as_deref() {
-            Some(c) => entries
-                .iter()
-                .position(|e| entry_name(e) > c)
-                .unwrap_or(entries.len()),
-            None => 0,
-        };
-        let end = (start + max_keys_usize).min(entries.len());
-        let truncated = end < entries.len();
-        let next_token = if truncated {
-            Some(entry_name(&entries[end - 1]).to_owned())
-        } else {
-            None
-        };
-
-        let mut contents = Vec::new();
-        let mut common_prefixes = Vec::new();
-        for entry in entries.into_iter().skip(start).take(end - start) {
-            match entry {
-                ListEntry::Object(info) => contents.push(object_to_xml(info)),
-                ListEntry::Prefix(p) => common_prefixes.push(CommonPrefix { prefix: p }),
-            }
-        }
-        (contents, common_prefixes, truncated, next_token)
-    } else {
-        // Flat path: the engine cursor + max_keys bound the work directly.
-        let bucket_for_list = bucket.clone();
-        let prefix_for_list = prefix.clone();
-        let cursor_for_engine = cursor.clone();
-        let mut infos = SendWrapper::new(async move {
-            engine
-                .list(
-                    &bucket_for_list,
-                    &prefix_for_list,
-                    cursor_for_engine.as_deref(),
-                    max_keys_usize,
-                )
-                .await
-        })
-        .await?;
-        infos.sort_by(|a, b| a.key.cmp(&b.key));
-
-        let truncated = infos.len() > max_keys_usize;
-        let take = max_keys_usize.min(infos.len());
-        let returned: Vec<_> = infos.into_iter().take(take).collect();
-        let next_token = if truncated {
-            returned.last().map(|i| i.key.clone())
-        } else {
-            None
-        };
-        let contents: Vec<ListBucketObject> = returned.into_iter().map(object_to_xml).collect();
-        (contents, Vec::new(), truncated, next_token)
-    };
+    let (page, truncated, next_token) = list_page(
+        &state,
+        &bucket,
+        &prefix,
+        delimiter.as_deref(),
+        cursor.as_deref(),
+        max_keys as usize,
+    )
+    .await?;
+    let (contents, common_prefixes) = split_page(page, None);
 
     let key_count = (contents.len() + common_prefixes.len()) as u32;
     let body = ListBucketResult {
@@ -349,6 +344,46 @@ async fn list_objects_v2(
         delimiter: delimiter,
         continuation_token: query.continuation_token,
         next_continuation_token: next_token,
+        contents: contents,
+        common_prefixes: common_prefixes,
+    };
+    Ok(Xml(body).into_response())
+}
+
+#[allow(clippy::redundant_field_names)]
+async fn list_objects_v1(
+    state: AppState,
+    bucket: String,
+    query: BucketQuery,
+) -> Result<Response, AppError> {
+    let prefix = query.prefix.clone().unwrap_or_default();
+    let max_keys = query
+        .max_keys
+        .unwrap_or(LIST_DEFAULT_MAX_KEYS)
+        .clamp(1, LIST_HARD_CAP_MAX_KEYS);
+    let delimiter = query.delimiter.clone().filter(|d| !d.is_empty());
+    let marker = query.marker.clone();
+
+    let (page, truncated, next_marker) = list_page(
+        &state,
+        &bucket,
+        &prefix,
+        delimiter.as_deref(),
+        marker.as_deref(),
+        max_keys as usize,
+    )
+    .await?;
+    let (contents, common_prefixes) = split_page(page, Some(v1_owner()));
+
+    let body = ListBucketResultV1 {
+        xmlns: S3_NS,
+        name: bucket,
+        prefix: prefix,
+        marker: marker.unwrap_or_default(),
+        next_marker: next_marker,
+        max_keys: max_keys,
+        is_truncated: truncated,
+        delimiter: delimiter,
         contents: contents,
         common_prefixes: common_prefixes,
     };
@@ -400,13 +435,36 @@ fn rollup_entries(infos: Vec<ObjectInfo>, prefix: &str, delim: &str) -> Vec<List
     out
 }
 
-fn object_to_xml(info: ObjectInfo) -> ListBucketObject {
+fn split_page(
+    page: Vec<ListEntry>,
+    owner: Option<Owner>,
+) -> (Vec<ListBucketObject>, Vec<CommonPrefix>) {
+    let mut contents = Vec::new();
+    let mut common_prefixes = Vec::new();
+    for entry in page {
+        match entry {
+            ListEntry::Object(info) => contents.push(object_to_xml(info, owner.clone())),
+            ListEntry::Prefix(prefix) => common_prefixes.push(CommonPrefix { prefix }),
+        }
+    }
+    (contents, common_prefixes)
+}
+
+fn object_to_xml(info: ObjectInfo, owner: Option<Owner>) -> ListBucketObject {
     ListBucketObject {
         key: info.key,
         last_modified: rfc3339_from_ms(info.modified_ms),
         etag: format!("\"{}\"", info.etag),
         size: info.size,
         storage_class: storage_class_label(&info.storage_class).to_owned(),
+        owner,
+    }
+}
+
+fn v1_owner() -> Owner {
+    Owner {
+        id: "openlake".to_owned(),
+        display_name: "openlake".to_owned(),
     }
 }
 
@@ -485,5 +543,21 @@ mod tests {
         assert_eq!(names(&entries), vec!["photos/2024/", "photos/cover.jpg"]);
         assert!(matches!(entries[0], ListEntry::Prefix(_)));
         assert!(matches!(entries[1], ListEntry::Object(_)));
+    }
+
+    #[test]
+    fn split_page_sets_owner_for_v1_only() {
+        let page = vec![
+            ListEntry::Object(obj("a.txt")),
+            ListEntry::Prefix("dir/".to_owned()),
+        ];
+        let (contents, prefixes) = split_page(page, None);
+        assert_eq!(contents.len(), 1);
+        assert!(contents[0].owner.is_none());
+        assert_eq!(prefixes.len(), 1);
+        assert_eq!(prefixes[0].prefix, "dir/");
+
+        let (contents, _) = split_page(vec![ListEntry::Object(obj("a.txt"))], Some(v1_owner()));
+        assert!(contents[0].owner.is_some());
     }
 }
