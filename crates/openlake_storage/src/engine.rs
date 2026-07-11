@@ -487,16 +487,6 @@ impl Engine {
         let parity_shards = session_fi.erasure.parity_blocks as usize;
         let data_shards = session_fi.erasure.data_blocks as usize;
 
-        // Part lock rides the same set as the assembled object; the
-        // session and final FileInfo both hash on (bucket, key).
-        let _lock = self
-            .dsync_for_obj(bucket, key)
-            .acquire(
-                &Self::part_lock_key(bucket, key, upload_id, part_number),
-                LOCK_ACQUIRE_TIMEOUT,
-            )
-            .await?;
-
         let ec = Erasure::new(data_shards, parity_shards).map_err(|e| {
             StorageError::Io(IoError::InvalidArgument(format!(
                 "EC init ({data_shards}+{parity_shards}): {e}"
@@ -541,6 +531,17 @@ impl Engine {
             };
             let sidecar = rmp_serde::to_vec_named(&part_info)
                 .map_err(|e| StorageError::Io(IoError::Encode(format!("part sidecar: {e}"))))?;
+
+            // Lock only the commit of the deterministic final-part path; the
+            // staging write above used a unique path and needs no lock, so
+            // concurrent parts stream in parallel instead of serializing.
+            let _lock = self
+                .dsync_for_obj(bucket, key)
+                .acquire(
+                    &Self::part_lock_key(bucket, key, upload_id, part_number),
+                    LOCK_ACQUIRE_TIMEOUT,
+                )
+                .await?;
 
             let cleanups = backends.iter().map(|b| {
                 let b = b.clone();
