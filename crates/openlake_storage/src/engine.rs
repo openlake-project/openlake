@@ -41,6 +41,50 @@ const _: () = assert!(DEFAULT_EC_PER_SHARD_BYTES.is_multiple_of(4096));
 
 const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Byte-range request, syntactically parsed by the S3 layer and
+/// resolved here against the object size (which only the engine's
+/// consensus read knows). Mirrors RFC 7233 single-range semantics.
+#[derive(Debug, Clone, Copy)]
+pub enum ByteRange {
+    /// `bytes=start-end` (end inclusive).
+    Bounded { start: u64, end: u64 },
+    /// `bytes=start-`.
+    OpenEnded { start: u64 },
+    /// `bytes=-last_n`.
+    Suffix { last_n: u64 },
+}
+
+impl ByteRange {
+    /// Resolve into a concrete `(offset, length)` window. `None` =
+    /// unsatisfiable (start past EOF, zero-length suffix, empty
+    /// object), which the S3 layer maps to 416. An `end` past EOF is
+    /// clamped, matching AWS behavior.
+    pub fn resolve(self, size: u64) -> Option<(u64, u64)> {
+        match self {
+            ByteRange::Bounded { start, end } => {
+                if size == 0 || start >= size {
+                    return None;
+                }
+                let end = end.min(size - 1);
+                Some((start, end - start + 1))
+            }
+            ByteRange::OpenEnded { start } => {
+                if size == 0 || start >= size {
+                    return None;
+                }
+                Some((start, size - start))
+            }
+            ByteRange::Suffix { last_n } => {
+                if size == 0 || last_n == 0 {
+                    return None;
+                }
+                let n = last_n.min(size);
+                Some((size - n, n))
+            }
+        }
+    }
+}
+
 const CONTENT_TYPE_META_KEY: &str = "content-type";
 const ETAG_META_KEY: &str = "etag";
 const PART1_PATH_SUFFIX: &str = "part.1";
@@ -969,7 +1013,8 @@ impl Engine {
         bucket: &str,
         key: &str,
     ) -> StorageResult<(ObjectInfo, Box<dyn ByteStream>)> {
-        self.get_versioned(bucket, key, None).await
+        let (info, _, stream) = self.get_versioned(bucket, key, None, None).await?;
+        Ok((info, stream))
     }
 
     /// GET a specific version. `version_id == None` is identical to
@@ -985,32 +1030,34 @@ impl Engine {
         key: &str,
         version_id: &str,
     ) -> StorageResult<(ObjectInfo, Box<dyn ByteStream>)> {
-        self.get_versioned(bucket, key, Some(version_id)).await
+        let (info, _, stream) = self
+            .get_versioned(bucket, key, Some(version_id), None)
+            .await?;
+        Ok((info, stream))
     }
 
-    /// GET a byte window of the latest version. `offset + length` MUST
-    /// be within `info.size`; the S3 handler validates the request's
-    /// `Range:` header against `info.size` before calling us. The
-    /// implementation composes a [`SkipTakeStream`] over the existing
-    /// full-object walker (inline body or EC stripe walker), so no
-    /// new fanout to the set is introduced.
+    /// GET with an optional byte range, resolved against the object
+    /// size from the same consensus read that serves the metadata —
+    /// the handler never has to open the full object to learn the
+    /// size. Returns the resolved `(offset, length)` window alongside
+    /// the stream: `None` with `range == Some(..)` means the range is
+    /// unsatisfiable (start past EOF, empty object) and the caller
+    /// maps it to 416.
     ///
-    /// EC objects still pay the cost of fetching and decoding the
-    /// leading stripes before discarding them; a later optimization
-    /// can teach `open_ec_part_stream` to skip whole stripes when
-    /// `offset` is stripe aligned. For the inline path (≤128 KiB
-    /// payload embedded in `xl.meta`) the skip is free.
-    pub async fn get_range(
+    /// For EC objects the seek is pushed down to the shard readers:
+    /// whole parts are skipped via the `fi.parts` cumulative sizes,
+    /// whole stripes via `read_file_stream`'s offset parameter, and
+    /// only the sub-stripe remainder (< block_size, already decoded
+    /// in memory) goes through [`SkipTakeStream`]. Cost is
+    /// O(length + one stripe) instead of O(offset + length).
+    pub async fn get_opts(
         &self,
         bucket: &str,
         key: &str,
-        offset: u64,
-        length: u64,
-    ) -> StorageResult<(ObjectInfo, Box<dyn ByteStream>)> {
-        let (info, full) = self.get_versioned(bucket, key, None).await?;
-        let bounded: Box<dyn ByteStream> =
-            Box::new(openlake_io::SkipTakeStream::new(full, offset, length));
-        Ok((info, bounded))
+        version_id: Option<&str>,
+        range: Option<ByteRange>,
+    ) -> StorageResult<(ObjectInfo, Option<(u64, u64)>, Box<dyn ByteStream>)> {
+        self.get_versioned(bucket, key, version_id, range).await
     }
 
     // todo: @arnav this should not be an engine specific concern, the respective backend can optianlly accept a version id for get, and can serve it instead of the head.
@@ -1020,26 +1067,44 @@ impl Engine {
         bucket: &str,
         key: &str,
         version_id: Option<&str>,
-    ) -> StorageResult<(ObjectInfo, Box<dyn ByteStream>)> {
+        range: Option<ByteRange>,
+    ) -> StorageResult<(ObjectInfo, Option<(u64, u64)>, Box<dyn ByteStream>)> {
         let backends = self.set_backends(bucket, key)?;
         let (_b, fi) = self
             .read_with_consensus(&backends, bucket, key, version_id, true)
             .await?;
         let info = to_object_info(bucket, &fi);
 
+        // Resolve the range against the size from the consensus read.
+        // A requested-but-unsatisfiable window returns early with no
+        // stream I/O; the handler maps it to 416.
+        let requested = range.is_some();
+        let window = range.and_then(|r| r.resolve(fi.size as u64));
+        if requested && window.is_none() {
+            let empty: Box<dyn ByteStream> = Box::new(openlake_io::RopeByteStream::new(Vec::new()));
+            return Ok((info, None, empty));
+        }
+        let (offset, length) = window.unwrap_or((0, fi.size as u64));
+
         // Inline path: the bytes are inside `fi.data` as a refcounted
         // rope. Hand it to a `RopeByteStream` — each frame is yielded
-        // as-is by `read()` (zero copy), in order.
+        // as-is by `read()` (zero copy), in order. The range skip over
+        // in-memory frames is refcount slicing, no I/O.
         if fi.data.as_ref().is_some_and(|frames| !frames.is_empty()) {
-            let stream: Box<dyn ByteStream> =
+            let rope: Box<dyn ByteStream> =
                 Box::new(openlake_io::RopeByteStream::new(fi.data.clone().unwrap()));
-            return Ok((info, stream));
+            let stream: Box<dyn ByteStream> = if window.is_some() {
+                Box::new(openlake_io::SkipTakeStream::new(rope, offset, length))
+            } else {
+                rope
+            };
+            return Ok((info, window, stream));
         }
         if fi.size == 0 {
             // Zero-byte object: no inline, no parts.
             let stream: Box<dyn ByteStream> =
                 Box::new(openlake_io::RopeByteStream::new(Vec::new()));
-            return Ok((info, stream));
+            return Ok((info, window, stream));
         }
 
         // EC path. Every layout parameter is read from the per-object
@@ -1069,13 +1134,22 @@ impl Engine {
             });
         }
         let stripe_unit = block_size / data_shards; // per-shard byte width
+        if stripe_unit % 512 != 0 {
+            // O_DIRECT shard reads require 512-aligned offsets; every
+            // stripe-aligned seek below is a multiple of stripe_unit.
+            // PUT only ever writes DEFAULT_EC_PER_SHARD_BYTES (4 KiB
+            // aligned), so a violation here is a corrupt record.
+            return Err(StorageError::InconsistentMeta {
+                bucket: bucket.into(),
+                key: key.into(),
+                msg: format!("stripe_unit {stripe_unit} not 512-byte aligned"),
+            });
+        }
         let ec = Erasure::new(data_shards, parity_shards).map_err(|e| {
             StorageError::Io(IoError::InvalidArgument(format!(
                 "EC init ({data_shards}+{parity_shards}): {e}"
             )))
         })?;
-        let stripes = (fi.size as usize).div_ceil(block_size).max(1);
-        let on_disk_per_shard = (stripes as u64) * stripe_unit as u64;
 
         // Per-version data_dir UUID lives in the FileInfo we just
         // resolved via consensus. Each disk has the shard at
@@ -1092,17 +1166,31 @@ impl Engine {
         }
         // Multipart-aware read path: walks `fi.parts` in order. For
         // single-shot PUTs `fi.parts` is `[{number:1, actual_size: fi.size}]`
-        // so the wrapper opens one EC stream and drains it — same
-        // bytes-on-the-wire behavior as before. For multipart-assembled
-        // objects (`fi.parts.len() > 1`) the wrapper opens each part's
-        // EC streams sequentially, transparently to the caller.
-        let _ = (stripes, on_disk_per_shard); // recomputed per-part inside the wrapper
+        // so the wrapper opens one EC stream and drains it. For a
+        // ranged read the seek is pushed down: whole parts are skipped
+        // via the cumulative `actual_size` walk, whole stripes of the
+        // first part via `read_file_stream`'s offset, and only the
+        // sub-stripe remainder (< block_size, decoded in memory) is
+        // discarded by the SkipTakeStream wrapper.
+        let mut start_part = 0usize;
+        let mut intra_part = offset;
+        for (i, p) in fi.parts.iter().enumerate() {
+            let part_len = p.actual_size as u64;
+            if intra_part < part_len {
+                start_part = i;
+                break;
+            }
+            intra_part -= part_len;
+        }
+        let start_stripe = (intra_part / block_size as u64) as usize;
+        let sub = intra_part % block_size as u64;
+
         let stream = MultiPartEcStream {
             backends: backends.to_vec(),
             bucket: bucket.to_owned(),
             key: key.to_owned(),
             data_dir: fi.data_dir.clone(),
-            parts: fi.parts.clone(),
+            parts: fi.parts[start_part..].to_vec(),
             next_idx: 0,
             block_size,
             stripe_unit,
@@ -1110,8 +1198,18 @@ impl Engine {
             parity_shards,
             ec,
             current: None,
+            first_start_stripe: start_stripe,
         };
-        Ok((info, Box::new(stream)))
+        let stream: Box<dyn ByteStream> = if window.is_some() {
+            Box::new(openlake_io::SkipTakeStream::new(
+                Box::new(stream),
+                sub,
+                length,
+            ))
+        } else {
+            Box::new(stream)
+        };
+        Ok((info, window, stream))
     }
 
     // todo: @arnav check why get object cant serve this
@@ -1922,16 +2020,23 @@ async fn open_ec_part_stream(
     data_shards: usize,
     parity_shards: usize,
     ec: Erasure,
+    start_stripe: usize,
 ) -> StorageResult<EcReadStream> {
     let n = backends.len();
     let stripes = (actual_size as usize).div_ceil(block_size).max(1);
-    let on_disk_per_shard = (stripes as u64) * stripe_unit as u64;
+    // Seek pushdown: shard files are laid out as `stripes` fixed
+    // stripe_unit-wide slots, so stripe s of the part begins at byte
+    // `s * stripe_unit` of every shard. Opening there skips the
+    // leading stripes without reading them; stripe_unit alignment
+    // keeps O_DIRECT happy on every backend.
+    let shard_off = (start_stripe as u64) * stripe_unit as u64;
+    let shard_len = ((stripes - start_stripe) as u64) * stripe_unit as u64;
 
     let opens = backends.iter().map(|b| {
         let b = b.clone();
         let bucket = bucket.to_owned();
         let pp = part_path.to_owned();
-        async move { b.read_file_stream(&bucket, &pp, 0, on_disk_per_shard).await }
+        async move { b.read_file_stream(&bucket, &pp, shard_off, shard_len).await }
     });
     let opened = join_all(opens).await;
     let mut sources: Vec<Option<Box<dyn ByteStream>>> = Vec::with_capacity(n);
@@ -1956,11 +2061,11 @@ async fn open_ec_part_stream(
         ec,
         sources,
         source_carries: vec![bytes::Bytes::new(); n_carries],
-        stripes_remaining: stripes,
+        stripes_remaining: stripes - start_stripe,
         stripe_unit,
         data_shards,
         parity_shards,
-        total_remaining: actual_size,
+        total_remaining: actual_size - (start_stripe as u64) * block_size as u64,
         decoded: Vec::new(),
         decode_shard: 0,
         shard_pos: 0,
@@ -1990,6 +2095,10 @@ struct MultiPartEcStream {
     parity_shards: usize,
     ec: Erasure,
     current: Option<EcReadStream>,
+    /// Stripe to start reading at within `parts[0]` — the seek target
+    /// of a ranged GET after whole-part skipping. Parts after the
+    /// first always start at stripe 0.
+    first_start_stripe: usize,
 }
 
 impl MultiPartEcStream {
@@ -2004,6 +2113,11 @@ impl MultiPartEcStream {
         }
         let p = &self.parts[self.next_idx];
         let path = format!("{}/{}/part.{}", self.key, self.data_dir, p.number);
+        let start_stripe = if self.next_idx == 0 {
+            self.first_start_stripe
+        } else {
+            0
+        };
         let s = open_ec_part_stream(
             &self.backends,
             &self.bucket,
@@ -2015,6 +2129,7 @@ impl MultiPartEcStream {
             self.data_shards,
             self.parity_shards,
             self.ec.clone(),
+            start_stripe,
         )
         .await
         .map_err(|e| match e {
@@ -2848,6 +2963,7 @@ fn map_object_missing<'a>(bucket: &'a str, key: &'a str) -> impl Fn(IoError) -> 
 mod tests {
     use super::*;
     use crate::cluster::NodeAddr;
+    use crate::object::CompletePart;
     use openlake_io::stream::{read_full, VecByteStream};
     use openlake_io::LocalFsBackend;
     use tempfile::TempDir;
@@ -3476,6 +3592,200 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Test helper: drain a ranged GET and return (window, bytes).
+    async fn get_range_bytes(
+        e: &Engine,
+        bucket: &str,
+        key: &str,
+        range: ByteRange,
+    ) -> (Option<(u64, u64)>, Vec<u8>) {
+        let (_info, window, mut stream) = e
+            .get_opts(bucket, key, None, Some(range))
+            .await
+            .expect("get_opts");
+        let mut out = Vec::new();
+        loop {
+            let chunk = stream.read().await.expect("range stream read");
+            if chunk.is_empty() {
+                break;
+            }
+            out.extend_from_slice(&chunk);
+        }
+        (window, out)
+    }
+
+    /// Deterministic multi-MiB payload so stripe boundaries carry
+    /// distinguishable bytes (catches off-by-one-stripe seeks).
+    fn patterned(len: usize) -> Vec<u8> {
+        (0..len).map(|i| ((i * 31 + 7) % 251) as u8).collect()
+    }
+
+    /// Ranges against an EC object spanning several stripes. With
+    /// eng(3,3): D=2, P=1, block_size = 2 MiB — a 5 MiB body is 3
+    /// stripes. Windows chosen to hit: inside stripe 0, crossing the
+    /// stripe 0/1 boundary, stripe-aligned start (pure seek, sub=0),
+    /// mid-stripe start in stripe 2, suffix, open-ended, and full-file
+    /// equivalence.
+    #[compio::test]
+    async fn ec_range_reads_match_slices() {
+        let (_dirs, e) = eng(3, 3).await;
+        let body = patterned(5 * 1024 * 1024);
+        put_bytes(&e, "buk", "big", body.clone(), None).await;
+
+        let block = 2 * 1024 * 1024u64;
+        let cases: [(u64, u64); 6] = [
+            (100, 500),                 // inside stripe 0
+            (block - 100, 200),         // crosses stripe 0 -> 1
+            (block, 1024),              // stripe-aligned seek, sub == 0
+            (2 * block + 4096, 8192),   // mid-stripe start in last stripe
+            (0, body.len() as u64),     // full window via range
+            (body.len() as u64 - 1, 1), // final byte
+        ];
+        for (start, len) in cases {
+            let end = start + len - 1;
+            let (window, got) =
+                get_range_bytes(&e, "buk", "big", ByteRange::Bounded { start, end }).await;
+            assert_eq!(window, Some((start, len)), "window for {start}+{len}");
+            assert_eq!(
+                got,
+                body[start as usize..(start + len) as usize].to_vec(),
+                "bytes for {start}+{len}"
+            );
+        }
+
+        let (window, got) =
+            get_range_bytes(&e, "buk", "big", ByteRange::Suffix { last_n: 4096 }).await;
+        assert_eq!(window, Some((body.len() as u64 - 4096, 4096)));
+        assert_eq!(got, body[body.len() - 4096..].to_vec());
+
+        let start = 2 * block + 12345;
+        let (window, got) = get_range_bytes(&e, "buk", "big", ByteRange::OpenEnded { start }).await;
+        assert_eq!(window, Some((start, body.len() as u64 - start)));
+        assert_eq!(got, body[start as usize..].to_vec());
+    }
+
+    /// An `end` past EOF is clamped (AWS behavior); a `start` past EOF
+    /// resolves to no window (handler maps to 416).
+    #[compio::test]
+    async fn ec_range_clamps_and_rejects() {
+        let (_dirs, e) = eng(3, 3).await;
+        let body = patterned(3 * 1024 * 1024);
+        put_bytes(&e, "buk", "clamp", body.clone(), None).await;
+
+        let (window, got) = get_range_bytes(
+            &e,
+            "buk",
+            "clamp",
+            ByteRange::Bounded {
+                start: body.len() as u64 - 10,
+                end: u64::MAX,
+            },
+        )
+        .await;
+        assert_eq!(window, Some((body.len() as u64 - 10, 10)));
+        assert_eq!(got, body[body.len() - 10..].to_vec());
+
+        let (_info, window, _stream) = e
+            .get_opts(
+                "buk",
+                "clamp",
+                None,
+                Some(ByteRange::OpenEnded {
+                    start: body.len() as u64,
+                }),
+            )
+            .await
+            .expect("get_opts");
+        assert_eq!(window, None, "start at EOF is unsatisfiable");
+    }
+
+    /// Range over an inline (<128 KiB) object slices the xl.meta rope.
+    #[compio::test]
+    async fn inline_range_reads_match_slices() {
+        let (_dirs, e) = eng(3, 3).await;
+        let body = patterned(64 * 1024);
+        put_bytes(&e, "buk", "inl", body.clone(), None).await;
+        let (window, got) = get_range_bytes(
+            &e,
+            "buk",
+            "inl",
+            ByteRange::Bounded {
+                start: 1000,
+                end: 4999,
+            },
+        )
+        .await;
+        assert_eq!(window, Some((1000, 4000)));
+        assert_eq!(got, body[1000..5000].to_vec());
+    }
+
+    /// Range crossing a part boundary on a multipart-assembled object:
+    /// whole-part skip picks part 2, later parts stream seamlessly.
+    #[compio::test]
+    async fn multipart_range_crosses_part_boundary() {
+        let (_dirs, e) = eng(3, 3).await;
+        let p1 = patterned(6 * 1024 * 1024);
+        let p2: Vec<u8> = patterned(3 * 1024 * 1024).into_iter().rev().collect();
+
+        let init = e.create_multipart_upload("buk", "mp", None).await.unwrap();
+        let mut parts = Vec::new();
+        for (no, payload) in [(1u32, &p1), (2u32, &p2)] {
+            let mut src = VecByteStream::new(payload.clone());
+            let pi = e
+                .upload_part(
+                    "buk",
+                    "mp",
+                    &init.upload_id,
+                    no,
+                    payload.len() as u64,
+                    &mut src,
+                )
+                .await
+                .unwrap();
+            parts.push(CompletePart {
+                part_number: no,
+                etag: pi.etag,
+            });
+        }
+        e.complete_multipart_upload("buk", "mp", &init.upload_id, parts)
+            .await
+            .unwrap();
+
+        let mut full = p1.clone();
+        full.extend_from_slice(&p2);
+
+        // Window straddling the part 1 / part 2 boundary.
+        let start = p1.len() as u64 - 1000;
+        let len = 2000u64;
+        let (window, got) = get_range_bytes(
+            &e,
+            "buk",
+            "mp",
+            ByteRange::Bounded {
+                start,
+                end: start + len - 1,
+            },
+        )
+        .await;
+        assert_eq!(window, Some((start, len)));
+        assert_eq!(got, full[start as usize..(start + len) as usize].to_vec());
+
+        // Window entirely inside part 2 (whole-part skip).
+        let start = p1.len() as u64 + 1024 * 1024 + 777;
+        let (window, got) = get_range_bytes(
+            &e,
+            "buk",
+            "mp",
+            ByteRange::Bounded {
+                start,
+                end: start + 4095,
+            },
+        )
+        .await;
+        assert_eq!(window, Some((start, 4096)));
+        assert_eq!(got, full[start as usize..start as usize + 4096].to_vec());
     }
 
     /// Out-of-range partNumber is rejected before any disk work.
