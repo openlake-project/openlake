@@ -65,6 +65,11 @@ pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
             "/openlake/cache/{*key}",
             get(in_memory_store::get).put(in_memory_store::put),
         )
+        .route(
+            "/openlake/admin/v1/metrics",
+            get(|| async { crate::s3::metrics::render() }),
+        )
+        .layer(axum::middleware::from_fn(crate::s3::metrics::meter))
         .layer(DefaultBodyLimit::disable())
         .with_state(state)
 }

@@ -30,6 +30,7 @@ pub mod body_source;
 pub mod error;
 pub mod handlers;
 pub mod listener;
+pub mod metrics;
 pub mod middleware;
 pub mod state;
 pub mod xml;

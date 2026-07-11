@@ -181,27 +181,41 @@ impl RemoteBackend {
     /// undecodable bodies fall back to a generic
     /// `rpc http <status>` error.
     async fn unary(&self, req: Request) -> IoResult<Response> {
+        use crate::net_metrics::{self, Class, Transport};
         let body = rpc::encode(&req)?;
-        let resp = self
-            .peer
-            .client
-            .post(self.peer.url(URL_RPC))
-            .map_err(map_http)?
-            .body(body)
-            .send()
-            .await
-            .map_err(map_http)?;
-        let status = resp.status();
-        let bytes = resp.bytes().await.map_err(map_http)?;
-        if !status.is_success() {
-            if let Ok(Response::Err(e)) = rpc::decode::<Response>(&bytes) {
-                return Err(e.into());
+        let sent = body.len() as u64;
+        let start = std::time::Instant::now();
+        let result: IoResult<Response> = async {
+            let resp = self
+                .peer
+                .client
+                .post(self.peer.url(URL_RPC))
+                .map_err(map_http)?
+                .body(body)
+                .send()
+                .await
+                .map_err(map_http)?;
+            let status = resp.status();
+            let bytes = resp.bytes().await.map_err(map_http)?;
+            net_metrics::add_bytes(Transport::H2, Class::Unary, sent + bytes.len() as u64);
+            if !status.is_success() {
+                if let Ok(Response::Err(e)) = rpc::decode::<Response>(&bytes) {
+                    return Err(e.into());
+                }
+                return Err(IoError::Io(std::io::Error::other(format!(
+                    "rpc http status: {status}"
+                ))));
             }
-            return Err(IoError::Io(std::io::Error::other(format!(
-                "rpc http status: {status}"
-            ))));
+            rpc::decode::<Response>(&bytes)
         }
-        rpc::decode::<Response>(&bytes)
+        .await;
+        net_metrics::observe(
+            Transport::H2,
+            Class::Unary,
+            start.elapsed().as_micros() as u64,
+            result.is_err(),
+        );
+        result
     }
 
     /// Lock-plane: acquire. Both lock RPCs ride the same unary route
@@ -320,6 +334,11 @@ impl ByteStream for RemoteReadStream {
                     ))));
                 }
                 self.remaining -= n;
+                crate::net_metrics::add_bytes(
+                    crate::net_metrics::Transport::H2,
+                    crate::net_metrics::Class::ReadStream,
+                    n,
+                );
                 Ok(buf)
             }
             Some(Err(e)) => Err(map_http(e)),
@@ -352,6 +371,7 @@ pub struct RemoteWriteSink {
     expected: u64,
     written: u64,
     finished: bool,
+    start: std::time::Instant,
 }
 
 #[async_trait(?Send)]
@@ -375,6 +395,11 @@ impl ByteSink for RemoteWriteSink {
             .await
             .map_err(|_| IoError::Io(std::io::Error::other("peer body channel closed")))?;
         self.written += len;
+        crate::net_metrics::add_bytes(
+            crate::net_metrics::Transport::H2,
+            crate::net_metrics::Class::WriteStream,
+            len,
+        );
         Ok(())
     }
 
@@ -383,6 +408,19 @@ impl ByteSink for RemoteWriteSink {
             return Ok(());
         }
         self.finished = true;
+        let result = self.finish_inner().await;
+        crate::net_metrics::observe(
+            crate::net_metrics::Transport::H2,
+            crate::net_metrics::Class::WriteStream,
+            self.start.elapsed().as_micros() as u64,
+            result.is_err(),
+        );
+        result
+    }
+}
+
+impl RemoteWriteSink {
+    async fn finish_inner(&mut self) -> IoResult<()> {
         if self.written != self.expected {
             return Err(IoError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -582,6 +620,7 @@ impl StorageBackend for RemoteBackend {
             expected: size,
             written: 0,
             finished: false,
+            start: std::time::Instant::now(),
         }))
     }
 

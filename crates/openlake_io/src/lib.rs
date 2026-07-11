@@ -15,6 +15,7 @@ pub mod alloc;
 pub mod backend;
 pub mod error;
 pub mod local_fs;
+pub mod net_metrics;
 pub mod node_info;
 pub mod purge;
 #[cfg(all(feature = "rdma", target_os = "linux"))]

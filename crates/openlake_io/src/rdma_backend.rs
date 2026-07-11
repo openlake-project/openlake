@@ -54,6 +54,18 @@ impl RdmaBackend {
     }
 
     async fn unary(&self, payload: Request) -> IoResult<Response> {
+        let start = std::time::Instant::now();
+        let result = self.unary_inner(payload).await;
+        crate::net_metrics::observe(
+            crate::net_metrics::Transport::Rdma,
+            crate::net_metrics::Class::Unary,
+            start.elapsed().as_micros() as u64,
+            result.is_err(),
+        );
+        result
+    }
+
+    async fn unary_inner(&self, payload: Request) -> IoResult<Response> {
         let peer = self
             .node
             .peer(self.peer_id)
@@ -131,6 +143,30 @@ impl RdmaBackend {
     }
 
     async fn read_single_chunk(
+        &self,
+        volume: &str,
+        path: &str,
+        offset: u64,
+        length: u32,
+    ) -> IoResult<Bytes> {
+        use crate::net_metrics::{self, Class, Transport};
+        let start = std::time::Instant::now();
+        let result = self
+            .read_single_chunk_inner(volume, path, offset, length)
+            .await;
+        net_metrics::observe(
+            Transport::Rdma,
+            Class::ReadStream,
+            start.elapsed().as_micros() as u64,
+            result.is_err(),
+        );
+        if let Ok(chunk) = &result {
+            net_metrics::add_bytes(Transport::Rdma, Class::ReadStream, chunk.len() as u64);
+        }
+        result
+    }
+
+    async fn read_single_chunk_inner(
         &self,
         volume: &str,
         path: &str,
@@ -237,6 +273,31 @@ impl RdmaBackend {
     }
 
     async fn write_single_chunk(
+        &self,
+        volume: &str,
+        path: &str,
+        offset: u64,
+        data: Bytes,
+    ) -> IoResult<()> {
+        use crate::net_metrics::{self, Class, Transport};
+        let len = data.len() as u64;
+        let start = std::time::Instant::now();
+        let result = self
+            .write_single_chunk_inner(volume, path, offset, data)
+            .await;
+        net_metrics::observe(
+            Transport::Rdma,
+            Class::WriteStream,
+            start.elapsed().as_micros() as u64,
+            result.is_err(),
+        );
+        if result.is_ok() {
+            net_metrics::add_bytes(Transport::Rdma, Class::WriteStream, len);
+        }
+        result
+    }
+
+    async fn write_single_chunk_inner(
         &self,
         volume: &str,
         path: &str,

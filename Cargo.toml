@@ -74,6 +74,7 @@ tower        = { version = "0.5", features = ["util"] }
 tower-http   = { version = "0.6", default-features = false, features = ["trace"] }
 # `BodyExt::frame` extension trait used by the PUT body adapter to
 # pull `Frame<Bytes>` from `axum::body::Body` one chunk at a time.
+http-body = "1"
 http-body-util = "0.1"
 
 # Thread-per-core plumbing: `nix` for `sched_setaffinity`, `socket2`
