@@ -107,8 +107,8 @@ pub struct MemoryPoolConfig {
 impl Default for MemoryPoolConfig {
     fn default() -> Self {
         Self {
-            enabled:         true,
-            size_bytes:      4 * 1024 * 1024 * 1024, // 4 GiB
+            enabled: true,
+            size_bytes: 4 * 1024 * 1024 * 1024, // 4 GiB
             bucket_capacity: 8 * 1024,
         }
     }
@@ -123,7 +123,7 @@ impl Default for MemoryPoolConfig {
 /// All counters are released atomic increments — they are observed
 /// only by the periodic logger and never gate any hot-path decision.
 pub struct MemoryPool {
-    is_enabled:   bool,
+    is_enabled: bool,
     memory_limit: usize,
 
     /// Free-buffer queue per bucket. Lock-free MPMC; uncontended
@@ -131,23 +131,23 @@ pub struct MemoryPool {
     /// is what enforces the configured `bucket_capacity` — we do not
     /// keep a separate copy of the value because every later check
     /// goes through `buckets[i].push()` which fails when full.
-    buckets:        [Arc<ArrayQueue<AlignedBuffer>>; NUM_BUCKETS],
+    buckets: [Arc<ArrayQueue<AlignedBuffer>>; NUM_BUCKETS],
 
     /// Number of buffers currently checked out per bucket.
-    in_use:         [AtomicUsize; NUM_BUCKETS],
+    in_use: [AtomicUsize; NUM_BUCKETS],
 
     /// Lifetime allocations per bucket (only counts pool allocations,
     /// not external).
-    allocations:    [AtomicUsize; NUM_BUCKETS],
+    allocations: [AtomicUsize; NUM_BUCKETS],
 
     /// Lifetime returns per bucket.
-    returned:       [AtomicUsize; NUM_BUCKETS],
+    returned: [AtomicUsize; NUM_BUCKETS],
 
-    external_allocations:   AtomicUsize,
+    external_allocations: AtomicUsize,
     external_deallocations: AtomicUsize,
-    resize_events:          AtomicUsize,
-    dropped_returns:        AtomicUsize,
-    capacity_warning:       AtomicBool,
+    resize_events: AtomicUsize,
+    dropped_returns: AtomicUsize,
+    capacity_warning: AtomicBool,
 }
 
 impl MemoryPool {
@@ -159,8 +159,8 @@ impl MemoryPool {
 
         if cfg.enabled {
             info!(
-                num_buckets    = NUM_BUCKETS,
-                memory_limit   = cfg.size_bytes,
+                num_buckets = NUM_BUCKETS,
+                memory_limit = cfg.size_bytes,
                 bucket_capacity = cfg.bucket_capacity,
                 "MemoryPool initialised"
             );
@@ -169,17 +169,17 @@ impl MemoryPool {
         }
 
         Self {
-            is_enabled:             cfg.enabled,
-            memory_limit:           cfg.size_bytes,
+            is_enabled: cfg.enabled,
+            memory_limit: cfg.size_bytes,
             buckets,
             in_use,
             allocations,
             returned,
-            external_allocations:   AtomicUsize::new(0),
+            external_allocations: AtomicUsize::new(0),
             external_deallocations: AtomicUsize::new(0),
-            resize_events:          AtomicUsize::new(0),
-            dropped_returns:        AtomicUsize::new(0),
-            capacity_warning:       AtomicBool::new(false),
+            resize_events: AtomicUsize::new(0),
+            dropped_returns: AtomicUsize::new(0),
+            capacity_warning: AtomicBool::new(false),
         }
     }
 
@@ -216,10 +216,10 @@ impl MemoryPool {
                         // are alloc'd to bucket size). Drop and
                         // reallocate.
                         warn!(
-                            bucket_idx     = idx,
-                            bucket_size    = bucket_size,
-                            buf_capacity   = buf.capacity(),
-                            requested      = capacity,
+                            bucket_idx = idx,
+                            bucket_size = bucket_size,
+                            buf_capacity = buf.capacity(),
+                            requested = capacity,
                             "pool buffer too small, reallocating",
                         );
                         drop(buf);
@@ -238,8 +238,8 @@ impl MemoryPool {
                     self.capacity_warning.store(true, Ordering::Release);
                     trace!(
                         requested = bucket_size,
-                        in_use    = current,
-                        limit     = self.memory_limit,
+                        in_use = current,
+                        limit = self.memory_limit,
                         "pool at limit, allocating externally",
                     );
                     self.external_allocations.fetch_add(1, Ordering::Release);
@@ -296,7 +296,10 @@ impl MemoryPool {
                 if self.buckets[idx].push(buffer).is_err() {
                     self.dropped_returns.fetch_add(1, Ordering::Release);
                     self.capacity_warning.store(true, Ordering::Release);
-                    trace!(bucket_size = BUCKET_SIZES[idx], "pool bucket full, dropping return");
+                    trace!(
+                        bucket_size = BUCKET_SIZES[idx],
+                        "pool bucket full, dropping return"
+                    );
                 }
             }
             None => {
@@ -331,14 +334,14 @@ impl MemoryPool {
         let util = (current as f64 / self.memory_limit as f64) * 100.0;
 
         info!(
-            current_bytes    = current,
-            allocated_bytes  = allocated,
-            limit_bytes      = self.memory_limit,
-            utilisation_pct  = format_args!("{util:.1}"),
-            external_alloc   = self.external_allocations.load(Ordering::Acquire),
+            current_bytes = current,
+            allocated_bytes = allocated,
+            limit_bytes = self.memory_limit,
+            utilisation_pct = format_args!("{util:.1}"),
+            external_alloc = self.external_allocations.load(Ordering::Acquire),
             external_dealloc = self.external_deallocations.load(Ordering::Acquire),
-            dropped_returns  = self.dropped_returns.load(Ordering::Acquire),
-            resize_events    = self.resize_events.load(Ordering::Acquire),
+            dropped_returns = self.dropped_returns.load(Ordering::Acquire),
+            resize_events = self.resize_events.load(Ordering::Acquire),
             "MemoryPool stats",
         );
 

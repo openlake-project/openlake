@@ -118,6 +118,7 @@ rustls-pemfile     = "2"
 rcgen              = "0.13"
 
 bytes              = { version = "1", features = ["serde"] }
+dashmap            = "6"
 serde              = { version = "1", features = ["derive"] }
 bincode            = { version = "2", features = ["serde"] }
 thiserror          = "2"

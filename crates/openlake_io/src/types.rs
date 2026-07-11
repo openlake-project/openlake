@@ -17,11 +17,11 @@ use crate::error::{IoError, IoResult};
 /// Bucket-meta envelope on the wire / in xl.meta inline data:
 /// `b"PBKM"` (4) | format_v u16 LE | schema_v u16 LE | body_len u32 LE
 /// | body (rmp-serde) | crc32c u32 LE (covers everything before).
-const BUCKET_META_MAGIC:         [u8; 4] = *b"PBKM";
-const BUCKET_META_FORMAT_V1:     u16     = 1;
-const BUCKET_META_SCHEMA_V1:     u16     = 1;
-const BUCKET_META_HEADER_BYTES:  usize   = 4 + 2 + 2 + 4;
-const BUCKET_META_TRAILER_BYTES: usize   = 4;
+const BUCKET_META_MAGIC: [u8; 4] = *b"PBKM";
+const BUCKET_META_FORMAT_V1: u16 = 1;
+const BUCKET_META_SCHEMA_V1: u16 = 1;
+const BUCKET_META_HEADER_BYTES: usize = 4 + 2 + 2 + 4;
+const BUCKET_META_TRAILER_BYTES: usize = 4;
 
 /// Metadata describing one version of an object on one drive.
 ///
@@ -128,12 +128,15 @@ pub struct FileInfo {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum VersionType {
-    Object       = 0,
+    Object = 0,
     DeleteMarker = 1,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for VersionType {
-    fn default() -> Self { VersionType::Object }
+    fn default() -> Self {
+        VersionType::Object
+    }
 }
 
 /// Erasure-coding contract for one (object, disk) record.
@@ -191,8 +194,8 @@ pub struct ErasureInfo {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChecksumInfo {
     pub part_number: i32,
-    pub algorithm:   String,
-    pub hash:        Vec<u8>,
+    pub algorithm: String,
+    pub hash: Vec<u8>,
 }
 
 /// One part of a multipart upload, or the sole part of a single part
@@ -228,10 +231,10 @@ pub struct VolInfo {
 /// CreateBucket and rewritten on PutBucketVersioning.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BucketMeta {
-    pub created_ms:            u64,
-    pub versioning_status:     VersioningStatus,
+    pub created_ms: u64,
+    pub versioning_status: VersioningStatus,
     pub versioning_updated_ms: u64,
-    pub object_lock_enabled:   bool,
+    pub object_lock_enabled: bool,
 }
 
 impl BucketMeta {
@@ -264,19 +267,18 @@ impl BucketMeta {
     pub fn next_version_id(&self) -> String {
         match self.versioning_status {
             VersioningStatus::Enabled => Uuid::new_v4().to_string(),
-            VersioningStatus::Unversioned | VersioningStatus::Suspended =>
-                VersioningStatus::NULL_VERSION_ID.to_owned(),
+            VersioningStatus::Unversioned | VersioningStatus::Suspended => {
+                VersioningStatus::NULL_VERSION_ID.to_owned()
+            }
         }
     }
 
     /// Encode to the `PBKM`-framed wire envelope (header + rmp-serde
     /// body + crc32c trailer). Stable, versioned by `format_v`/`schema_v`.
     pub fn encode(&self) -> IoResult<Vec<u8>> {
-        let body = rmp_serde::to_vec_named(self)
-            .map_err(|e| IoError::Encode(e.to_string()))?;
-        let mut out = Vec::with_capacity(
-            BUCKET_META_HEADER_BYTES + body.len() + BUCKET_META_TRAILER_BYTES,
-        );
+        let body = rmp_serde::to_vec_named(self).map_err(|e| IoError::Encode(e.to_string()))?;
+        let mut out =
+            Vec::with_capacity(BUCKET_META_HEADER_BYTES + body.len() + BUCKET_META_TRAILER_BYTES);
         out.extend_from_slice(&BUCKET_META_MAGIC);
         out.extend_from_slice(&BUCKET_META_FORMAT_V1.to_le_bytes());
         out.extend_from_slice(&BUCKET_META_SCHEMA_V1.to_le_bytes());
@@ -291,24 +293,32 @@ impl BucketMeta {
     /// format/schema versions, declared size, and crc32c.
     pub fn decode(bytes: &[u8]) -> IoResult<Self> {
         if bytes.len() < BUCKET_META_HEADER_BYTES + BUCKET_META_TRAILER_BYTES {
-            return Err(IoError::Decode(format!("bucket meta too short ({} bytes)", bytes.len())));
+            return Err(IoError::Decode(format!(
+                "bucket meta too short ({} bytes)",
+                bytes.len()
+            )));
         }
         if bytes[0..4] != BUCKET_META_MAGIC {
             return Err(IoError::Decode("bucket meta bad magic".into()));
         }
         let format_v = u16::from_le_bytes([bytes[4], bytes[5]]);
         if format_v != BUCKET_META_FORMAT_V1 {
-            return Err(IoError::Decode(format!("bucket meta unknown format_version {format_v}")));
+            return Err(IoError::Decode(format!(
+                "bucket meta unknown format_version {format_v}"
+            )));
         }
         let schema_v = u16::from_le_bytes([bytes[6], bytes[7]]);
         if schema_v != BUCKET_META_SCHEMA_V1 {
-            return Err(IoError::Decode(format!("bucket meta unknown schema_version {schema_v}")));
+            return Err(IoError::Decode(format!(
+                "bucket meta unknown schema_version {schema_v}"
+            )));
         }
         let body_len = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
         let expected = BUCKET_META_HEADER_BYTES + body_len + BUCKET_META_TRAILER_BYTES;
         if bytes.len() != expected {
             return Err(IoError::Decode(format!(
-                "bucket meta size mismatch (got {}, expected {expected})", bytes.len()
+                "bucket meta size mismatch (got {}, expected {expected})",
+                bytes.len()
             )));
         }
         let crc_recorded = u32::from_le_bytes([
@@ -406,8 +416,11 @@ pub enum BitrotAlgorithm {
     HighwayHash256,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for BitrotAlgorithm {
-    fn default() -> Self { BitrotAlgorithm::HighwayHash256 }
+    fn default() -> Self {
+        BitrotAlgorithm::HighwayHash256
+    }
 }
 
 /// Passed to `read_file` when the caller wants per chunk bitrot checks.
@@ -420,11 +433,11 @@ pub struct BitrotVerifier {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FormatJson {
-    pub version:         u32,
-    pub format:          String,
-    pub id:              uuid::Uuid,
+    pub version: u32,
+    pub format: String,
+    pub id: uuid::Uuid,
     #[serde(rename = "setDriveCount")]
     pub set_drive_count: usize,
     #[serde(rename = "thisDisk")]
-    pub this_disk:       u32,
+    pub this_disk: u32,
 }

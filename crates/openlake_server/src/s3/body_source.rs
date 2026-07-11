@@ -35,9 +35,9 @@ use crate::auth::{find_crlf, verify_chunk, Sha256VerifyStream};
 /// drained, then the next frame is fetched. Trailer frames (no data)
 /// are skipped. EOF is recorded on first `None` from `frame()`.
 pub struct AxumBodyStream {
-    body:     Body,
+    body: Body,
     leftover: Bytes,
-    eof:      bool,
+    eof: bool,
 }
 
 impl AxumBodyStream {
@@ -45,7 +45,7 @@ impl AxumBodyStream {
         Self {
             body,
             leftover: Bytes::new(),
-            eof:      false,
+            eof: false,
         }
     }
 }
@@ -102,41 +102,41 @@ impl ByteStream for AxumBodyStream {
 /// memory at a time. EOF is signalled by the trailing zero-length
 /// chunk, after which `read` returns `Ok(0)` indefinitely.
 pub struct ChunkedBodyStream {
-    inner:        AxumBodyStream,
+    inner: AxumBodyStream,
     /// Bytes pulled from `inner` but not yet parsed.
-    carry:        Vec<u8>,
+    carry: Vec<u8>,
     /// Bytes of the current chunk's payload not yet served to caller.
-    chunk_buf:    Vec<u8>,
-    chunk_pos:    usize,
-    running_sig:  String,
-    access_key:   String,
-    secret:       String,
-    region:       String,
+    chunk_buf: Vec<u8>,
+    chunk_pos: usize,
+    running_sig: String,
+    access_key: String,
+    secret: String,
+    region: String,
     request_time: SystemTime,
-    finished:     bool,
+    finished: bool,
 }
 
 impl ChunkedBodyStream {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        body:           Body,
+        body: Body,
         seed_signature: String,
-        access_key:     String,
-        secret:         String,
-        region:         String,
-        request_time:   SystemTime,
+        access_key: String,
+        secret: String,
+        region: String,
+        request_time: SystemTime,
     ) -> Self {
         Self {
-            inner:        AxumBodyStream::new(body),
-            carry:        Vec::with_capacity(64 * 1024),
-            chunk_buf:    Vec::new(),
-            chunk_pos:    0,
-            running_sig:  seed_signature,
+            inner: AxumBodyStream::new(body),
+            carry: Vec::with_capacity(64 * 1024),
+            chunk_buf: Vec::new(),
+            chunk_pos: 0,
+            running_sig: seed_signature,
             access_key,
             secret,
             region,
             request_time,
-            finished:     false,
+            finished: false,
         }
     }
 
@@ -230,6 +230,7 @@ impl ChunkedBodyStream {
 
 #[async_trait(?Send)]
 impl ByteStream for ChunkedBodyStream {
+    #[allow(clippy::collapsible_if)]
     async fn read(&mut self) -> IoResult<Bytes> {
         if self.finished {
             return Ok(Bytes::new());
@@ -246,9 +247,8 @@ impl ByteStream for ChunkedBodyStream {
         // are already in `chunk_buf` because we needed them
         // contiguous to verify the per-chunk signature). Wrap as
         // Bytes so downstream is zero-copy.
-        let payload = bytes::Bytes::copy_from_slice(
-            &self.chunk_buf[self.chunk_pos..self.chunk_pos + avail],
-        );
+        let payload =
+            bytes::Bytes::copy_from_slice(&self.chunk_buf[self.chunk_pos..self.chunk_pos + avail]);
         self.chunk_pos += avail;
         Ok(payload)
     }
@@ -289,15 +289,20 @@ impl BodySource {
 
     #[allow(clippy::too_many_arguments)]
     pub fn chunked(
-        body:           Body,
+        body: Body,
         seed_signature: String,
-        access_key:     String,
-        secret:         String,
-        region:         String,
-        request_time:   SystemTime,
+        access_key: String,
+        secret: String,
+        region: String,
+        request_time: SystemTime,
     ) -> Self {
         BodySource::Chunked(ChunkedBodyStream::new(
-            body, seed_signature, access_key, secret, region, request_time,
+            body,
+            seed_signature,
+            access_key,
+            secret,
+            region,
+            request_time,
         ))
     }
 }
@@ -306,8 +311,8 @@ impl BodySource {
 impl ByteStream for BodySource {
     async fn read(&mut self) -> IoResult<Bytes> {
         match self {
-            BodySource::Plain(s)   => s.read().await,
-            BodySource::HexSha(s)  => s.read().await,
+            BodySource::Plain(s) => s.read().await,
+            BodySource::HexSha(s) => s.read().await,
             BodySource::Chunked(s) => s.read().await,
         }
     }

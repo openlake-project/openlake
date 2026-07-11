@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! Cluster-wide TLS material — mirrors `rustfs/src/server/tls_material.rs`.
 //!
 //! `TlsMaterial` is a single value holding the three optional TLS handles
@@ -62,8 +64,8 @@ const ALPN_H2: &[u8] = b"h2";
 /// again — pointless indirection.
 #[derive(Clone)]
 pub struct TlsMaterial {
-    s3_acceptor:   Option<TlsAcceptor>,
-    rpc_acceptor:  Option<TlsAcceptor>,
+    s3_acceptor: Option<TlsAcceptor>,
+    rpc_acceptor: Option<TlsAcceptor>,
     rpc_connector: Option<Arc<ClientConfig>>,
 }
 
@@ -75,17 +77,25 @@ impl TlsMaterial {
         install_default_crypto_provider();
 
         // S3 plane: HTTP/1.1 ALPN — what every AWS SDK still expects.
-        let s3_acceptor = cfg.s3_tls.as_ref()
-            .map(|t| build_tls_acceptor(&t.cert_path, &t.key_path, &[ALPN_H1])
-                .context("building S3 TLS acceptor"))
+        let s3_acceptor = cfg
+            .s3_tls
+            .as_ref()
+            .map(|t| {
+                build_tls_acceptor(&t.cert_path, &t.key_path, &[ALPN_H1])
+                    .context("building S3 TLS acceptor")
+            })
             .transpose()?;
 
         // RPC plane: HTTP/2 ALPN. Server must advertise only `h2` so a
         // peer client cannot accidentally negotiate HTTP/1.1 on the
         // inter-node plane — the wire protocol is h2-only by contract.
-        let rpc_acceptor = cfg.rpc_tls.as_ref()
-            .map(|t| build_tls_acceptor(&t.cert_path, &t.key_path, &[ALPN_H2])
-                .context("building RPC TLS acceptor"))
+        let rpc_acceptor = cfg
+            .rpc_tls
+            .as_ref()
+            .map(|t| {
+                build_tls_acceptor(&t.cert_path, &t.key_path, &[ALPN_H2])
+                    .context("building RPC TLS acceptor")
+            })
             .transpose()?;
 
         // RPC connector: ALPN `h2` so cyper / hyper-util route every
@@ -94,13 +104,18 @@ impl TlsMaterial {
         // the http2 feature is on (cyper does not expose
         // `http2_only(true)`; ALPN is the only switch that flips the
         // pool to h2).
-        let rpc_connector = cfg.rpc_tls.as_ref()
+        let rpc_connector = cfg
+            .rpc_tls
+            .as_ref()
             .and_then(|t| t.client_ca.as_ref())
-            .map(|ca| build_tls_connector(ca, &[ALPN_H2])
-                .context("building RPC TLS connector"))
+            .map(|ca| build_tls_connector(ca, &[ALPN_H2]).context("building RPC TLS connector"))
             .transpose()?;
 
-        Ok(Self { s3_acceptor, rpc_acceptor, rpc_connector })
+        Ok(Self {
+            s3_acceptor,
+            rpc_acceptor,
+            rpc_connector,
+        })
     }
 
     /// Cheap clone of the S3 acceptor (or `None` if the operator left

@@ -20,6 +20,12 @@
           with:
             components: rustfmt, clippy
 
+        - name: install system dependencies
+          run: |
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends \
+              pkg-config clang cmake libhwloc-dev libudev-dev
+
         - uses: Swatinem/rust-cache@v2
 
         - name: fmt

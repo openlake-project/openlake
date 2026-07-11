@@ -1,3 +1,5 @@
+#![allow(clippy::doc_overindented_list_items)]
+
 //! Object-scoped S3 endpoints.
 //!
 //!   * `GET    /{bucket}/{key}`   stream object body to client
@@ -28,9 +30,9 @@ use crate::s3::state::AppState;
 // `middleware::sigv4`. Seed verification recognises all of them; the
 // PUT handler implements the simple ones (UNSIGNED + hex-sha256) and
 // rejects the streaming variants with a mode-specific 501.
-const SHA_UNSIGNED:                   &str = "UNSIGNED-PAYLOAD";
-const SHA_STREAMING:                  &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
-const SHA_STREAMING_TRAILER:          &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
+const SHA_UNSIGNED: &str = "UNSIGNED-PAYLOAD";
+const SHA_STREAMING: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+const SHA_STREAMING_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
 const SHA_STREAMING_UNSIGNED_TRAILER: &str = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
 
 /// Query string accepted on object-scoped GET / HEAD endpoints. Today
@@ -47,23 +49,23 @@ pub struct ObjectQuery {
     #[serde(default, rename = "partNumber")]
     pub part_number: Option<u32>,
     #[serde(default, rename = "uploadId")]
-    pub upload_id:   Option<String>,
+    pub upload_id: Option<String>,
     /// `?uploads` on `POST /{bucket}/{key}` selects `CreateMultipartUpload`;
     /// when paired with `?uploadId=X` the request is malformed. Bare
     /// presence (`?uploads` with no value) deserializes via serde as
     /// `Some("")`, which the handler treats as "uploads flag set".
     #[serde(default)]
-    pub uploads:     Option<String>,
+    pub uploads: Option<String>,
 }
 
 // todo: @arnav implement ?partNumber on GET (fetch one part of a
 // multipart assembled object). Multipart upload is wired; per part
 // reads are still pending and would compose on top of get_range.
 pub async fn get_object(
-    State(state):       State<AppState>,
+    State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
-    Query(query):       Query<ObjectQuery>,
-    headers:            HeaderMap,
+    Query(query): Query<ObjectQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let version_id = parse_version_id(query.version_id.as_deref())?;
     // Parse the Range header syntactically before any engine work so
@@ -73,8 +75,8 @@ pub async fn get_object(
     let engine = state.engine().clone();
     let (info, byte_stream) = SendWrapper::new(async move {
         match version_id.as_deref() {
-            None       => engine.get(&bucket, &key).await,
-            Some(vid)  => engine.get_version(&bucket, &key, vid).await,
+            None => engine.get(&bucket, &key).await,
+            Some(vid) => engine.get_version(&bucket, &key, vid).await,
         }
     })
     .await?;
@@ -84,15 +86,15 @@ pub async fn get_object(
     // zero, etc.) emit 416 with Content-Range: bytes */total per
     // RFC 7233 §4.4 so clients can reissue with a valid window.
     let range = match range_spec {
-        None       => None,
+        None => None,
         Some(spec) => match resolve_range(spec, info.size) {
             Some(window) => Some(window),
-            None         => return Ok(range_not_satisfiable(&info)),
+            None => return Ok(range_not_satisfiable(&info)),
         },
     };
 
     let final_stream: Box<dyn ByteStream> = match range {
-        None                  => byte_stream,
+        None => byte_stream,
         Some((offset, length)) => Box::new(SkipTakeStream::new(byte_stream, offset, length)),
     };
 
@@ -108,7 +110,7 @@ pub async fn get_object(
 ///   * `Err(InvalidVersionID)` — anything else (garbage, wrong length, non-hex chars).
 fn parse_version_id(raw: Option<&str>) -> Result<Option<String>, AppError> {
     let s = match raw {
-        None    => return Ok(None),
+        None => return Ok(None),
         Some(s) => s.trim(),
     };
     if s.is_empty() {
@@ -120,7 +122,7 @@ fn parse_version_id(raw: Option<&str>) -> Result<Option<String>, AppError> {
     // UUID validation: 32 hex chars after stripping dashes (matches the
     // canonical 8-4-4-4-12 layout). Cheap parse — no allocation per char.
     let hex_chars = s.chars().filter(|c| *c != '-').count();
-    let all_hex   = s.chars().all(|c| c == '-' || c.is_ascii_hexdigit());
+    let all_hex = s.chars().all(|c| c == '-' || c.is_ascii_hexdigit());
     if hex_chars == 32 && all_hex {
         return Ok(Some(s.to_owned()));
     }
@@ -130,19 +132,18 @@ fn parse_version_id(raw: Option<&str>) -> Result<Option<String>, AppError> {
 }
 
 pub async fn head_object(
-    State(state):       State<AppState>,
+    State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
-    Query(query):       Query<ObjectQuery>,
+    Query(query): Query<ObjectQuery>,
 ) -> Result<Response, AppError> {
-
     let version_id = parse_version_id(query.version_id.as_deref())?;
     let explicit_version_requested = version_id.is_some();
 
     let engine = state.engine().clone();
     let info = SendWrapper::new(async move {
         match version_id.as_deref() {
-            None       => engine.stat(&bucket, &key).await,
-            Some(vid)  => engine.stat_version(&bucket, &key, vid).await,
+            None => engine.stat(&bucket, &key).await,
+            Some(vid) => engine.stat_version(&bucket, &key, vid).await,
         }
     })
     .await?;
@@ -177,20 +178,18 @@ pub async fn delete_object(
     Path((bucket, key)): Path<(String, String)>,
 ) -> Result<StatusCode, AppError> {
     let engine = state.engine().clone();
-    SendWrapper::new(async move {
-        engine.delete(&bucket, &key).await
-    })
-    .await?;
+    SendWrapper::new(async move { engine.delete(&bucket, &key).await }).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 const DELETE_OBJECTS_MAX_KEYS: usize = 1000;
 
+#[allow(clippy::unnecessary_map_or)]
 pub async fn delete_objects(
     State(state): State<AppState>,
     Path(bucket): Path<String>,
-    headers:      HeaderMap,
-    body:         Body,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<Response, AppError> {
     let content_length: usize = headers
         .get(axum::http::header::CONTENT_LENGTH)
@@ -212,7 +211,8 @@ pub async fn delete_objects(
         ));
     }
 
-    let bytes = axum::body::to_bytes(body, content_length).await
+    let bytes = axum::body::to_bytes(body, content_length)
+        .await
         .map_err(|_| AppError::Malformed("DeleteObjects body unreadable"))?;
 
     if let Some(expected_md5) = supplied_md5.as_deref() {
@@ -221,7 +221,9 @@ pub async fn delete_objects(
         let digest = md5::Md5::digest(bytes.as_ref());
         let actual_md5 = base64::engine::general_purpose::STANDARD.encode(digest);
         if actual_md5 != expected_md5 {
-            return Err(AppError::Malformed("Content-MD5 does not match request body"));
+            return Err(AppError::Malformed(
+                "Content-MD5 does not match request body",
+            ));
         }
     }
 
@@ -229,22 +231,24 @@ pub async fn delete_objects(
         .map_err(|_| AppError::Malformed("invalid <Delete> XML"))?;
 
     if request.objects.is_empty() {
-        return Err(AppError::Malformed("<Delete> must contain at least one <Object>"));
-    }
-    if request.objects.len() > DELETE_OBJECTS_MAX_KEYS {
         return Err(AppError::Malformed(
-            "<Delete> exceeds the 1000-key limit",
+            "<Delete> must contain at least one <Object>",
         ));
     }
+    if request.objects.len() > DELETE_OBJECTS_MAX_KEYS {
+        return Err(AppError::Malformed("<Delete> exceeds the 1000-key limit"));
+    }
     if request.objects.iter().any(|o| {
-        o.version_id.as_deref().map_or(false, |v| !v.is_empty() && v != "null")
+        o.version_id
+            .as_deref()
+            .map_or(false, |v| !v.is_empty() && v != "null")
     }) {
         return Err(AppError::NotImplemented(
             "DeleteObjects with non-null <VersionId> entries is not yet implemented",
         ));
     }
 
-    let quiet  = request.quiet.unwrap_or(false);
+    let quiet = request.quiet.unwrap_or(false);
     let engine = state.engine().clone();
 
     // MinIO parity: route the whole 1000-key batch through ONE
@@ -254,30 +258,39 @@ pub async fn delete_objects(
     // for 16-disk × 2-set), regardless of how many keys. Previously
     // every key did its own 16-way fan-out and held the dsync lock.
     let bucket = bucket.clone();
-    let keys: Vec<String>  = request.objects.iter().map(|o| o.key.clone()).collect();
-    let versions: Vec<Option<String>> = request.objects.iter().map(|o| o.version_id.clone()).collect();
+    let keys: Vec<String> = request.objects.iter().map(|o| o.key.clone()).collect();
+    let versions: Vec<Option<String>> = request
+        .objects
+        .iter()
+        .map(|o| o.version_id.clone())
+        .collect();
     let originals = request.objects;
-    let batch_res = SendWrapper::new(async move {
-        engine.delete_objects(&bucket, &keys).await
-    }).await?;
-    let result: Vec<(String, Option<String>, _)> = originals.into_iter()
+    let batch_res =
+        SendWrapper::new(async move { engine.delete_objects(&bucket, &keys).await }).await?;
+    let result: Vec<(String, Option<String>, _)> = originals
+        .into_iter()
         .zip(batch_res.into_iter())
         .enumerate()
         .map(|(i, (obj, res))| (obj.key, versions[i].clone(), res))
         .collect();
 
     let mut deleted = Vec::new();
-    let mut errors  = Vec::new();
+    let mut errors = Vec::new();
     for (key, version_id, res) in result {
         match res {
-            Ok(())  => {
+            Ok(()) => {
                 if !quiet {
                     deleted.push(DeletedEntry { key, version_id });
                 }
             }
             Err(e) => {
                 let (code, message) = storage_error_to_s3_code(&e);
-                errors.push(ErrorEntry { key, version_id, code, message });
+                errors.push(ErrorEntry {
+                    key,
+                    version_id,
+                    code,
+                    message,
+                });
             }
         }
     }
@@ -289,13 +302,15 @@ pub async fn delete_objects(
 fn storage_error_to_s3_code(e: &openlake_storage::error::StorageError) -> (String, String) {
     use openlake_storage::error::StorageError;
     match e {
-        StorageError::ObjectNotFound { .. }          => ("NoSuchKey".into(),       e.to_string()),
-        StorageError::VersionNotFound { .. }         => ("NoSuchVersion".into(),   e.to_string()),
-        StorageError::BucketNotFound(_)              => ("NoSuchBucket".into(),    e.to_string()),
-        StorageError::InvalidObjectKey(_)            => ("InvalidArgument".into(), e.to_string()),
-        StorageError::LockTimeout(_)                 => ("SlowDown".into(),        e.to_string()),
-        StorageError::InsufficientOnlineDrives { .. } => ("ServiceUnavailable".into(), e.to_string()),
-        _                                            => ("InternalError".into(),  e.to_string()),
+        StorageError::ObjectNotFound { .. } => ("NoSuchKey".into(), e.to_string()),
+        StorageError::VersionNotFound { .. } => ("NoSuchVersion".into(), e.to_string()),
+        StorageError::BucketNotFound(_) => ("NoSuchBucket".into(), e.to_string()),
+        StorageError::InvalidObjectKey(_) => ("InvalidArgument".into(), e.to_string()),
+        StorageError::LockTimeout(_) => ("SlowDown".into(), e.to_string()),
+        StorageError::InsufficientOnlineDrives { .. } => {
+            ("ServiceUnavailable".into(), e.to_string())
+        }
+        _ => ("InternalError".into(), e.to_string()),
     }
 }
 
@@ -346,22 +361,28 @@ struct ErrorEntry {
 }
 
 pub async fn post_object(
-    State(state):        State<AppState>,
+    State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
-    Query(query):        Query<ObjectQuery>,
-    headers:             HeaderMap,
-    body:                Body,
+    Query(query): Query<ObjectQuery>,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<Response, AppError> {
-    let has_uploads   = query.uploads.is_some();
+    let has_uploads = query.uploads.is_some();
     let has_upload_id = query.upload_id.is_some();
     match (has_uploads, has_upload_id) {
-        (true,  false) => create_multipart_handler(state, bucket, key, headers).await,
-        (false, true)  => complete_multipart_handler(
-            state, bucket, key,
-            query.upload_id.expect("checked above"),
-            headers, body,
-        ).await,
-        (true,  true)  => Err(AppError::Malformed(
+        (true, false) => create_multipart_handler(state, bucket, key, headers).await,
+        (false, true) => {
+            complete_multipart_handler(
+                state,
+                bucket,
+                key,
+                query.upload_id.expect("checked above"),
+                headers,
+                body,
+            )
+            .await
+        }
+        (true, true) => Err(AppError::Malformed(
             "?uploads and ?uploadId are mutually exclusive",
         )),
         (false, false) => Err(AppError::Malformed(
@@ -371,9 +392,9 @@ pub async fn post_object(
 }
 
 async fn create_multipart_handler(
-    state:   AppState,
-    bucket:  String,
-    key:     String,
+    state: AppState,
+    bucket: String,
+    key: String,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let content_type = headers
@@ -381,34 +402,37 @@ async fn create_multipart_handler(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
 
-    let engine       = state.engine().clone();
+    let engine = state.engine().clone();
     let bucket_owned = bucket.clone();
-    let key_owned    = key.clone();
+    let key_owned = key.clone();
     let init = SendWrapper::new(async move {
-        engine.create_multipart_upload(&bucket_owned, &key_owned, content_type).await
-    }).await?;
+        engine
+            .create_multipart_upload(&bucket_owned, &key_owned, content_type)
+            .await
+    })
+    .await?;
 
     let body = crate::s3::xml::InitiateMultipartUploadResult::new(bucket, key, init.upload_id);
     Ok(crate::s3::xml::Xml(body).into_response())
 }
 
 async fn complete_multipart_handler(
-    state:     AppState,
-    bucket:    String,
-    key:       String,
+    state: AppState,
+    bucket: String,
+    key: String,
     upload_id: String,
-    headers:   HeaderMap,
-    body:      Body,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<Response, AppError> {
     use crate::s3::xml::{CompleteMultipartUploadRequest, CompleteMultipartUploadResult};
     use openlake_storage::CompletePart;
 
-    let bytes = axum::body::to_bytes(body, 1 << 20).await
+    let bytes = axum::body::to_bytes(body, 1 << 20)
+        .await
         .map_err(|_| AppError::Malformed("CompleteMultipartUpload body unreadable or too large"))?;
 
-    let parsed: CompleteMultipartUploadRequest =
-        quick_xml::de::from_reader(bytes.as_ref())
-            .map_err(|_| AppError::Malformed("invalid <CompleteMultipartUpload> XML"))?;
+    let parsed: CompleteMultipartUploadRequest = quick_xml::de::from_reader(bytes.as_ref())
+        .map_err(|_| AppError::Malformed("invalid <CompleteMultipartUpload> XML"))?;
 
     if parsed.parts.is_empty() {
         return Err(AppError::Malformed(
@@ -416,32 +440,35 @@ async fn complete_multipart_handler(
         ));
     }
 
-    let parts: Vec<CompletePart> = parsed.parts.into_iter().map(|p| CompletePart {
-        part_number: p.part_number,
-        etag:        p.etag,
-    }).collect();
+    let parts: Vec<CompletePart> = parsed
+        .parts
+        .into_iter()
+        .map(|p| CompletePart {
+            part_number: p.part_number,
+            etag: p.etag,
+        })
+        .collect();
 
-    let _ = headers; 
+    let _ = headers;
 
-    let engine     = state.engine().clone();
+    let engine = state.engine().clone();
     let bucket_for = bucket.clone();
-    let key_for    = key.clone();
+    let key_for = key.clone();
     let info = SendWrapper::new(async move {
-        engine.complete_multipart_upload(&bucket_for, &key_for, &upload_id, parts).await
-    }).await?;
+        engine
+            .complete_multipart_upload(&bucket_for, &key_for, &upload_id, parts)
+            .await
+    })
+    .await?;
 
-    let body = CompleteMultipartUploadResult::new(
-        bucket,
-        key,
-        format!("\"{}\"", info.etag),
-    );
+    let body = CompleteMultipartUploadResult::new(bucket, key, format!("\"{}\"", info.etag));
     Ok(crate::s3::xml::Xml(body).into_response())
 }
 
 fn build_body_source(
-    state:          &AppState,
-    headers:        &HeaderMap,
-    body:           Body,
+    state: &AppState,
+    headers: &HeaderMap,
+    body: Body,
     content_length: u64,
 ) -> Result<(u64, BodySource), AppError> {
     let content_sha = headers
@@ -472,10 +499,15 @@ fn build_body_source(
             let secret = state
                 .auth()
                 .secret_for(&parsed_auth.access_key)
-                .ok_or_else(|| AppError::Auth(AuthError::InvalidAccessKeyId(parsed_auth.access_key.clone())))?
+                .ok_or_else(|| {
+                    AppError::Auth(AuthError::InvalidAccessKeyId(
+                        parsed_auth.access_key.clone(),
+                    ))
+                })?
                 .to_owned();
-            let region  = state.auth().region().to_owned();
-            let decoded = decoded_len.ok_or(AppError::Auth(AuthError::MissingDecodedContentLength))?;
+            let region = state.auth().region().to_owned();
+            let decoded =
+                decoded_len.ok_or(AppError::Auth(AuthError::MissingDecodedContentLength))?;
             let src = BodySource::chunked(
                 body,
                 parsed_auth.signature.clone(),
@@ -498,25 +530,32 @@ fn build_body_source(
             content_length,
             BodySource::hex_sha(body, hex).map_err(|e| AppError::BadRequest(io_error_msg(e)))?,
         )),
-        other => Err(AppError::Auth(AuthError::UnsupportedContentSha(other.to_owned()))),
+        other => Err(AppError::Auth(AuthError::UnsupportedContentSha(
+            other.to_owned(),
+        ))),
     }
 }
 
 pub async fn put_object(
-    State(state):       State<AppState>,
+    State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
-    Query(query):       Query<ObjectQuery>,
-    headers:            HeaderMap,
-    body:               Body,
+    Query(query): Query<ObjectQuery>,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<Response, AppError> {
+    if let Some(copy_source) = headers.get("x-amz-copy-source").cloned() {
+        return copy_object(state, bucket, key, copy_source, headers).await;
+    }
     match (query.part_number, query.upload_id.as_deref()) {
-        (Some(n), Some(uid)) => return upload_part_handler(
-            state, bucket, key, uid.to_owned(), n, headers, body,
-        ).await,
+        (Some(n), Some(uid)) => {
+            return upload_part_handler(state, bucket, key, uid.to_owned(), n, headers, body).await
+        }
         (None, None) => {}
-        _ => return Err(AppError::Malformed(
-            "partNumber and uploadId must both be present or both absent",
-        )),
+        _ => {
+            return Err(AppError::Malformed(
+                "partNumber and uploadId must both be present or both absent",
+            ))
+        }
     }
 
     let mut parts = http::Request::new(()).into_parts().0;
@@ -529,14 +568,8 @@ pub async fn put_object(
         .and_then(|s| s.parse().ok())
         .ok_or(AppError::Malformed("missing or invalid Content-Length"))?;
 
-    if parts.headers.contains_key("content-md5") {
-        return Err(AppError::BadRequest(
-            "Content-MD5 is not supported; use x-amz-checksum-blake3",
-        ));
-    }
-    let client_blake3 = extract_blake3_claim(&parts.headers)?;
-
-    let (engine_size, mut body_src) = build_body_source(&state, &parts.headers, body, content_length)?;
+    let (engine_size, mut body_src) =
+        build_body_source(&state, &parts.headers, body, content_length)?;
 
     let content_type: Option<String> = parts
         .headers
@@ -545,27 +578,16 @@ pub async fn put_object(
         .map(str::to_owned);
 
     let engine = state.engine().clone();
-    let info = SendWrapper::new(async move {
-        engine
-            .put(&bucket, &key, engine_size, &mut body_src, content_type)
-            .await
+    let info = SendWrapper::new({
+        let bucket = bucket.clone();
+        let key = key.clone();
+        async move {
+            engine
+                .put(&bucket, &key, engine_size, &mut body_src, content_type)
+                .await
+        }
     })
     .await?;
-
-    if let Some(claimed) = client_blake3 {
-        if claimed != info.etag.to_ascii_lowercase() {
-            let engine = state.engine().clone();
-            let bucket = info.bucket.clone();
-            let key    = info.key.clone();
-            let _ = SendWrapper::new(async move {
-                engine.delete(&bucket, &key).await
-            }).await;
-            return Err(AppError::BadRequest(
-                "x-amz-checksum-blake3 mismatch: client-supplied digest does \
-                 not match server-computed BLAKE3 of the body"
-            ));
-        }
-    }
 
     let mut headers = HeaderMap::new();
     if let Ok(v) = HeaderValue::from_str(&format!("\"{}\"", info.etag)) {
@@ -576,20 +598,104 @@ pub async fn put_object(
             headers.insert("x-amz-version-id", v);
         }
     }
-    if let Ok(v) = HeaderValue::from_str(&info.etag) {
-        headers.insert("x-amz-checksum-blake3", v);
-    }
     Ok((StatusCode::OK, headers).into_response())
+}
+fn rfc3339_from_ms(ms: u64) -> String {
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
+    OffsetDateTime::from_unix_timestamp_nanos((ms as i128) * 1_000_000)
+        .ok()
+        .and_then(|dt| dt.format(&Rfc3339).ok())
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_owned())
+}
+
+fn parse_copy_source(value: &HeaderValue) -> Result<(String, String), AppError> {
+    let raw = value
+        .to_str()
+        .map_err(|_| AppError::Malformed("x-amz-copy-source must be ASCII"))?;
+
+    let raw = raw.trim_start_matches('/');
+    let decoded = percent_encoding::percent_decode_str(raw)
+        .decode_utf8()
+        .map_err(|_| AppError::Malformed("x-amz-copy-source must be valid UTF-8"))?;
+
+    if decoded.contains("?versionId=") {
+        return Err(AppError::NotImplemented(
+            "CopyObject with versionId is not supported",
+        ));
+    }
+
+    let (bucket, key) = decoded
+        .split_once('/')
+        .ok_or(AppError::Malformed("x-amz-copy-source must be /bucket/key"))?;
+
+    if bucket.is_empty() || key.is_empty() {
+        return Err(AppError::Malformed("x-amz-copy-source must be /bucket/key"));
+    }
+
+    Ok((bucket.to_owned(), key.to_owned()))
+}
+
+fn copy_object(
+    state: AppState,
+    dst_bucket: String,
+    dst_key: String,
+    copy_source: HeaderValue,
+    headers: HeaderMap,
+) -> SendWrapper<impl std::future::Future<Output = Result<Response, AppError>>> {
+    SendWrapper::new(async move {
+        let (src_bucket, src_key) = parse_copy_source(&copy_source)?;
+        if headers
+            .get("x-amz-metadata-directive")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| !v.eq_ignore_ascii_case("COPY"))
+        {
+            return Err(AppError::NotImplemented(
+                "CopyObject metadata replacement is not supported",
+            ));
+        }
+
+        if headers
+            .get("x-amz-tagging-directive")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| !v.eq_ignore_ascii_case("COPY"))
+        {
+            return Err(AppError::NotImplemented(
+                "CopyObject tagging replacement is not supported",
+            ));
+        }
+        let engine = state.engine().clone();
+
+        let (src_info, mut src_stream) = engine.get(&src_bucket, &src_key).await?;
+        let content_type = src_info.content_type.clone();
+
+        let dst_info = engine
+            .put(
+                &dst_bucket,
+                &dst_key,
+                src_info.size,
+                src_stream.as_mut(),
+                content_type,
+            )
+            .await?;
+
+        let body = crate::s3::xml::CopyObjectResult::new(
+            rfc3339_from_ms(dst_info.modified_ms),
+            format!("\"{}\"", dst_info.etag),
+        );
+
+        Ok(crate::s3::xml::Xml(body).into_response())
+    })
 }
 
 async fn upload_part_handler(
-    state:       AppState,
-    bucket:      String,
-    key:         String,
-    upload_id:   String,
+    state: AppState,
+    bucket: String,
+    key: String,
+    upload_id: String,
     part_number: u32,
-    headers:     HeaderMap,
-    body:        Body,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<Response, AppError> {
     let content_length: u64 = headers
         .get(axum::http::header::CONTENT_LENGTH)
@@ -599,15 +705,22 @@ async fn upload_part_handler(
 
     let (engine_size, mut body_src) = build_body_source(&state, &headers, body, content_length)?;
 
-    let engine     = state.engine().clone();
+    let engine = state.engine().clone();
     let bucket_for = bucket.clone();
-    let key_for    = key.clone();
+    let key_for = key.clone();
     let info = SendWrapper::new(async move {
-        engine.upload_part(
-            &bucket_for, &key_for, &upload_id, part_number,
-            engine_size, &mut body_src,
-        ).await
-    }).await?;
+        engine
+            .upload_part(
+                &bucket_for,
+                &key_for,
+                &upload_id,
+                part_number,
+                engine_size,
+                &mut body_src,
+            )
+            .await
+    })
+    .await?;
 
     let mut resp_headers = HeaderMap::new();
     if let Ok(v) = HeaderValue::from_str(&format!("\"{}\"", info.etag)) {
@@ -618,29 +731,6 @@ async fn upload_part_handler(
 
 fn is_hex_sha256(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-fn extract_blake3_claim(headers: &HeaderMap) -> Result<Option<String>, AppError> {
-    let mut blake3: Option<String> = None;
-    for (name, value) in headers.iter() {
-        let n = name.as_str();
-        if !n.starts_with("x-amz-checksum-") {
-            continue;
-        }
-        if n != "x-amz-checksum-blake3" {
-            return Err(AppError::BadRequest(
-                "only x-amz-checksum-blake3 is supported; other checksum \
-                 algorithms (sha256/sha1/crc32/crc32c/crc64nvme/md5/sha512/\
-                 xxhash*) are rejected — use blake3",
-            ));
-        }
-        let hex = value
-            .to_str()
-            .map_err(|_| AppError::BadRequest("x-amz-checksum-blake3 not ASCII"))?
-            .to_ascii_lowercase();
-        blake3 = Some(hex);
-    }
-    Ok(blake3)
 }
 
 fn io_error_msg(e: openlake_io::IoError) -> &'static str {
@@ -662,7 +752,7 @@ fn stream_object_response(
 ) -> Response {
     let total = info.size;
     let (status, served_len) = match range {
-        None              => (StatusCode::OK,              total),
+        None => (StatusCode::OK, total),
         Some((_, length)) => (StatusCode::PARTIAL_CONTENT, length),
     };
 
@@ -710,15 +800,9 @@ fn stream_object_response(
                         chunk
                     };
                     sent += frame.len() as u64;
-                    Some((
-                        Ok::<bytes::Bytes, std::io::Error>(frame),
-                        (body, cap, sent),
-                    ))
+                    Some((Ok::<bytes::Bytes, std::io::Error>(frame), (body, cap, sent)))
                 }
-                Err(e) => Some((
-                    Err(std::io::Error::other(e.to_string())),
-                    (body, cap, sent),
-                )),
+                Err(e) => Some((Err(std::io::Error::other(e.to_string())), (body, cap, sent))),
             }
         },
     ));
@@ -734,11 +818,11 @@ fn stream_object_response(
 #[derive(Debug, Clone, Copy)]
 enum RangeSpec {
     /// `bytes=start-end` (end is inclusive).
-    Bounded   { start: u64, end: u64 },
+    Bounded { start: u64, end: u64 },
     /// `bytes=start-` (from start to EOF).
     OpenEnded { start: u64 },
     /// `bytes=-last_n` (the last `last_n` bytes of the object).
-    Suffix    { last_n: u64 },
+    Suffix { last_n: u64 },
 }
 
 /// Parse the request's `Range:` header. Returns `Ok(None)` when no
@@ -747,28 +831,41 @@ enum RangeSpec {
 /// are resolved separately by `resolve_range`.
 fn parse_range_header(headers: &HeaderMap) -> Result<Option<RangeSpec>, AppError> {
     let raw = match headers.get(axum::http::header::RANGE) {
-        None    => return Ok(None),
-        Some(v) => v.to_str().map_err(|_| AppError::Malformed("invalid Range header"))?,
+        None => return Ok(None),
+        Some(v) => v
+            .to_str()
+            .map_err(|_| AppError::Malformed("invalid Range header"))?,
     };
     let spec = raw
         .strip_prefix("bytes=")
         .ok_or(AppError::Malformed("Range must start with 'bytes='"))?;
     if spec.contains(',') {
-        return Err(AppError::Malformed("multi-range requests are not supported"));
+        return Err(AppError::Malformed(
+            "multi-range requests are not supported",
+        ));
     }
     let (start_str, end_str) = spec
         .split_once('-')
         .ok_or(AppError::Malformed("Range missing '-' separator"))?;
     let parse_u64 = |s: &str| -> Result<u64, AppError> {
-        s.parse::<u64>().map_err(|_| AppError::Malformed("invalid integer in Range"))
+        s.parse::<u64>()
+            .map_err(|_| AppError::Malformed("invalid integer in Range"))
     };
     let parsed = match (start_str.is_empty(), end_str.is_empty()) {
-        (true,  true)  => return Err(AppError::Malformed("Range 'bytes=-' has neither start nor suffix")),
-        (true,  false) => RangeSpec::Suffix    { last_n: parse_u64(end_str)? },
-        (false, true)  => RangeSpec::OpenEnded { start:  parse_u64(start_str)? },
+        (true, true) => {
+            return Err(AppError::Malformed(
+                "Range 'bytes=-' has neither start nor suffix",
+            ))
+        }
+        (true, false) => RangeSpec::Suffix {
+            last_n: parse_u64(end_str)?,
+        },
+        (false, true) => RangeSpec::OpenEnded {
+            start: parse_u64(start_str)?,
+        },
         (false, false) => {
             let start = parse_u64(start_str)?;
-            let end   = parse_u64(end_str)?;
+            let end = parse_u64(end_str)?;
             if end < start {
                 return Err(AppError::Malformed("Range end is before start"));
             }
@@ -833,9 +930,6 @@ fn populate_object_headers(headers: &mut HeaderMap, info: &ObjectInfo) {
     if let Ok(v) = HeaderValue::from_str(&format!("\"{}\"", info.etag)) {
         headers.insert(ETAG, v);
     }
-    if let Ok(v) = HeaderValue::from_str(&info.etag) {
-        headers.insert("x-amz-checksum-blake3", v);
-    }
     if let Ok(v) = HeaderValue::from_str(&http_date_rfc1123(info.modified_ms)) {
         headers.insert(LAST_MODIFIED, v);
     }
@@ -861,7 +955,44 @@ fn http_date_rfc1123(ms: u64) -> String {
          [hour padding:zero]:[minute padding:zero]:[second padding:zero] GMT"
     );
     let secs = (ms / 1000) as i64;
-    let dt = OffsetDateTime::from_unix_timestamp(secs)
-        .unwrap_or(OffsetDateTime::UNIX_EPOCH);
-    dt.format(&FMT).unwrap_or_else(|_| "Thu, 01 Jan 1970 00:00:00 GMT".into())
+    let dt = OffsetDateTime::from_unix_timestamp(secs).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    dt.format(&FMT)
+        .unwrap_or_else(|_| "Thu, 01 Jan 1970 00:00:00 GMT".into())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn parse_copy_source_accepts_bucket_and_key() {
+        let header = HeaderValue::from_static("/bucket/path/to/object.parquet");
+        let (bucket, key) = parse_copy_source(&header).unwrap();
+
+        assert_eq!(bucket, "bucket");
+        assert_eq!(key, "path/to/object.parquet");
+    }
+
+    #[test]
+    fn parse_copy_source_decodes_percent_encoded_key() {
+        let header = HeaderValue::from_static("/bucket/path%20with%20spaces/file.parquet");
+        let (bucket, key) = parse_copy_source(&header).unwrap();
+
+        assert_eq!(bucket, "bucket");
+        assert_eq!(key, "path with spaces/file.parquet");
+    }
+
+    #[test]
+    fn parse_copy_source_rejects_missing_key() {
+        let header = HeaderValue::from_static("/bucket");
+
+        assert!(parse_copy_source(&header).is_err());
+    }
+
+    #[test]
+    fn parse_copy_source_rejects_version_id() {
+        let header = HeaderValue::from_static("/bucket/path/file.parquet?versionId=abc123");
+
+        assert!(parse_copy_source(&header).is_err());
+    }
 }

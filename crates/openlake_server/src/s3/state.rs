@@ -27,6 +27,7 @@ use std::rc::Rc;
 use openlake_storage::Engine;
 
 use crate::auth::AuthState;
+use crate::in_memory_store::InMemoryStore;
 
 /// Shared state passed to every axum handler via `State<AppState>`.
 /// Cloning is cheap (one refcount bump).
@@ -37,7 +38,8 @@ pub struct AppState {
 
 struct AppStateInner {
     engine: Rc<Engine>,
-    auth:   Rc<AuthState>,
+    auth: Rc<AuthState>,
+    store: InMemoryStore,
 }
 
 // SAFETY: see module-level docs — single-thread confinement.
@@ -45,12 +47,23 @@ unsafe impl Send for AppState {}
 unsafe impl Sync for AppState {}
 
 impl AppState {
-    pub fn new(engine: Rc<Engine>, auth: Rc<AuthState>) -> Self {
+    pub fn new(engine: Rc<Engine>, auth: Rc<AuthState>, store: InMemoryStore) -> Self {
         Self {
-            inner: Rc::new(AppStateInner { engine, auth }),
+            inner: Rc::new(AppStateInner {
+                engine,
+                auth,
+                store,
+            }),
         }
     }
 
-    pub fn engine(&self) -> &Rc<Engine> { &self.inner.engine }
-    pub fn auth(&self)   -> &Rc<AuthState> { &self.inner.auth }
+    pub fn engine(&self) -> &Rc<Engine> {
+        &self.inner.engine
+    }
+    pub fn auth(&self) -> &Rc<AuthState> {
+        &self.inner.auth
+    }
+    pub fn store(&self) -> &InMemoryStore {
+        &self.inner.store
+    }
 }
