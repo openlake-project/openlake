@@ -4,14 +4,14 @@ Apache Flink Checkpointing with OpenLake
    :depth: 2
 
 This guide walks through setting up Apache Flink with OpenLake as the
-S3-compatible checkpoint storage backend, running a real OpenLake cluster
-(not MinIO) inside Docker, and verifying that Flink checkpoints are
-successfully written to and read from OpenLake.
+S3-compatible checkpoint storage backend, running an OpenLake cluster
+inside Docker, and verifying that Flink checkpoints are successfully
+written to and read from OpenLake.
 
 .. note::
    This guide uses the actual ``openlaked`` binary built from this
-   repository — **not MinIO**. The OpenLake server logs (module names such
-   as ``openlake_io::``, ``openlake::s3::listener``, and
+   repository. The OpenLake server logs (module names such as
+   ``openlake_io::``, ``openlake::s3::listener``, and
    ``openlake_storage::format``) confirm this, and are included below for
    reference.
 
@@ -66,8 +66,8 @@ coding:
    transport = "h2"
 
    [[credentials]]
-   access_key = "minioadmin"
-   secret_key = "minioadmin"
+   access_key = "openlakeadmin"
+   secret_key = "openlakeadmin"
 
    [[nodes]]
    id = 1
@@ -127,7 +127,7 @@ Step 4: Run the OpenLake container
 
    docker logs openlaked --tail 20
 
-**Actual output (proof this is OpenLake, not MinIO)**
+**Actual output**
 
 .. code-block:: text
 
@@ -189,8 +189,8 @@ Append the following to ``/opt/flink/conf/flink-conf.yaml`` inside
    docker exec flink-jobmanager bash -c "cat >> /opt/flink/conf/flink-conf.yaml << 'EOF'
    state.backend: rocksdb
    state.checkpoints.dir: s3://flink-checkpoints/checkpoints/
-   s3.access-key: minioadmin
-   s3.secret-key: minioadmin
+   s3.access-key: openlakeadmin
+   s3.secret-key: openlakeadmin
    s3.endpoint: http://openlaked:9000
    s3.path.style.access: true
    EOF"
@@ -198,8 +198,8 @@ Append the following to ``/opt/flink/conf/flink-conf.yaml`` inside
    docker exec flink-taskmanager bash -c "cat >> /opt/flink/conf/flink-conf.yaml << 'EOF'
    state.backend: rocksdb
    state.checkpoints.dir: s3://flink-checkpoints/checkpoints/
-   s3.access-key: minioadmin
-   s3.secret-key: minioadmin
+   s3.access-key: openlakeadmin
+   s3.secret-key: openlakeadmin
    s3.endpoint: http://openlaked:9000
    s3.path.style.access: true
    EOF"
@@ -225,8 +225,8 @@ OpenLake does not create buckets implicitly — create it via the AWS CLI:
 .. code-block:: bash
 
    docker run --rm --network flink-openlake-net \
-     -e AWS_ACCESS_KEY_ID=minioadmin \
-     -e AWS_SECRET_ACCESS_KEY=minioadmin \
+     -e AWS_ACCESS_KEY_ID=openlakeadmin \
+     -e AWS_SECRET_ACCESS_KEY=openlakeadmin \
      -e AWS_REQUEST_CHECKSUM_CALCULATION=when_required \
      amazon/aws-cli --endpoint-url http://openlaked:9000 \
      s3 mb s3://flink-checkpoints
@@ -328,15 +328,14 @@ Screenshots
 ------------
 
 The following screenshots were captured from a live local run and confirm
-that Flink is reading from and writing to a real OpenLake cluster (not
-MinIO).
+that Flink is reading from and writing to OpenLake.
 
 **1. OpenLake server startup logs**
 
-Confirms the storage backend is the actual ``openlaked`` binary from this
+Confirms the storage backend is the ``openlaked`` binary from this
 repository — note the ``openlake_io::``, ``openlake::s3::listener``, and
 ``openlake_storage::format`` module names, which are unique to this
-codebase and do not appear in MinIO's logs.
+codebase.
 
 .. image:: ../openlake-server-logs.png
    :alt: OpenLake server startup logs showing openlake_io, openlake::s3::listener, and openlake_storage::format modules
