@@ -582,6 +582,7 @@ async fn run_pump_compio(
     fd: std::os::fd::RawFd,
     recv_tx: mpsc::UnboundedSender<()>,
 ) {
+    tracing::info!(fd, "rdma cq pump started");
     let mut wcs: [ibv_wc; WC_BATCH as usize] = unsafe { mem::zeroed() };
     loop {
         let op = compio::driver::op::PollOnce::new(
@@ -589,17 +590,28 @@ async fn run_pump_compio(
             compio::driver::op::Interest::Readable,
         );
         // todo: @arnav pump silently dies on any verbs or poll error, awaiters can hang forever
-        if compio::runtime::submit(op).await.0.is_err() {
+        if let Err(e) = compio::runtime::submit(op).await.0 {
+            tracing::error!(fd, "rdma cq pump EXITING: poll comp_channel: {e}");
             return;
         }
         unsafe {
             let mut ev_cq: *mut ibv_cq = ptr::null_mut();
             let mut ctx: *mut std::ffi::c_void = ptr::null_mut();
             if ibv_get_cq_event(sock.comp_channel.as_ptr(), &mut ev_cq, &mut ctx) != 0 {
+                tracing::error!(
+                    fd,
+                    "rdma cq pump EXITING: ibv_get_cq_event: {}",
+                    io::Error::last_os_error()
+                );
                 return;
             }
             ibv_ack_cq_events(ev_cq, 1);
             if ibv_req_notify_cq(sock.cq.as_ptr(), 0) != 0 {
+                tracing::error!(
+                    fd,
+                    "rdma cq pump EXITING: ibv_req_notify_cq: {}",
+                    io::Error::last_os_error()
+                );
                 return;
             }
             loop {

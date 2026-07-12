@@ -27,6 +27,7 @@ pub async fn serve(
         .pump
         .take_recv_rx()
         .ok_or_else(|| anyhow::anyhow!("rdma_server: pump recv_rx already taken"))?;
+    tracing::info!(runtime_id = node.runtime_id, "rdma dispatcher started");
     let mut buf = Vec::with_capacity(BUF_SIZE);
     loop {
         loop {
@@ -48,6 +49,10 @@ pub async fn serve(
             .detach();
         }
         if rx.next().await.is_none() {
+            tracing::error!(
+                runtime_id = node.runtime_id,
+                "rdma dispatcher EXITING: cq pump channel closed; receive plane dead on this runtime"
+            );
             return Ok(());
         }
     }
