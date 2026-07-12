@@ -257,6 +257,45 @@ impl Engine {
         BucketMeta::decode(&buf).map_err(StorageError::Io)
     }
 
+    /// `GET /` — ListBuckets.
+    pub async fn list_buckets(&self) -> StorageResult<Vec<(String, u64)>> {
+        let backends = self.all_backends()?;
+        let read_quorum = self.cluster.read_quorum();
+
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        let mut answered = 0usize;
+        let mut last_err: Option<IoError> = None;
+        for r in join_all(backends.iter().map(|b| b.list_vols())).await {
+            match r {
+                Ok(vols) => {
+                    answered += 1;
+                    for v in vols {
+                        *counts.entry(v.name).or_default() += 1;
+                    }
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if answered < read_quorum {
+            return Err(StorageError::from(last_err.unwrap_or_else(|| {
+                IoError::InvalidArgument("no disks responded to list_vols".into())
+            })));
+        }
+
+        let names: Vec<String> = counts
+            .into_iter()
+            .filter(|(_, seen)| *seen >= read_quorum)
+            .map(|(name, _)| name)
+            .collect();
+        let metas = join_all(names.iter().map(|n| self.get_bucket_meta(n))).await;
+        Ok(names
+            .into_iter()
+            .zip(metas)
+            .map(|(name, meta)| (name, meta.map(|m| m.created_ms).unwrap_or(0)))
+            .collect())
+    }
+
     pub async fn create_bucket(&self, bucket: &str, meta: BucketMeta) -> StorageResult<()> {
         validate_bucket_name(bucket)?;
         let _lock = self
@@ -3493,6 +3532,47 @@ mod tests {
         ] {
             validate_bucket_name(ok).unwrap();
         }
+    }
+
+    #[compio::test]
+    async fn list_buckets_returns_all_created() {
+        let (_dirs, e) = eng(3, 3).await;
+        // eng() already created "buk"; add two more.
+        e.create_bucket("alpha", BucketMeta::new(1000, false))
+            .await
+            .unwrap();
+        e.create_bucket("zeta", BucketMeta::new(2000, false))
+            .await
+            .unwrap();
+        let listed = e.list_buckets().await.unwrap();
+        let names: Vec<&str> = listed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "buk", "zeta"]); // union, sorted, no system vols
+        let created: std::collections::HashMap<&str, u64> =
+            listed.iter().map(|(n, c)| (n.as_str(), *c)).collect();
+        assert_eq!(created["alpha"], 1000);
+        assert_eq!(created["zeta"], 2000);
+    }
+
+    #[compio::test]
+    async fn list_buckets_empty_when_none() {
+        let cluster = local_cluster(3, 3);
+        let dirs: Vec<TempDir> = (0..3).map(|_| TempDir::new().unwrap()).collect();
+        let mut backends: HashMap<DiskAddr, Rc<dyn StorageBackend>> = HashMap::new();
+        for (i, d) in dirs.iter().enumerate() {
+            backends.insert(
+                DiskAddr {
+                    node_id: i as NodeId,
+                    disk_idx: 0,
+                },
+                Rc::new(LocalFsBackend::new(d.path()).unwrap()),
+            );
+        }
+        let num_sets = cluster.num_sets().max(1);
+        let dsync_by_set: Vec<Rc<crate::dsync::DsyncClient>> = (0..num_sets)
+            .map(|_| Rc::new(crate::dsync::DsyncClient::no_op()))
+            .collect();
+        let e = Engine::new(cluster, backends, dsync_by_set, 0);
+        assert!(e.list_buckets().await.unwrap().is_empty());
     }
 
     #[compio::test]

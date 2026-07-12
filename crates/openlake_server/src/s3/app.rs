@@ -18,7 +18,7 @@ use compio::tls::TlsAcceptor;
 use std::net::SocketAddr;
 
 use crate::config::Config;
-use crate::s3::error::{not_found, AppError};
+use crate::s3::error::not_found;
 use crate::s3::handlers::{buckets, in_memory_store, objects};
 use crate::s3::listener::TlsTcpListener;
 use crate::s3::middleware::sigv4::sigv4;
@@ -34,7 +34,7 @@ pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
         .post(objects::delete_objects);
 
     Router::new()
-        .route("/", get(list_buckets_unimplemented))
+        .route("/", get(buckets::list_buckets))
         .route(
             "/openlake/admin/v1/config",
             get(move || {
@@ -72,10 +72,6 @@ pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
         .layer(axum::middleware::from_fn(crate::s3::metrics::meter))
         .layer(DefaultBodyLimit::disable())
         .with_state(state)
-}
-
-async fn list_buckets_unimplemented() -> Result<axum::http::Response<axum::body::Body>, AppError> {
-    Err(AppError::NotImplemented("ListBuckets is not implemented"))
 }
 
 async fn serve_admin_config(cfg: Arc<Config>) -> axum::Json<Config> {

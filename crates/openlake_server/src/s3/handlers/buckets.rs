@@ -20,8 +20,9 @@ use serde::Deserialize;
 use crate::s3::error::AppError;
 use crate::s3::state::AppState;
 use crate::s3::xml::{
-    CommonPrefix, ListBucketObject, ListBucketResult, ListBucketResultV1, LocationConstraint,
-    Owner, VersioningConfiguration, Xml, S3_NS,
+    BucketEntry, BucketsList, CommonPrefix, ListAllMyBucketsResult, ListBucketObject,
+    ListBucketResult, ListBucketResultV1, LocationConstraint, Owner, VersioningConfiguration, Xml,
+    S3_NS,
 };
 
 /// Bucket-scoped sub-resources S3 defines that openlake does not yet
@@ -473,6 +474,25 @@ fn storage_class_label(sc: &openlake_storage::StorageClass) -> &'static str {
     match sc {
         Inline | Single => "STANDARD",
     }
+}
+
+/// `GET /` — ListBuckets. Returns every bucket the cluster holds with
+/// its creation time.
+pub async fn list_buckets(State(state): State<AppState>) -> Result<Response, AppError> {
+    let engine = state.engine().clone();
+    let listed = SendWrapper::new(async move { engine.list_buckets().await }).await?;
+    let bucket = listed
+        .into_iter()
+        .map(|(name, created_ms)| BucketEntry {
+            name,
+            creation_date: rfc3339_from_ms(created_ms),
+        })
+        .collect();
+    let body = ListAllMyBucketsResult {
+        xmlns: S3_NS,
+        buckets: BucketsList { bucket },
+    };
+    Ok(Xml(body).into_response())
 }
 
 fn rfc3339_from_ms(ms: u64) -> String {

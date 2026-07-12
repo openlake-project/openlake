@@ -170,6 +170,32 @@ pub struct Owner {
     pub display_name: String,
 }
 
+/// `<ListAllMyBucketsResult xmlns="...">` — body of `GET /`
+/// (ListBuckets).
+#[derive(Serialize)]
+#[serde(rename = "ListAllMyBucketsResult")]
+pub struct ListAllMyBucketsResult {
+    #[serde(rename = "@xmlns")]
+    pub xmlns: &'static str,
+    #[serde(rename = "Buckets")]
+    pub buckets: BucketsList,
+}
+
+#[derive(Serialize)]
+pub struct BucketsList {
+    #[serde(rename = "Bucket", default)]
+    pub bucket: Vec<BucketEntry>,
+}
+
+#[derive(Serialize)]
+#[serde(rename = "Bucket")]
+pub struct BucketEntry {
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "CreationDate")]
+    pub creation_date: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename = "ListBucketResult")]
 pub struct ListBucketResultV1 {
