@@ -5,6 +5,9 @@ edition.workspace      = true
 rust-version.workspace = true
 license.workspace      = true
 
+[features]
+rdma = ["openlake_io/rdma"]
+
 [dependencies]
 openlake_io = { path = "../openlake_io" }
 

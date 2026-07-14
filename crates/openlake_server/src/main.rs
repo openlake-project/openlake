@@ -32,8 +32,6 @@
 mod auth;
 mod config;
 mod in_memory_store;
-#[cfg(all(feature = "rdma", target_os = "linux"))]
-mod kv_slab;
 mod lock_server;
 #[cfg(all(feature = "rdma", target_os = "linux"))]
 mod rdma_server;
@@ -404,7 +402,7 @@ async fn run_runtime(
     let rdma_pending: Option<(
         openlake_io::rdma::RdmaSetup,
         openlake_io::rdma::RdmaConfig,
-        Option<Rc<kv_slab::KvSlab>>,
+        Option<Rc<openlake_io::KvSlab>>,
     )> = match cfg.transport {
         config::TransportMode::Rdma => {
             let rdma_cfg = build_rdma_config(
@@ -416,8 +414,8 @@ async fn run_runtime(
                 openlake_io::rdma::RdmaNode::start_local(&rdma_cfg).context("rdma start_local")?;
             let kv_slab = cfg
                 .kv_slab
-                .map(|s| -> anyhow::Result<Rc<kv_slab::KvSlab>> {
-                    Ok(Rc::new(kv_slab::KvSlab::new(
+                .map(|s| -> anyhow::Result<Rc<openlake_io::KvSlab>> {
+                    Ok(Rc::new(openlake_io::KvSlab::new(
                         setup.dev.clone(),
                         s.slot_bytes,
                         s.slot_count,
@@ -484,7 +482,7 @@ async fn run_runtime(
     });
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
-    let mut rdma_kv_slab: Option<Rc<kv_slab::KvSlab>> = None;
+    let mut rdma_kv_slab: Option<Rc<openlake_io::KvSlab>> = None;
     #[cfg(all(feature = "rdma", target_os = "linux"))]
     let rdma_node: Option<Rc<openlake_io::rdma::RdmaNode>> =
         if let Some((setup, rdma_cfg, kv_slab)) = rdma_pending {
