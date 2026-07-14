@@ -31,6 +31,8 @@
 
 mod auth;
 mod config;
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+mod engine;
 mod in_memory_store;
 #[cfg(all(feature = "rdma", target_os = "linux"))]
 mod kv_slab;
