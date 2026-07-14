@@ -6,8 +6,6 @@ use openlake_io::rdma::wire::{RdmaRequest, RdmaResponse};
 use openlake_io::rpc::{Response, WireError};
 use openlake_io::KvSlab;
 
-use crate::rdma_engine::RdmaEngine;
-
 pub struct KvEngine {
     slab: Option<Rc<KvSlab>>,
 }
@@ -16,10 +14,8 @@ impl KvEngine {
     pub fn new(slab: Option<Rc<KvSlab>>) -> Self {
         Self { slab }
     }
-}
 
-impl RdmaEngine for KvEngine {
-    fn handle(&self, req: RdmaRequest) -> RdmaResponse {
+    pub fn handle(&self, req: RdmaRequest) -> RdmaResponse {
         use RdmaRequest::*;
         match (req, &self.slab) {
             (BatchReserve { count }, Some(s)) => RdmaResponse::BatchReserved {

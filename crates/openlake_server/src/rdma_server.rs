@@ -10,7 +10,7 @@ use openlake_io::rdma::{PeerKey, RawAddressHandle, RdmaNode, BUF_SIZE};
 use openlake_io::rpc::{decode, encode, Response, WireError};
 use openlake_io::stream::ByteStream;
 use openlake_io::{KvSlab, LocalFsBackend, StorageBackend};
-use openlake_storage::{KvEngine, RdmaEngine};
+use openlake_storage::KvEngine;
 
 use crate::lock_server::LockServer;
 use crate::rpc_server::{disk_at, dispatch};
