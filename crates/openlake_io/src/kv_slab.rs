@@ -4,8 +4,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use openlake_io::rdma::wire::CommitEntry;
-use openlake_io::rdma::{Buffers, IbDevice};
+use crate::rdma::wire::CommitEntry;
+use crate::rdma::{Buffers, IbDevice};
 
 pub struct SlotPool {
     free: VecDeque<u32>,
