@@ -655,7 +655,7 @@ fn copy_object(
 
         let (src_info, mut src_stream) = engine.get(&src_bucket, &src_key).await?;
         // TODO(v0.6): Support replacement of additional x-amz-meta-* headers.
-// Currently, CopyObject metadata replacement only propagates Content-Type.
+        // Currently, CopyObject metadata replacement only propagates Content-Type.
         let content_type = if replace_metadata {
             headers
                 .get(CONTENT_TYPE)
