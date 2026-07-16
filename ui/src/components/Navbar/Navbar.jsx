@@ -1,61 +1,38 @@
+import { Search, Bell } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+
 import "./Navbar.css";
-import ProfileMenu from "../ProfileMenu/ProfileMenu";
-import {
-  FiBell,
-  FiMoon,
-  FiSun,
-  FiUser,
-} from "react-icons/fi";
-
-import { useTheme } from "../../context/ThemeContext";
-import { useState } from "react";
-
-import NotificationPanel from "../NotificationPanel/NotificationPanel";
 
 function Navbar() {
-  const [showProfile, setShowProfile] = useState(false);
-  const { darkMode, setDarkMode } = useTheme();
-
-  const [showNotifications, setShowNotifications] = useState(false);
-
   return (
+    <header className="navbar">
 
-    <div className="navbar">
-
-      <h2>OpenLake Dashboard</h2>
+      <h2 className="page-title">
+        Buckets
+      </h2>
 
       <div className="navbar-right">
 
-        <button
-          className="icon-btn"
-          onClick={() => setDarkMode(!darkMode)}
-        >
-          {darkMode ? <FiSun /> : <FiMoon />}
-        </button>
+        <div className="search-box">
 
-        <button
-          className="icon-btn"
-          onClick={() =>
-            setShowNotifications(!showNotifications)
-          }
-        >
-          <FiBell />
-        </button>
+          <Search size={18} />
 
-        <div
-className="profile"
-onClick={() => setShowProfile(!showProfile)}
->
-          <FiUser />
-          <span>Admin</span>
+          <Input placeholder="Search buckets..." />
+
         </div>
+
+        <button className="icon-btn">
+          <Bell size={18} />
+        </button>
+
+        <Avatar>
+          <AvatarFallback>AR</AvatarFallback>
+        </Avatar>
 
       </div>
 
-      <NotificationPanel open={showNotifications} />
-      <ProfileMenu open={showProfile} />
-    </div>
-
+    </header>
   );
 }
 
