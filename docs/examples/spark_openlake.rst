@@ -5,180 +5,271 @@ Spark with OpenLake
 Overview
 ========
 
-This guide demonstrates how Apache Spark can write data to and read data
-from an OpenLake cluster using the S3-compatible API.
+This guide shows how to use Apache Spark with OpenLake through its
+S3-compatible API.
 
-The example uses a multi-node OpenLake deployment configured with a
-4+2 erasure coding layout and validates end-to-end Spark integration.
+By the end of this guide, you will:
 
-Cluster Configuration
-=====================
+* start a local OpenLake server,
+* create an S3 bucket using the MinIO Client (``mc``),
+* configure Spark to use OpenLake as its object store,
+* write a Parquet dataset from Spark, and
+* read the dataset back to verify the integration.
 
-The example assumes an OpenLake cluster with:
+The steps in this guide were validated using a local OpenLake deployment
+running on Linux with Spark 3.5.5 in Docker.
 
-* 6 storage disks
-* 4 data shards
-* 2 parity shards
-* Multiple OpenLake nodes
-* S3 endpoint exposed to Spark
+Prerequisites
+=============
 
-Example cluster topology:
+Before starting, make sure you have:
 
-.. code-block:: text
+* OpenLake built from source.
+* Docker installed and running.
+* Rust installed.
+* The MinIO Client (``mc``).
+* A local OpenLake configuration file named ``node0.toml``.
 
-   node0   2 disks
-   node1   2 disks
-   node2   2 disks
+This guide assumes that you have completed the environment setup
+described in :doc:`../developer/environment_setup`.
 
-   Erasure Coding: 4 data + 2 parity
+Before You Begin
+================
 
-Verifying Cluster Health
-========================
+This guide uses a single-node OpenLake deployment running on the local
+machine. Spark connects to the OpenLake S3 endpoint through the Hadoop
+S3A connector.
 
-Before running Spark jobs, verify that all nodes are healthy.
+The example writes a small Parquet dataset to a bucket named
+``test-bucket`` and then reads it back to verify the configuration.
 
-.. code-block:: bash
+Start the OpenLake Server
+=========================
 
-   openlake cluster status --config cluster.toml
+After building OpenLake, start the server using your local configuration
+file.
 
-Example output:
-
-.. code-block:: text
-
-   [node   0] up    10.0.0.10:9100 (2 disks)
-   [node   1] up    10.0.0.11:9100 (2 disks)
-   [node   2] up    10.0.0.12:9100 (2 disks)
-
-   openlake cluster status: 3 / 3 nodes alive
-
-Inspecting Cluster Topology
-===========================
-
-View the configured cluster layout.
+In this guide, the local OpenLake configuration is stored in
+``node0.toml``.
 
 .. code-block:: bash
 
-   openlake cluster topology \
-     --config cluster.toml \
-     --probe
+   RUST_LOG=info ./target/release/openlaked --config node0.toml
 
-Example output:
+If the server starts successfully, it will bind the S3 endpoint and
+initialize the local deployment. Leave this terminal running while you
+complete the remaining steps in this guide.
 
-.. code-block:: text
+The following screenshot shows the OpenLake server after it has started
+successfully.
 
-   node    disks    state    rpc address
-   ----    -----    -----    -----------
-      0        2    up       10.0.0.10:9100
-      1        2    up       10.0.0.11:9100
-      2        2    up       10.0.0.12:9100
+.. image:: ../images/spark_openlake_server.png
+   :alt: OpenLake server startup
+   :align: center
 
-Creating a Bucket
-=================
+Configure the MinIO Client
+==========================
 
-Create a bucket using an S3-compatible client.
+The MinIO Client (``mc``) is used to interact with the OpenLake
+S3-compatible endpoint.
+
+Create an alias that points to your local OpenLake server.
 
 .. code-block:: bash
 
-   aws --endpoint-url http://10.0.0.10:9000 \
-       s3 mb s3://spark-demo
+   ./mc alias set openlake-local \
+     http://127.0.0.1:9000 \
+     openlakeadmin \
+     openlakesecret
 
-Spark Configuration
-===================
+If the alias is configured successfully, the output will look similar to
+the following:
 
-Configure Spark to use OpenLake as its object store.
+.. code-block:: text
 
-.. code-block:: properties
+   Added `openlake-local` successfully.
 
-   spark.hadoop.fs.s3a.endpoint=http://10.0.0.10:9000
-   spark.hadoop.fs.s3a.access.key=openlakeadmin
-   spark.hadoop.fs.s3a.secret.key=openlakesecret
-   spark.hadoop.fs.s3a.path.style.access=true
-   spark.hadoop.fs.s3a.connection.ssl.enabled=false
+Create a Bucket
+===============
 
-Writing Data
-============
+Spark writes data into an S3 bucket. Before starting the Spark session,
+create a bucket that will store the example dataset.
 
-Example Spark job that writes Parquet data to OpenLake.
+.. code-block:: bash
+
+   ./mc mb --ignore-existing openlake-local/test-bucket
+
+If the bucket is created successfully, the output will look similar to
+the following:
+
+.. code-block:: text
+
+   Bucket created successfully `openlake-local/test-bucket`.
+
+Start a PySpark Session
+=======================
+
+This example runs PySpark inside the official Apache Spark Docker image.
+The Hadoop S3A connector is loaded when the session starts so that Spark
+can communicate with the OpenLake S3-compatible endpoint.
+
+Run the following command:
+
+.. code-block:: bash
+
+   docker run -it --rm \
+     --name spark-openlake \
+     -v /tmp:/tmp \
+     apache/spark:3.5.5 \
+     /opt/spark/bin/pyspark \
+     --conf spark.jars.ivy=/tmp/.ivy2 \
+     --packages org.apache.hadoop:hadoop-aws:3.3.4 \
+     --conf spark.hadoop.fs.s3a.endpoint=http://host.docker.internal:9000 \
+     --conf spark.hadoop.fs.s3a.access.key=openlakeadmin \
+     --conf spark.hadoop.fs.s3a.secret.key=openlakesecret \
+     --conf spark.hadoop.fs.s3a.path.style.access=true \
+     --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+     --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
+
+The first run may take a few minutes while Spark downloads the Hadoop
+AWS dependencies.
+
+When startup completes, Spark creates a ``SparkSession`` named
+``spark``. The terminal then displays the Python prompt:
+
+.. code-block:: text
+
+   SparkSession available as 'spark'.
+   >>>
+
+Create and Inspect the DataFrame
+================================
+
+At the PySpark prompt, create a small DataFrame that contains three
+rows.
 
 .. code-block:: python
-
-   data = [
-       (1, "alice"),
-       (2, "bob"),
-       (3, "charlie")
-   ]
 
    df = spark.createDataFrame(
-       data,
-       ["id", "name"]
+       [
+           (1, "Alice"),
+           (2, "Bob"),
+           (3, "Charlie"),
+       ],
+       ["id", "name"],
    )
 
-   df.write.mode("overwrite").parquet(
-       "s3a://spark-demo/users"
-   )
-
-Reading Data
-============
-
-Read the same dataset back from OpenLake.
+Display the DataFrame before writing it:
 
 .. code-block:: python
-
-   df = spark.read.parquet(
-       "s3a://spark-demo/users"
-   )
 
    df.show()
 
-Expected output:
+The output should look like this:
 
 .. code-block:: text
 
    +---+-------+
-   | id| name  |
+   | id|   name|
    +---+-------+
-   | 1 | alice |
-   | 2 | bob   |
-   | 3 | charlie |
+   |  1|  Alice|
+   |  2|    Bob|
+   |  3|Charlie|
    +---+-------+
 
-Validating the Workflow
-=======================
+Write the DataFrame to OpenLake
+===============================
 
-A successful validation consists of:
+Write the DataFrame to the ``test-bucket`` bucket in Parquet format.
 
-#. Spark writes data to OpenLake.
-#. OpenLake distributes object data across the cluster.
-#. Erasure coding protects data using a 4+2 layout.
-#. Spark reads the same dataset back successfully.
-#. Returned records match the original dataset.
+.. code-block:: python
 
-This demonstrates that OpenLake can serve as a storage backend for
-distributed Spark workloads.
+   df.coalesce(1).write.mode("overwrite").parquet(
+       "s3a://test-bucket/users"
+   )
 
-Checksum Validation
-===================
+The command returns to the PySpark prompt after the write operation
+completes successfully.
 
-OpenLake validates uploads using the
-``x-amz-checksum-blake3`` checksum.
+Verify the Uploaded Objects
+===========================
 
-Clients that support BLAKE3 checksums can verify object integrity during
-uploads and downloads.
-
-Benchmarking with Warp
-======================
-
-Warp can be used to validate object uploads and benchmark the OpenLake
-deployment.
-
-Example:
+Use the MinIO Client to verify that Spark wrote the dataset to OpenLake.
 
 .. code-block:: bash
 
-   warp put \
-     --host 10.0.0.10:9000 \
-     --access-key openlakeadmin \
-     --secret-key openlakesecret
+   ./mc ls --recursive openlake-local/test-bucket/users
 
-Warp reports throughput, latency, request rates, and upload success
-statistics for the cluster.
+The output will look similar to the following:
+
+.. code-block:: text
+
+   [2026-07-16 06:03:00 UTC]     0B STANDARD _SUCCESS
+   [2026-07-16 06:03:00 UTC]   738B STANDARD part-00000-...snappy.parquet
+
+The ``_SUCCESS`` file indicates that the Spark write completed
+successfully. The Parquet file contains the dataset.
+
+.. image:: ../images/spark_openlake_objects.png
+   :alt: Objects written by Spark to OpenLake
+   :align: center
+
+Read the Data Back
+==================
+
+To verify that the dataset was written successfully, read it back from
+OpenLake using Spark.
+
+.. code-block:: python
+
+   read_df = spark.read.parquet("s3a://test-bucket/users")
+   read_df.show()
+
+The output should look similar to the following:
+
+.. code-block:: text
+
+   +---+-------+
+   | id|   name|
+   +---+-------+
+   |  1|  Alice|
+   |  2|    Bob|
+   |  3|Charlie|
+   +---+-------+
+
+The following screenshot shows the dataset read successfully from
+OpenLake.
+
+.. image:: ../images/spark_openlake_read_output.png
+   :alt: Reading a Parquet dataset from OpenLake using Spark
+   :align: center
+
+Troubleshooting
+===============
+
+If you encounter issues while following this guide, check the following:
+
+* Verify that the OpenLake server is still running before starting
+  PySpark.
+
+* Confirm that the ``test-bucket`` bucket exists by running:
+
+  .. code-block:: bash
+
+     ./mc ls openlake-local
+
+* If the first ``docker run`` command takes a long time, Spark may be
+  downloading the required Hadoop AWS dependencies. This only happens
+  during the initial startup.
+
+* Ensure that the endpoint configured for ``spark.hadoop.fs.s3a.endpoint``
+  matches the OpenLake S3 endpoint.
+
+Next Steps
+==========
+
+You have successfully configured Apache Spark to use OpenLake as an
+S3-compatible storage backend.
+
+You can now experiment with larger datasets, different Spark data
+sources, or integrate OpenLake into your own Spark applications.
