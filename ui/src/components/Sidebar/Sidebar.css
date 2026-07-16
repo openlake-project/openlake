@@ -1,0 +1,49 @@
+.sidebar{
+height:100vh;
+display:flex;
+flex-direction:column;
+background:#ffffff;
+}
+
+.logo{
+font-size:28px;
+font-weight:bold;
+padding:30px 20px;
+color:#2563eb;
+border-bottom:1px solid #e5e7eb;
+}
+
+nav{
+padding:20px 10px;
+display:flex;
+flex-direction:column;
+gap:8px;
+}
+
+.bottom-menu{
+margin-top:auto;
+padding:20px 10px;
+border-top:1px solid #e5e7eb;
+}
+
+.nav-link{
+display:flex;
+align-items:center;
+gap:12px;
+padding:12px 16px;
+text-decoration:none;
+color:#374151;
+border-radius:10px;
+font-size:16px;
+transition:.2s;
+}
+
+.nav-link:hover{
+background:#eff6ff;
+color:#2563eb;
+}
+
+.nav-link.active{
+background:#2563eb;
+color:white;
+}

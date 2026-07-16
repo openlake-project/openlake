@@ -1,0 +1,138 @@
+.objects-page{
+    display:flex;
+    flex-direction:column;
+    gap:25px;
+    }
+    
+    .page-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    }
+    
+    .breadcrumb{
+    margin-top:8px;
+    color:#6b7280;
+    font-size:15px;
+    }
+    
+    .upload-btn{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    padding:12px 20px;
+    background:#2563eb;
+    color:white;
+    border:none;
+    border-radius:10px;
+    cursor:pointer;
+    font-size:15px;
+    transition:.2s;
+    }
+    
+    .upload-btn:hover{
+    background:#1d4ed8;
+    }
+    
+    .toolbar{
+    display:flex;
+    justify-content:space-between;
+    gap:20px;
+    }
+    
+    .search-box{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    background:white;
+    border:1px solid #ddd;
+    border-radius:10px;
+    padding:12px 16px;
+    flex:1;
+    }
+    
+    .search-box input{
+    border:none;
+    outline:none;
+    width:100%;
+    font-size:15px;
+    }
+    
+    .refresh-btn{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    padding:12px 20px;
+    background:#2563eb;
+    color:white;
+    border:none;
+    border-radius:10px;
+    cursor:pointer;
+    }
+    
+    .refresh-btn:hover{
+    background:#1d4ed8;
+    }
+    
+    .object-table{
+    background:white;
+    padding:25px;
+    border-radius:15px;
+    box-shadow:0 2px 10px rgba(0,0,0,.05);
+    }
+    
+    .file-name{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    font-weight:600;
+    }
+    
+    table{
+    width:100%;
+    border-collapse:collapse;
+    }
+    
+    th{
+    padding:18px;
+    text-align:left;
+    border-bottom:2px solid #eee;
+    }
+    
+    td{
+    padding:18px;
+    border-bottom:1px solid #eee;
+    }
+    
+    tr:hover{
+    background:#f8fafc;
+    }
+    
+    .icon-btn{
+    border:none;
+    background:#eff6ff;
+    color:#2563eb;
+    padding:10px;
+    border-radius:8px;
+    cursor:pointer;
+    margin-right:8px;
+    transition:.2s;
+    }
+    
+    .icon-btn:hover{
+    background:#dbeafe;
+    }
+    
+    .delete{
+    background:#fee2e2;
+    color:#dc2626;
+    }
+    
+    .delete:hover{
+    background:#fecaca;
+    }
+    .browser-layout{
+        display:flex;
+        gap:25px;
+        align-items:flex-start;
+        }

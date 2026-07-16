@@ -1,0 +1,206 @@
+.dashboard{
+
+    display:flex;
+    
+    flex-direction:column;
+    
+    gap:30px;
+    
+    }
+    
+    .subtitle{
+    
+    color:#6b7280;
+    
+    margin-top:-15px;
+    
+    }
+    
+    .cards{
+    
+    display:grid;
+    
+    grid-template-columns:repeat(4,1fr);
+    
+    gap:20px;
+    
+    }
+    
+    .card{
+    
+    background:white;
+    
+    padding:25px;
+    
+    border-radius:15px;
+    
+    box-shadow:0 2px 10px rgba(0,0,0,.06);
+    
+    transition:.2s;
+    
+    }
+    
+    .card:hover{
+    
+    transform:translateY(-4px);
+    
+    }
+    
+    .card-icon{
+    
+    font-size:34px;
+    
+    color:#2563eb;
+    
+    margin-bottom:10px;
+    
+    }
+    
+    .storage{
+    
+    background:white;
+    
+    padding:25px;
+    
+    border-radius:15px;
+    
+    box-shadow:0 2px 10px rgba(0,0,0,.06);
+    
+    }
+    
+    
+    
+    
+    
+    
+    .table{
+    
+    background:white;
+    
+    padding:25px;
+    
+    border-radius:15px;
+    
+    box-shadow:0 2px 10px rgba(0,0,0,.06);
+    
+    }
+    
+    table{
+    
+    width:100%;
+    
+    border-collapse:collapse;
+    
+    }
+    
+    th,td{
+    
+    padding:15px;
+    
+    text-align:left;
+    
+    border-bottom:1px solid #eee;
+    
+    }
+    .quick-actions{
+
+        display:flex;
+        
+        gap:15px;
+        
+        margin-top:10px;
+        
+        margin-bottom:10px;
+        
+        }
+        
+        .primary-btn{
+        
+        background:#2563eb;
+        
+        color:white;
+        
+        border:none;
+        
+        padding:12px 20px;
+        
+        border-radius:10px;
+        
+        font-size:15px;
+        
+        cursor:pointer;
+        
+        transition:.2s;
+        
+        }
+        
+        .primary-btn:hover{
+        
+        background:#1d4ed8;
+        
+        }
+        
+        .secondary-btn{
+        
+        background:white;
+        
+        border:1px solid #d1d5db;
+        
+        padding:12px 20px;
+        
+        border-radius:10px;
+        
+        font-size:15px;
+        
+        cursor:pointer;
+        
+        transition:.2s;
+        
+        }
+        
+        .secondary-btn:hover{
+        
+        background:#f3f4f6;
+        
+        }
+        .info-grid{
+
+            display:grid;
+            
+            grid-template-columns:2fr 1fr;
+            
+            gap:20px;
+            
+            }
+            
+            .cluster-card{
+            
+            background:white;
+            
+            padding:25px;
+            
+            border-radius:15px;
+            
+            box-shadow:0 2px 10px rgba(0,0,0,.06);
+            
+            }
+            
+            .cluster-card p{
+            
+            margin:18px 0;
+            
+            color:#4b5563;
+            
+            }
+            
+            .health{
+            
+            font-size:24px;
+            
+            font-weight:bold;
+            
+            color:#16a34a;
+            
+            margin:20px 0;
+            
+            }
