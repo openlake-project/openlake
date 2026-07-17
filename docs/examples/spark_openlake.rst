@@ -10,25 +10,24 @@ S3-compatible API.
 
 By the end of this guide, you will:
 
-* start a single-node OpenLake server for development,
+* build and start OpenLake,
 * create an S3 bucket using a signed ``curl`` request,
 * configure Spark to use OpenLake as its object store,
 * write a Parquet dataset from Spark, and
 * read the dataset back to verify the integration.
 
-The steps in this guide were validated using a single-node OpenLake
-deployment for development, running on Linux with Spark 3.5.5 in Docker.
+The steps in this guide were validated on Linux with Spark 3.5.5 running
+in Docker.
 
 Prerequisites
 =============
 
 Before starting, make sure you have:
 
-* OpenLake built from source.
+* Git.
 * Docker installed and running.
 * Rust installed.
 * ``curl`` with AWS SigV4 support.
-* A local OpenLake configuration file named ``node0.toml``.
 
 This guide assumes that you have completed the environment setup
 described in :doc:`../developer/environment_setup`.
@@ -36,21 +35,78 @@ described in :doc:`../developer/environment_setup`.
 Before You Begin
 ================
 
-This guide uses a single-node OpenLake deployment intended for local
-development. It is not a production or multi-node cluster setup. Spark
-connects to the OpenLake S3 endpoint through the Hadoop S3A connector.
+This guide uses a single-node OpenLake cluster for local development.
+It is not intended as a production or multi-node deployment.
 
 The example writes a small Parquet dataset to a bucket named
-``test-bucket`` and then reads it back to verify the configuration.
+``test-bucket`` and reads it back through the Hadoop S3A connector.
+
+Clone and Build OpenLake
+========================
+
+Clone the OpenLake repository and enter the project directory:
+
+.. code-block:: bash
+
+   git clone https://github.com/openlake-project/openlake.git
+   cd openlake
+
+Build the optimized OpenLake binaries:
+
+.. code-block:: bash
+
+   cargo build --release --workspace
+
+The ``openlaked`` server binary is created at
+``target/release/openlaked``.
+
+Create the Local Configuration
+==============================
+
+Create the two data directories used by this single-node example:
+
+.. code-block:: bash
+
+   mkdir -p /tmp/openlake-data0 /tmp/openlake-data1
+
+Create a configuration file named ``node0.toml`` in the repository
+root:
+
+.. code-block:: bash
+
+   cat > node0.toml <<'EOF'
+   self_id = 0
+
+   data_dirs = [
+     "/tmp/openlake-data0",
+     "/tmp/openlake-data1"
+   ]
+
+   s3_addr = "0.0.0.0:9000"
+   rpc_addr = "127.0.0.1:9100"
+
+   set_drive_count = 2
+   default_parity_count = 1
+
+   region = "us-east-1"
+
+   [[credentials]]
+   access_key = "openlakeadmin"
+   secret_key = "openlakesecret"
+
+   [[nodes]]
+   id = 0
+   rpc_addr = "127.0.0.1:9100"
+   disk_count = 2
+   EOF
+
+This configuration exposes the S3 API on port ``9000`` and defines the
+credentials used later by both ``curl`` and Spark.
 
 Start the OpenLake Server
 =========================
 
-After building OpenLake, start the server using your local configuration
-file.
-
-In this guide, the local OpenLake configuration is stored in
-``node0.toml``.
+Start OpenLake using the configuration file:
 
 .. code-block:: bash
 
@@ -112,6 +168,20 @@ Start a PySpark Session
 This example runs PySpark inside the official Apache Spark Docker image.
 The Hadoop S3A connector is loaded when the session starts so that Spark
 can communicate with the OpenLake S3-compatible endpoint.
+
+The Spark configuration must match the values in ``node0.toml``:
+
+* ``spark.hadoop.fs.s3a.endpoint`` points to the OpenLake S3 endpoint.
+  Because Spark runs inside Docker, this guide uses
+  ``http://host.docker.internal:9000`` to reach port ``9000`` on the
+  host machine.
+* ``spark.hadoop.fs.s3a.access.key`` matches the configured
+  ``access_key`` value, ``openlakeadmin``.
+* ``spark.hadoop.fs.s3a.secret.key`` matches the configured
+  ``secret_key`` value, ``openlakesecret``.
+* Path-style access is enabled because OpenLake is reached through a
+  custom S3-compatible endpoint.
+* SSL is disabled because this local development server uses HTTP.
 
 Run the following command:
 
