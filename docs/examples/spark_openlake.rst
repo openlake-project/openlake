@@ -10,14 +10,14 @@ S3-compatible API.
 
 By the end of this guide, you will:
 
-* start a local OpenLake server,
-* create an S3 bucket using the MinIO Client (``mc``),
+* start a single-node OpenLake server for development,
+* create an S3 bucket using the AWS CLI,
 * configure Spark to use OpenLake as its object store,
 * write a Parquet dataset from Spark, and
 * read the dataset back to verify the integration.
 
-The steps in this guide were validated using a local OpenLake deployment
-running on Linux with Spark 3.5.5 in Docker.
+The steps in this guide were validated using a single-node OpenLake
+deployment for development, running on Linux with Spark 3.5.5 in Docker.
 
 Prerequisites
 =============
@@ -27,7 +27,7 @@ Before starting, make sure you have:
 * OpenLake built from source.
 * Docker installed and running.
 * Rust installed.
-* The MinIO Client (``mc``).
+* The AWS CLI.
 * A local OpenLake configuration file named ``node0.toml``.
 
 This guide assumes that you have completed the environment setup
@@ -36,9 +36,9 @@ described in :doc:`../developer/environment_setup`.
 Before You Begin
 ================
 
-This guide uses a single-node OpenLake deployment running on the local
-machine. Spark connects to the OpenLake S3 endpoint through the Hadoop
-S3A connector.
+This guide uses a single-node OpenLake deployment intended for local
+development. It is not a production or multi-node cluster setup. Spark
+connects to the OpenLake S3 endpoint through the Hadoop S3A connector.
 
 The example writes a small Parquet dataset to a bucket named
 ``test-bucket`` and then reads it back to verify the configuration.
@@ -67,44 +67,31 @@ successfully.
    :alt: OpenLake server startup
    :align: center
 
-Configure the MinIO Client
-==========================
-
-The MinIO Client (``mc``) is used to interact with the OpenLake
-S3-compatible endpoint.
-
-Create an alias that points to your local OpenLake server.
-
-.. code-block:: bash
-
-   ./mc alias set openlake-local \
-     http://127.0.0.1:9000 \
-     openlakeadmin \
-     openlakesecret
-
-If the alias is configured successfully, the output will look similar to
-the following:
-
-.. code-block:: text
-
-   Added `openlake-local` successfully.
-
 Create a Bucket
 ===============
 
 Spark writes data into an S3 bucket. Before starting the Spark session,
 create a bucket that will store the example dataset.
 
+Set the OpenLake credentials for the current shell:
+
 .. code-block:: bash
 
-   ./mc mb --ignore-existing openlake-local/test-bucket
+   export AWS_ACCESS_KEY_ID=openlakeadmin
+   export AWS_SECRET_ACCESS_KEY=openlakesecret
+   export AWS_DEFAULT_REGION=us-east-1
+   export AWS_EC2_METADATA_DISABLED=true
 
-If the bucket is created successfully, the output will look similar to
-the following:
+Create the bucket through the local OpenLake S3 endpoint:
 
-.. code-block:: text
+.. code-block:: bash
 
-   Bucket created successfully `openlake-local/test-bucket`.
+   aws \
+     --endpoint-url http://127.0.0.1:9000 \
+     s3api create-bucket \
+     --bucket test-bucket
+
+A successful command returns no output.
 
 Start a PySpark Session
 =======================
@@ -191,29 +178,6 @@ Write the DataFrame to the ``test-bucket`` bucket in Parquet format.
 The command returns to the PySpark prompt after the write operation
 completes successfully.
 
-Verify the Uploaded Objects
-===========================
-
-Use the MinIO Client to verify that Spark wrote the dataset to OpenLake.
-
-.. code-block:: bash
-
-   ./mc ls --recursive openlake-local/test-bucket/users
-
-The output will look similar to the following:
-
-.. code-block:: text
-
-   [2026-07-16 06:03:00 UTC]     0B STANDARD _SUCCESS
-   [2026-07-16 06:03:00 UTC]   738B STANDARD part-00000-...snappy.parquet
-
-The ``_SUCCESS`` file indicates that the Spark write completed
-successfully. The Parquet file contains the dataset.
-
-.. image:: ../images/spark_openlake_objects.png
-   :alt: Objects written by Spark to OpenLake
-   :align: center
-
 Read the Data Back
 ==================
 
@@ -252,11 +216,9 @@ If you encounter issues while following this guide, check the following:
 * Verify that the OpenLake server is still running before starting
   PySpark.
 
-* Confirm that the ``test-bucket`` bucket exists by running:
-
-  .. code-block:: bash
-
-     ./mc ls openlake-local
+* If bucket creation fails, verify that the OpenLake S3 endpoint is
+  available at ``http://127.0.0.1:9000`` and rerun the AWS CLI
+  ``create-bucket`` command.
 
 * If the first ``docker run`` command takes a long time, Spark may be
   downloading the required Hadoop AWS dependencies. This only happens
