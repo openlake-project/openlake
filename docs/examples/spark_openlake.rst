@@ -11,7 +11,7 @@ S3-compatible API.
 By the end of this guide, you will:
 
 * start a single-node OpenLake server for development,
-* create an S3 bucket using the AWS CLI,
+* create an S3 bucket using a signed ``curl`` request,
 * configure Spark to use OpenLake as its object store,
 * write a Parquet dataset from Spark, and
 * read the dataset back to verify the integration.
@@ -27,7 +27,7 @@ Before starting, make sure you have:
 * OpenLake built from source.
 * Docker installed and running.
 * Rust installed.
-* The AWS CLI.
+* ``curl`` with AWS SigV4 support.
 * A local OpenLake configuration file named ``node0.toml``.
 
 This guide assumes that you have completed the environment setup
@@ -73,25 +73,38 @@ Create a Bucket
 Spark writes data into an S3 bucket. Before starting the Spark session,
 create a bucket that will store the example dataset.
 
-Set the OpenLake credentials for the current shell:
+Before creating the bucket, verify that the OpenLake S3 endpoint is
+reachable:
 
 .. code-block:: bash
 
-   export AWS_ACCESS_KEY_ID=openlakeadmin
-   export AWS_SECRET_ACCESS_KEY=openlakesecret
-   export AWS_DEFAULT_REGION=us-east-1
-   export AWS_EC2_METADATA_DISABLED=true
+   curl --max-time 10 \
+     --silent \
+     --show-error \
+     --output /tmp/openlake-endpoint-response.xml \
+     --write-out "HTTP status: %{http_code}\n" \
+     http://127.0.0.1:9000/
 
-Create the bucket through the local OpenLake S3 endpoint:
+   cat /tmp/openlake-endpoint-response.xml
+
+A running server returns ``HTTP status: 403`` with an ``AccessDenied``
+response because the request is not signed.
+
+Create the bucket using a signed S3 request:
 
 .. code-block:: bash
 
-   aws \
-     --endpoint-url http://127.0.0.1:9000 \
-     s3api create-bucket \
-     --bucket test-bucket
+   curl --max-time 20 \
+     --silent \
+     --show-error \
+     --output /tmp/openlake-create-bucket-response.xml \
+     --write-out "HTTP status: %{http_code}\n" \
+     --aws-sigv4 "aws:amz:us-east-1:s3" \
+     --user "openlakeadmin:openlakesecret" \
+     --request PUT \
+     http://127.0.0.1:9000/test-bucket
 
-A successful command returns no output.
+A successful request returns ``HTTP status: 200``.
 
 Start a PySpark Session
 =======================
@@ -217,8 +230,8 @@ If you encounter issues while following this guide, check the following:
   PySpark.
 
 * If bucket creation fails, verify that the OpenLake S3 endpoint is
-  available at ``http://127.0.0.1:9000`` and rerun the AWS CLI
-  ``create-bucket`` command.
+  reachable with the unsigned ``curl`` request, then rerun the signed
+  bucket-creation request.
 
 * If the first ``docker run`` command takes a long time, Spark may be
   downloading the required Hadoop AWS dependencies. This only happens
