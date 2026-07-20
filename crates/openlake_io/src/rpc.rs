@@ -223,7 +223,31 @@ pub enum Request {
     /// `(runtime_id, dct_num, gid, dc_key)`. Until every runtime on
     /// this node has published, `complete = false` and peers retry.
     GetRdmaEndpoints,
+
+    /// One-time client handshake with a kv node: the caller presents its
+    /// RDMA endpoints so this node can address replies to it, and the
+    /// response carries this node's endpoints (including slab metadata).
+    /// `client_node_id` must be >= `CLIENT_NODE_ID_BASE`; `epoch`
+    /// increases across client restarts so a re-attach replaces the
+    /// caller's own stale entry.
+    RdmaAttach {
+        client_node_id: u16,
+        epoch: u64,
+        endpoints: Vec<LocalRdmaEndpoint>,
+    },
 }
+
+/// Node ids below this belong to `cfg.nodes`; attaching clients must
+/// identify from `[CLIENT_NODE_ID_BASE, 4095]` so they can never shadow a
+/// cluster member. The upper bound is not cosmetic: a peer id is carried in
+/// the 12-bit node field of the credit-ack immediate (see `wr::ImmData`), so
+/// an id above 4095 would be truncated and its acks would credit the wrong
+/// peer, stalling replies once the send-credit budget is reached.
+pub const CLIENT_NODE_ID_BASE: u16 = 2_048;
+
+/// Inclusive upper bound for a client id: the credit-ack immediate carries the
+/// node id in 12 bits, so ids never exceed `0xFFF`.
+pub const CLIENT_NODE_ID_MAX: u16 = 0xFFF;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
@@ -246,6 +270,8 @@ pub enum Response {
     LockRefreshed,
     LockNotFound,
     RdmaEndpoints(RdmaEndpointsReply),
+    RdmaAttached(RdmaEndpointsReply),
+    RdmaAttachDenied(String),
     Err(WireError),
 }
 
