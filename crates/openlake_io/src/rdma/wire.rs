@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::rpc::{DiskIdx, Request, Response};
 
-pub const ENVELOPE_MAGIC: u32 = 0x52444D31;
+pub const ENVELOPE_MAGIC: u32 = 0x52444D33; // "RDM3": 54-byte KeyHash
+
+pub use crate::kv::KeyHash;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct RdmaRemoteBuf {
@@ -11,10 +13,10 @@ pub struct RdmaRemoteBuf {
     pub rkey: u32,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CommitEntry {
     pub slot_idx: u32,
-    pub key_hash: u64,
+    pub key_hash: Vec<u8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,12 +44,14 @@ pub enum RdmaRequest {
         entries: Vec<CommitEntry>,
     },
     BatchLookup {
-        key_hashes: Vec<u64>,
+        key_hashes: Vec<Vec<u8>>,
     },
     BatchRelease {
         slot_idxs: Vec<u32>,
     },
     Generic(Request),
+    /// Unbind every slot and return the whole slab to the free list.
+    Reset,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,6 +63,7 @@ pub enum RdmaResponse {
     BatchLookedUp { slots: Vec<Option<u32>> },
     BatchReleased,
     Generic(Response),
+    ResetDone,
 }
 
 #[derive(Serialize, Deserialize)]
