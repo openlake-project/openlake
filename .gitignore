@@ -6,3 +6,5 @@ Cargo.lock.bak
 *.orig
 .DS_Store
 /data
+__pycache__/
+*.pyc
