@@ -1,0 +1,35 @@
+self_id              = 0
+mode                 = "kv"
+transport            = "rdma"
+rpc_addr             = "0.0.0.0:9400"
+s3_addr              = "0.0.0.0:9000"
+region               = "us-east-1"
+data_dirs            = []
+set_drive_count      = 1
+default_parity_count = 1
+
+[[credentials]]
+access_key = "openlake"
+secret_key = "openlake"
+
+[[nodes]]
+id         = 0
+rpc_addr   = "0.0.0.0:9400"
+disk_count = 0
+
+[kv_slab]
+capacity_gb      = 10
+reserve_ttl_secs = 60
+
+[rdma]
+self_node_id = 0
+dev_name     = "mlx5_0"
+dc_key       = 4919
+srq_depth    = 4096
+max_send_wr  = 256
+peer_credit  = 4
+max_clients  = 512
+
+[rdma.qos]
+traffic_class = 0
+service_level = 0

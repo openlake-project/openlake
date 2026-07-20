@@ -6,7 +6,7 @@ use xxhash_rust::xxh64::xxh64;
 use crate::transport::{Protocol, Scatter, Waiter};
 
 pub trait KvClient: Send + Sync {
-    fn attach(&self, addr: &str, node_id: u16) -> Result<usize, String>;
+    fn attach(&self, addr: &str, node_id: u16, slot_bytes: u32) -> Result<usize, String>;
     fn register_memory(&self, addr: u64, len: u64) -> Result<(), String>;
     fn batch_is_exist(&self, keys: &[Vec<u8>]) -> Result<Vec<i32>, String>;
     fn put_batch(
@@ -138,8 +138,8 @@ impl StoreClient {
 }
 
 impl KvClient for StoreClient {
-    fn attach(&self, addr: &str, node_id: u16) -> Result<usize, String> {
-        let n = self.proto.attach(addr, node_id)?;
+    fn attach(&self, addr: &str, node_id: u16, slot_bytes: u32) -> Result<usize, String> {
+        let n = self.proto.attach(addr, node_id, slot_bytes)?;
         let mut nodes = self.nodes.lock().unwrap();
         if !nodes.contains(&node_id) {
             nodes.push(node_id);

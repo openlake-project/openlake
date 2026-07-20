@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 logger = init_logger(__name__)
 
 KEY_BYTES = 16
+SLOT_HEADER_BYTES = 54
 
 _HASH_SEED_HELP = (
     "OpenLake external KV offloading requires PYTHONHASHSEED to be set for "
@@ -800,8 +801,7 @@ class OpenLakeWorker:
             device=extra.get("openlake_device", "mlx5_ib0"),
             client_id=base_id + 1 + self.tp_rank,
         )
-        for node_id, addr in enumerate(nodes):
-            self._client.attach(addr, node_id)
+        self._nodes = nodes
         self._num_blocks = vllm_config.cache_config.num_gpu_blocks
         groups, self.group_keys, self.block_size, hash_bs, use_eagle = (
             _group_key_spaces(vllm_config, kv_cache_config)
@@ -864,9 +864,12 @@ class OpenLakeWorker:
                     addrs.append(base_addr + idx * seg_stride)
                     block_lens.append(seg_stride // self._num_blocks)
         self.layout.set(addrs, block_lens)
+        slot_bytes = SLOT_HEADER_BYTES + sum(block_lens)
+        for node_id, addr in enumerate(self._nodes):
+            self._client.attach(addr, node_id, slot_bytes)
         logger.info(
-            "openlake: registered %d segments over %d blocks",
-            len(addrs), self._num_blocks,
+            "openlake: registered %d segments over %d blocks, %d B/slot",
+            len(addrs), self._num_blocks, slot_bytes,
         )
 
         if self.kv_role in ("kv_producer", "kv_both"):

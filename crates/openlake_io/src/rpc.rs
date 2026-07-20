@@ -228,6 +228,7 @@ pub enum Request {
         client_node_id: u16,
         epoch: u64,
         endpoints: Vec<LocalRdmaEndpoint>,
+        slot_bytes: u32,
     },
 }
 

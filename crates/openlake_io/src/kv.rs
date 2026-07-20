@@ -204,7 +204,7 @@ unsafe impl Send for HostSlab {}
 unsafe impl Sync for HostSlab {}
 
 impl HostSlab {
-    pub fn create(
+    pub fn new(
         slot_bytes: u32,
         slot_count: u32,
         reserve_ttl: Duration,
@@ -267,7 +267,7 @@ impl Drop for HostSlab {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum KvRequest {
-    Attach,
+    Attach { slot_bytes: u32 },
     Reserve { count: u32 },
     Commit { entries: Vec<(u32, Vec<u8>)> },
     Lookup { keys: Vec<Vec<u8>> },
@@ -294,7 +294,7 @@ pub enum KvResponse {
 
 pub fn serve_tcp(slab: &dyn KvSlab, req: KvRequest) -> KvResponse {
     match req {
-        KvRequest::Attach => match slab.shm_name() {
+        KvRequest::Attach { .. } => match slab.shm_name() {
             Some(name) => KvResponse::Attached {
                 shm_name: name.to_string(),
                 slot_bytes: slab.slot_bytes(),
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn host_slab_shm_backed_control_plane() {
-        let s = HostSlab::create(4096, 8, Duration::from_secs(60)).unwrap();
+        let s = HostSlab::new(4096, 8, Duration::from_secs(60)).unwrap();
         assert!(s.shm_name().is_some());
         assert_eq!(s.slot_count(), 8);
         assert_eq!(s.slot_bytes(), 4096);

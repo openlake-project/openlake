@@ -42,9 +42,9 @@ impl PyClient {
         .map_err(PyValueError::new_err)
     }
 
-    #[pyo3(signature = (addr, node_id = 0))]
-    fn attach(&self, py: Python<'_>, addr: &str, node_id: u16) -> PyResult<usize> {
-        py.detach(|| self.inner.attach(addr, node_id))
+    #[pyo3(signature = (addr, node_id = 0, slot_bytes = 0))]
+    fn attach(&self, py: Python<'_>, addr: &str, node_id: u16, slot_bytes: u32) -> PyResult<usize> {
+        py.detach(|| self.inner.attach(addr, node_id, slot_bytes))
             .map_err(PyRuntimeError::new_err)
     }
 
@@ -111,7 +111,7 @@ impl PyClient {
 }
 
 #[pymodule]
-fn openlake_client(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyClient>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

@@ -147,10 +147,15 @@ pub struct Config {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct KvSlabToml {
-    pub slot_bytes: usize,
-    pub slot_count: usize,
+    pub capacity_gb: u64,
     #[serde(default = "default_kv_reserve_ttl_secs")]
     pub reserve_ttl_secs: u64,
+}
+
+impl KvSlabToml {
+    pub fn capacity_bytes(&self) -> u64 {
+        self.capacity_gb * 1024 * 1024 * 1024
+    }
 }
 
 fn default_kv_reserve_ttl_secs() -> u64 {
@@ -306,7 +311,7 @@ impl Config {
 
         if cfg.mode == Mode::Kv {
             if cfg.kv_slab.is_none() {
-                anyhow::bail!("mode = \"kv\" requires a [kv_slab] block");
+                anyhow::bail!("mode = \"kv\" requires a [kv_slab] block with capacity_gb");
             }
             if cfg.nodes.len() != 1 {
                 anyhow::bail!("mode = \"kv\" nodes are standalone; list only this node");

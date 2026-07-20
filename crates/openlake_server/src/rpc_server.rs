@@ -820,6 +820,7 @@ pub(crate) async fn dispatch(
             client_node_id,
             epoch,
             endpoints: client_eps,
+            slot_bytes,
         } => {
             #[cfg(all(feature = "rdma", target_os = "linux"))]
             {
@@ -829,7 +830,7 @@ pub(crate) async fn dispatch(
                     _ if !(CLIENT_NODE_ID_BASE..=CLIENT_NODE_ID_MAX).contains(&client_node_id) => {
                         Err(format!("client id {client_node_id} outside [{CLIENT_NODE_ID_BASE}, {CLIENT_NODE_ID_MAX}]"))
                     }
-                    Some(engine) => engine.attach(client_node_id, &client_eps, epoch),
+                    Some(engine) => engine.attach(client_node_id, &client_eps, epoch, slot_bytes),
                 };
                 match res {
                     Ok(()) => {
@@ -844,7 +845,7 @@ pub(crate) async fn dispatch(
             }
             #[cfg(not(all(feature = "rdma", target_os = "linux")))]
             {
-                let _ = (&kv, epoch, &client_eps);
+                let _ = (&kv, epoch, &client_eps, slot_bytes);
                 RpcResponse::RdmaAttachDenied(format!(
                     "node {client_node_id} tried rdma attach on a server built without rdma"
                 ))

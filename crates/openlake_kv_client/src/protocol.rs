@@ -31,6 +31,7 @@ enum Cmd {
     Attach {
         addr: String,
         node_id: u16,
+        slot_bytes: u32,
         reply: sync_mpsc::Sender<Result<usize, String>>,
     },
     Register {
@@ -118,11 +119,12 @@ impl RdmaProtocol {
 }
 
 impl Protocol for RdmaProtocol {
-    fn attach(&self, addr: &str, node_id: u16) -> Result<usize, String> {
+    fn attach(&self, addr: &str, node_id: u16, slot_bytes: u32) -> Result<usize, String> {
         let addr = addr.to_owned();
         self.roundtrip(|reply| Cmd::Attach {
             addr,
             node_id,
+            slot_bytes,
             reply,
         })
     }
@@ -259,9 +261,10 @@ async fn handle(s: Rc<Shared>, cmd: Cmd) {
         Cmd::Attach {
             addr,
             node_id,
+            slot_bytes,
             reply,
         } => {
-            let _ = reply.send(do_attach(&s, &addr, node_id));
+            let _ = reply.send(do_attach(&s, &addr, node_id, slot_bytes));
         }
         Cmd::Register { addr, len, reply } => {
             let out = if s
@@ -319,13 +322,19 @@ fn device_of(s: &Shared) -> Rc<openlake_io::rdma::IbDevice> {
     }
 }
 
-fn do_attach(s: &Shared, addr: &str, node_id: u16) -> Result<usize, String> {
+fn do_attach(s: &Shared, addr: &str, node_id: u16, slot_bytes: u32) -> Result<usize, String> {
     let mut phase = s.phase.borrow_mut();
     let Phase::Attaching { routing, .. } = &mut *phase else {
         return Err("attach after first operation".into());
     };
     s.epoch.set(s.epoch.get() + 1);
-    let reply = attach(addr, s.cfg.self_node_id, s.epoch.get(), vec![s.endpoint])?;
+    let reply = attach(
+        addr,
+        s.cfg.self_node_id,
+        s.epoch.get(),
+        vec![s.endpoint],
+        slot_bytes,
+    )?;
     for ep in &reply.endpoints {
         routing.insert(node_id, ep);
     }
@@ -795,11 +804,13 @@ fn attach(
     client_node_id: u16,
     epoch: u64,
     endpoints: Vec<LocalRdmaEndpoint>,
+    slot_bytes: u32,
 ) -> Result<RdmaEndpointsReply, String> {
     let body = rpc::encode(&Request::RdmaAttach {
         client_node_id,
         epoch,
         endpoints,
+        slot_bytes,
     })
     .map_err(|e| format!("encode attach: {e}"))?;
 

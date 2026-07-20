@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 
-use openlake_io::kv::KvSlab;
-use openlake_io::{HostSlab, StorageBackend};
+use openlake_io::StorageBackend;
 use openlake_storage::KvEngine;
 
 use crate::config;
@@ -19,12 +18,10 @@ pub async fn run_tcp(
     tls: TlsMaterial,
 ) -> anyhow::Result<()> {
     let slab_cfg = cfg.kv_slab.expect("validated: kv mode has [kv_slab]");
-    let slab: Rc<dyn KvSlab> = Rc::new(HostSlab::create(
-        slab_cfg.slot_bytes as u32,
-        slab_cfg.slot_count as u32,
+    let engine = Rc::new(KvEngine::new_tcp(
+        slab_cfg.capacity_bytes(),
         Duration::from_secs(slab_cfg.reserve_ttl_secs),
-    )?);
-    let engine = Rc::new(KvEngine::new(slab, 0));
+    ));
 
     let listener = rpc_server::bind_reuseport(cfg.rpc_addr)
         .with_context(|| format!("kv-tcp: bind rpc on {}", cfg.rpc_addr))?;
@@ -55,7 +52,7 @@ pub async fn run(
     tls: TlsMaterial,
     endpoint_registry: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
 ) -> anyhow::Result<()> {
-    use openlake_io::{LocalFsBackend, RdmaSlab};
+    use openlake_io::LocalFsBackend;
 
     use crate::{build_rdma_config, rdma_server};
 
@@ -65,32 +62,26 @@ pub async fn run(
         cfg.nodes.len() as u16,
     );
     rdma_cfg.min_recv_bufs = usize::MAX;
-    let (setup, mut my_endpoint) =
+    let (setup, my_endpoint) =
         openlake_io::rdma::RdmaNode::start_local(&rdma_cfg).context("rdma start_local")?;
 
-    let slab_cfg = cfg.kv_slab.expect("validated: kv mode has [kv_slab]");
-    let rdma_slab = RdmaSlab::new(
-        setup.dev.clone(),
-        slab_cfg.slot_bytes,
-        slab_cfg.slot_count,
-        Duration::from_secs(slab_cfg.reserve_ttl_secs),
-    )?;
-    my_endpoint.kv_slab = Some(openlake_io::rpc::SlabMeta {
-        slab_base: rdma_slab.slab_base(),
-        rkey: rdma_slab.rkey(),
-        slot_bytes: rdma_slab.slot_bytes(),
-    });
-    let slab: Rc<dyn KvSlab> = Rc::new(rdma_slab);
     {
         let mut reg = endpoint_registry.lock().unwrap();
         reg.endpoints.push(my_endpoint);
         reg.complete = true;
     }
 
+    let slab_cfg = cfg.kv_slab.expect("validated: kv mode has [kv_slab]");
     let r = cfg.rdma.as_ref().expect("validated: kv rdma has [rdma]");
     let max_clients = r.max_clients.unwrap_or(r.srq_depth / (r.peer_credit + 1)) as usize;
     tracing::info!(max_clients, "kv admission cap");
-    let kv = Rc::new(KvEngine::new(slab, max_clients));
+    let kv = Rc::new(KvEngine::new_rdma(
+        setup.dev.clone(),
+        slab_cfg.capacity_bytes(),
+        Duration::from_secs(slab_cfg.reserve_ttl_secs),
+        max_clients,
+        endpoint_registry.clone(),
+    ));
 
     let routing = Arc::new(openlake_io::rdma::ClusterRoutingTable::new(cfg.self_id));
     let rpc_listener = rpc_server::bind_reuseport(cfg.rpc_addr)

@@ -1,0 +1,5 @@
+/dist/
+/python/openlake_client/openlaked
+/python/openlake_client/openlake_*.py
+/python/openlake_client/configs/
+pyproject.toml.orig

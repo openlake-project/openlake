@@ -152,8 +152,8 @@ fn post(addr: &str, body: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 impl Protocol for ShmLocalProtocol {
-    fn attach(&self, addr: &str, node_id: u16) -> Result<usize, String> {
-        let (name, slot_bytes, slot_count) = match call(addr, &KvRequest::Attach)? {
+    fn attach(&self, addr: &str, node_id: u16, slot_bytes: u32) -> Result<usize, String> {
+        let (name, slot_bytes, slot_count) = match call(addr, &KvRequest::Attach { slot_bytes })? {
             KvResponse::Attached {
                 shm_name,
                 slot_bytes,
@@ -161,6 +161,19 @@ impl Protocol for ShmLocalProtocol {
             } => (shm_name, slot_bytes as usize, slot_count as usize),
             other => return Err(format!("attach: {other:?}")),
         };
+        if slot_bytes == 0 {
+            self.nodes.lock().unwrap().insert(
+                node_id,
+                Node {
+                    base: std::ptr::null_mut(),
+                    slot_bytes: 0,
+                    span: 0,
+                    addr: addr.to_string(),
+                    stream: std::ptr::null_mut(),
+                },
+            );
+            return Ok(slot_count);
+        }
         let span = slot_bytes * slot_count;
         let base = shm::open_map(&name, span).map_err(|e| format!("map {name}: {e}"))?;
         let stream = match cuda() {
@@ -310,7 +323,9 @@ impl Protocol for ShmLocalProtocol {
                     (c.host_unregister)(n.base as *mut c_void);
                 }
             }
-            shm::unmap(n.base, n.span);
+            if !n.base.is_null() {
+                shm::unmap(n.base, n.span);
+            }
         }
     }
 }

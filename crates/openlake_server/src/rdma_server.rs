@@ -8,12 +8,11 @@ use openlake_io::error::IoError;
 use openlake_io::rdma::wire::{Envelope, RdmaRemoteBuf, RdmaRequest, RdmaResponse, ENVELOPE_MAGIC};
 use openlake_io::rdma::{PeerKey, RawAddressHandle, RdmaNode, BUF_SIZE};
 use openlake_io::rpc::{decode, encode, Response, WireError};
-use openlake_io::stream::ByteStream;
-use openlake_io::{KvSlab, LocalFsBackend, StorageBackend};
+use openlake_io::{LocalFsBackend, StorageBackend};
 use openlake_storage::KvEngine;
 
 use crate::lock_server::LockServer;
-use crate::rpc_server::{disk_at, dispatch};
+use crate::rpc_server::dispatch;
 
 pub async fn serve(
     node: Rc<RdmaNode>,
@@ -21,13 +20,12 @@ pub async fn serve(
     local_disks: Rc<Vec<Rc<LocalFsBackend>>>,
     locks: Arc<LockServer>,
     endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
-    kv_slab: Option<Rc<KvSlab>>,
+    kv: Option<Rc<KvEngine>>,
 ) -> anyhow::Result<()> {
     let mut rx = node
         .pump
         .take_recv_rx()
         .ok_or_else(|| anyhow::anyhow!("rdma_server: pump recv_rx already taken"))?;
-    let kv = Rc::new(KvEngine::new(kv_slab));
     let mut buf = Vec::with_capacity(BUF_SIZE);
     loop {
         loop {
@@ -60,7 +58,7 @@ async fn handle(
     local_disks: &Rc<Vec<Rc<LocalFsBackend>>>,
     locks: &Arc<LockServer>,
     endpoints: &Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
-    kv: &KvEngine,
+    kv: &Option<Rc<KvEngine>>,
     bytes: &[u8],
 ) {
     let env: Envelope = match decode(bytes) {
@@ -82,8 +80,12 @@ async fn handle(
                 tracing::warn!("rdma_server: bad request magic {:#x}", magic);
                 return;
             }
-            let sender = match node.peer_at(from_node_id, from_runtime_id) {
-                Some(p) => p.clone(),
+            let sender = match node
+                .peer_at(from_node_id, from_runtime_id)
+                .cloned()
+                .or_else(|| kv.as_ref().and_then(|e| e.peer_at(from_node_id, from_runtime_id)))
+            {
+                Some(p) => p,
                 None => {
                     tracing::warn!("rdma_server: unknown sender (node={from_node_id}, runtime={from_runtime_id})");
                     return;
@@ -153,9 +155,14 @@ async fn handle(
                     .await
                 }
                 RdmaRequest::Generic(req) => {
-                    RdmaResponse::Generic(dispatch(disks, locks, endpoints, req).await)
+                    RdmaResponse::Generic(dispatch(disks, locks, endpoints, kv.as_ref(), req).await)
                 }
-                req => kv.handle(req),
+                req => match kv.as_ref() {
+                    Some(engine) => engine.handle(req),
+                    None => RdmaResponse::Generic(Response::Err(WireError::Other(
+                        "not a kv node".into(),
+                    ))),
+                },
             };
             let body = match encode(&Envelope::Rsp {
                 magic: ENVELOPE_MAGIC,

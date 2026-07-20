@@ -1,0 +1,22 @@
+self_id              = 0
+mode                 = "kv"
+transport            = "h2"
+rpc_addr             = "127.0.0.1:9400"
+s3_addr              = "127.0.0.1:9000"
+region               = "us-east-1"
+data_dirs            = []
+set_drive_count      = 1
+default_parity_count = 1
+
+[[credentials]]
+access_key = "openlake"
+secret_key = "openlake"
+
+[[nodes]]
+id         = 0
+rpc_addr   = "127.0.0.1:9400"
+disk_count = 0
+
+[kv_slab]
+capacity_gb      = 10
+reserve_ttl_secs = 60
