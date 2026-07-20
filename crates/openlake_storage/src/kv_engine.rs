@@ -2,9 +2,6 @@ use std::rc::Rc;
 
 use openlake_io::kv::{self, KvRequest, KvResponse, KvSlab};
 
-/// Owns the kv slab (any backing) and drives it for both transports.
-/// The rdma transport also keeps a client registry (endpoints to address
-/// one-sided replies); the tcp transport needs none of that.
 pub struct KvEngine {
     slab: Rc<dyn KvSlab>,
     #[cfg(all(feature = "rdma", target_os = "linux"))]
@@ -14,7 +11,10 @@ pub struct KvEngine {
 }
 
 impl KvEngine {
-    #[cfg_attr(not(all(feature = "rdma", target_os = "linux")), allow(unused_variables))]
+    #[cfg_attr(
+        not(all(feature = "rdma", target_os = "linux")),
+        allow(unused_variables)
+    )]
     pub fn new(slab: Rc<dyn KvSlab>, max_clients: usize) -> Self {
         Self {
             slab,
@@ -25,8 +25,6 @@ impl KvEngine {
         }
     }
 
-    /// TCP data plane: the server holds the payload (put/get carry the
-    /// bytes). Reserves→writes→commits / looks up→reads on the slab.
     pub fn serve_tcp(&self, req: KvRequest) -> KvResponse {
         kv::serve_tcp(&*self.slab, req)
     }
@@ -53,11 +51,14 @@ impl KvEngine {
     }
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
-    pub fn peer_at(&self, node_id: u16, runtime_id: u16) -> Option<openlake_io::rdma::PeerEndpoint> {
+    pub fn peer_at(
+        &self,
+        node_id: u16,
+        runtime_id: u16,
+    ) -> Option<openlake_io::rdma::PeerEndpoint> {
         self.backend.peer_at(node_id, runtime_id)
     }
 
-    /// RDMA slot plane: index only. The client moves payload one-sided.
     #[cfg(all(feature = "rdma", target_os = "linux"))]
     pub fn handle(
         &self,
@@ -69,8 +70,10 @@ impl KvEngine {
                 slots: self.slab.reserve(count),
             },
             BatchCommit { entries } => {
-                let e: Vec<(u32, Vec<u8>)> =
-                    entries.into_iter().map(|c| (c.slot_idx, c.key_hash)).collect();
+                let e: Vec<(u32, Vec<u8>)> = entries
+                    .into_iter()
+                    .map(|c| (c.slot_idx, c.key_hash))
+                    .collect();
                 self.slab.commit(&e);
                 RdmaResponse::BatchCommitted
             }

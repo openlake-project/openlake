@@ -136,6 +136,8 @@ pub struct Config {
     #[serde(default)]
     pub memory_pool: MemoryPoolToml,
     #[serde(default)]
+    pub mode: Mode,
+    #[serde(default)]
     pub transport: TransportMode, // h2 (default) | rdma
     #[serde(default)]
     pub rdma: Option<RdmaToml>, // required when transport = rdma
@@ -147,6 +149,12 @@ pub struct Config {
 pub struct KvSlabToml {
     pub slot_bytes: usize,
     pub slot_count: usize,
+    #[serde(default = "default_kv_reserve_ttl_secs")]
+    pub reserve_ttl_secs: u64,
+}
+
+fn default_kv_reserve_ttl_secs() -> u64 {
+    60
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -155,6 +163,14 @@ pub enum TransportMode {
     #[default]
     H2,
     Rdma,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    Storage,
+    Kv,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -167,10 +183,26 @@ pub struct RdmaToml {
     pub bulk_pool_cap: usize,
     #[serde(default = "default_network_timeout_secs")]
     pub network_timeout_secs: u64,
+    #[serde(default = "default_srq_depth")]
+    pub srq_depth: u32,
+    #[serde(default = "default_max_send_wr")]
+    pub max_send_wr: u32,
+    #[serde(default = "default_peer_credit")]
+    pub peer_credit: u32,
+    pub max_clients: Option<u32>,
 }
 
 fn default_bulk_pool_cap() -> usize {
     64
+}
+fn default_srq_depth() -> u32 {
+    4096
+}
+fn default_max_send_wr() -> u32 {
+    256
+}
+fn default_peer_credit() -> u32 {
+    4
 }
 fn default_network_timeout_secs() -> u64 {
     10 * 60 * 60
@@ -249,7 +281,6 @@ fn deserialize_data_dirs<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Err
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error;
     use serde::Deserialize as _;
 
     #[derive(Deserialize)]
@@ -261,13 +292,7 @@ where
 
     match OneOrMany::deserialize(deserializer)? {
         OneOrMany::One(p) => Ok(vec![p]),
-        OneOrMany::Many(v) => {
-            if v.is_empty() {
-                Err(D::Error::custom("data_dirs must contain at least one path"))
-            } else {
-                Ok(v)
-            }
-        }
+        OneOrMany::Many(v) => Ok(v),
     }
 }
 
@@ -279,67 +304,77 @@ impl Config {
             anyhow::bail!("self_id {} not present in nodes table", cfg.self_id);
         }
 
-        // Total disks across all nodes — sum of each node's disk_count.
-        let total_disks: usize = cfg.nodes.iter().map(|n| n.disk_count as usize).sum();
-        if total_disks == 0 {
-            anyhow::bail!("at least one node must declare disk_count >= 1");
+        if cfg.mode == Mode::Kv {
+            if cfg.kv_slab.is_none() {
+                anyhow::bail!("mode = \"kv\" requires a [kv_slab] block");
+            }
+            if cfg.nodes.len() != 1 {
+                anyhow::bail!("mode = \"kv\" nodes are standalone; list only this node");
+            }
         }
-        if cfg.set_drive_count == 0 || cfg.set_drive_count > total_disks {
-            anyhow::bail!(
-                "set_drive_count must be in [1, {total_disks}] (total disks across cluster)"
-            );
+        if let Some(r) = &cfg.rdma {
+            if r.peer_credit == 0 {
+                anyhow::bail!("[rdma] peer_credit must be >= 1");
+            }
+            if r.max_clients.unwrap_or(0).saturating_mul(r.peer_credit + 1) > r.srq_depth {
+                anyhow::bail!("[rdma] max_clients x (peer_credit + 1) exceeds srq_depth");
+            }
         }
-        if !total_disks.is_multiple_of(cfg.set_drive_count) {
-            anyhow::bail!(
-                "total disks ({total_disks}) must be a multiple of set_drive_count ({})",
-                cfg.set_drive_count,
-            );
-        }
-        // `default_parity_count` constraints: at least 1 (no
-        // redundancy is rejected — an unprotected cluster shouldn't
-        // boot by accident), at most `set_drive_count / 2` (the
-        // `P <= D` invariant Reed-Solomon decode requires).
-        if cfg.default_parity_count == 0 {
-            anyhow::bail!("default_parity_count must be >= 1; refusing to boot with no parity");
-        }
-        let max_parity = cfg.set_drive_count / 2;
-        if cfg.default_parity_count > max_parity {
-            anyhow::bail!(
-                "default_parity_count ({}) must be <= set_drive_count / 2 ({}); \
-                 Reed-Solomon requires P <= D",
-                cfg.default_parity_count,
-                max_parity,
-            );
-        }
-
-        // Local-node consistency: data_dirs.len() must equal this
-        // node's declared disk_count, and each path must be an
-        // existing directory.
-        let self_node = cfg
-            .nodes
-            .iter()
-            .find(|n| n.id == cfg.self_id)
-            .expect("self_id presence checked above");
-        if cfg.data_dirs.len() != self_node.disk_count as usize {
-            anyhow::bail!(
-                "data_dirs.len() ({}) must equal this node's disk_count ({})",
-                cfg.data_dirs.len(),
-                self_node.disk_count,
-            );
-        }
-        let mut seen: std::collections::HashSet<&PathBuf> = std::collections::HashSet::new();
-        for (i, p) in cfg.data_dirs.iter().enumerate() {
-            if !p.is_dir() {
+        if cfg.mode == Mode::Storage {
+            let total_disks: usize = cfg.nodes.iter().map(|n| n.disk_count as usize).sum();
+            if total_disks == 0 {
+                anyhow::bail!("at least one node must declare disk_count >= 1");
+            }
+            if cfg.set_drive_count == 0 || cfg.set_drive_count > total_disks {
                 anyhow::bail!(
-                    "data_dirs[{i}] = {} is not an existing directory",
-                    p.display(),
+                    "set_drive_count must be in [1, {total_disks}] (total disks across cluster)"
                 );
             }
-            if !seen.insert(p) {
+            if !total_disks.is_multiple_of(cfg.set_drive_count) {
                 anyhow::bail!(
-                    "data_dirs[{i}] = {} is duplicated; each disk needs a unique mountpoint",
-                    p.display(),
+                    "total disks ({total_disks}) must be a multiple of set_drive_count ({})",
+                    cfg.set_drive_count,
                 );
+            }
+            if cfg.default_parity_count == 0 {
+                anyhow::bail!("default_parity_count must be >= 1; refusing to boot with no parity");
+            }
+            let max_parity = cfg.set_drive_count / 2;
+            if cfg.default_parity_count > max_parity {
+                anyhow::bail!(
+                    "default_parity_count ({}) must be <= set_drive_count / 2 ({}); \
+                 Reed-Solomon requires P <= D",
+                    cfg.default_parity_count,
+                    max_parity,
+                );
+            }
+
+            let self_node = cfg
+                .nodes
+                .iter()
+                .find(|n| n.id == cfg.self_id)
+                .expect("self_id presence checked above");
+            if cfg.data_dirs.len() != self_node.disk_count as usize {
+                anyhow::bail!(
+                    "data_dirs.len() ({}) must equal this node's disk_count ({})",
+                    cfg.data_dirs.len(),
+                    self_node.disk_count,
+                );
+            }
+            let mut seen: std::collections::HashSet<&PathBuf> = std::collections::HashSet::new();
+            for (i, p) in cfg.data_dirs.iter().enumerate() {
+                if !p.is_dir() {
+                    anyhow::bail!(
+                        "data_dirs[{i}] = {} is not an existing directory",
+                        p.display(),
+                    );
+                }
+                if !seen.insert(p) {
+                    anyhow::bail!(
+                        "data_dirs[{i}] = {} is duplicated; each disk needs a unique mountpoint",
+                        p.display(),
+                    );
+                }
             }
         }
 

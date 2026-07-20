@@ -7,12 +7,6 @@ use std::time::Duration;
 use crate::kv::{KvSlab, SlotPool};
 use crate::rdma::{Buffers, IbDevice};
 
-/// ib-registered slab. Slots live in an `ibv_reg_mr` region so clients
-/// fill them one-sided; the server exposes `slab_base`/`rkey` at attach
-/// and never moves the payload on the hot path.
-///
-/// Slot layout (written and verified by clients): bytes [0, 54) hold the
-/// `KeyHash`, payload follows; `slot_bytes` budgets for both.
 pub struct RdmaSlab {
     buffers: Buffers,
     slots: RefCell<SlotPool>,

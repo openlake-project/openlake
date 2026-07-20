@@ -16,7 +16,14 @@ fn open(name: &str, flags: libc::c_int) -> Result<libc::c_int> {
 
 fn map(fd: libc::c_int, len: usize) -> Result<*mut u8> {
     let p = unsafe {
-        libc::mmap(ptr::null_mut(), len, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0)
+        libc::mmap(
+            ptr::null_mut(),
+            len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        )
     };
     unsafe { libc::close(fd) };
     if p == libc::MAP_FAILED {
@@ -33,9 +40,8 @@ pub fn create(name: &str, len: usize) -> Result<*mut u8> {
         unlink(name);
         return Err(e);
     }
-    map(fd, len).map_err(|e| {
+    map(fd, len).inspect_err(|_| {
         unlink(name);
-        e
     })
 }
 

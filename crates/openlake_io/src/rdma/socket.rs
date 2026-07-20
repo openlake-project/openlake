@@ -103,8 +103,6 @@ impl IbSocket {
             let comp_channel = ibv_create_comp_channel(dev.ctx.as_ptr());
             let comp_channel = NonNull::new(comp_channel)
                 .ok_or_else(|| io::Error::other("ibv_create_comp_channel returned NULL"))?;
-            // Derived, never configured: an undersized CQ overruns, which is
-            // fatal, not backpressure.
             let cq_depth = (srq_depth + max_send_wr).next_power_of_two() as i32;
             let cq = ibv_create_cq(
                 dev.ctx.as_ptr(),
@@ -246,9 +244,6 @@ impl IbSocket {
         Ok(total)
     }
 
-    /// Forget a peer's credit ledger. Called when a client re-attaches: the
-    /// old conversation is dead, and any un-acked debt it left behind would
-    /// otherwise wedge replies to the new incarnation forever.
     pub fn reset_peer(&self, peer: PeerKey) {
         if let Some(e) = self.per_peer.borrow_mut().remove(&peer) {
             for w in e.wakers {

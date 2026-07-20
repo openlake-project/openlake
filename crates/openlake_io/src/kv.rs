@@ -109,7 +109,11 @@ impl SlotPool {
 
     pub fn lookup_bytes(&mut self, keys: &[Vec<u8>]) -> Vec<Option<u32>> {
         keys.iter()
-            .map(|k| KeyHash::try_from(k.as_slice()).ok().and_then(|kh| self.lookup(kh)))
+            .map(|k| {
+                KeyHash::try_from(k.as_slice())
+                    .ok()
+                    .and_then(|kh| self.lookup(kh))
+            })
             .collect()
     }
 
@@ -253,7 +257,10 @@ impl KvSlab for HostSlab {
 
 impl Drop for HostSlab {
     fn drop(&mut self) {
-        crate::shm::unmap(self.base, self.slot_bytes as usize * self.slot_count as usize);
+        crate::shm::unmap(
+            self.base,
+            self.slot_bytes as usize * self.slot_count as usize,
+        );
         crate::shm::unlink(&self.name);
     }
 }
@@ -270,9 +277,17 @@ pub enum KvRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum KvResponse {
-    Attached { shm_name: String, slot_bytes: u32, slot_count: u32 },
-    Reserved { slots: Vec<u32> },
-    Looked { slots: Vec<Option<u32>> },
+    Attached {
+        shm_name: String,
+        slot_bytes: u32,
+        slot_count: u32,
+    },
+    Reserved {
+        slots: Vec<u32>,
+    },
+    Looked {
+        slots: Vec<Option<u32>>,
+    },
     Ok,
     Err(String),
 }
@@ -287,12 +302,16 @@ pub fn serve_tcp(slab: &dyn KvSlab, req: KvRequest) -> KvResponse {
             },
             None => KvResponse::Err("slab is not shm-backed".into()),
         },
-        KvRequest::Reserve { count } => KvResponse::Reserved { slots: slab.reserve(count) },
+        KvRequest::Reserve { count } => KvResponse::Reserved {
+            slots: slab.reserve(count),
+        },
         KvRequest::Commit { entries } => {
             slab.commit(&entries);
             KvResponse::Ok
         }
-        KvRequest::Lookup { keys } => KvResponse::Looked { slots: slab.lookup(&keys) },
+        KvRequest::Lookup { keys } => KvResponse::Looked {
+            slots: slab.lookup(&keys),
+        },
         KvRequest::Release { slots } => {
             slab.release(&slots);
             KvResponse::Ok
@@ -396,7 +415,9 @@ mod tests {
         let mut pool = SlotPool::new(n, Duration::from_secs(60));
         let mut rng = 0x243F_6A88_85A3_08D3u64;
         let mut rand = move |m: u64| {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (rng >> 33) % m
         };
         let mut granted: Vec<u32> = Vec::new();
@@ -418,7 +439,10 @@ mod tests {
             if i % 251 == 0 {
                 let free: HashSet<u32> = pool.free.iter().copied().collect();
                 assert_eq!(free.len(), pool.free.len());
-                assert_eq!(free.len() + pool.pending.len() + pool.by_slot.len(), n as usize);
+                assert_eq!(
+                    free.len() + pool.pending.len() + pool.by_slot.len(),
+                    n as usize
+                );
                 assert_eq!(pool.by_hash.len(), pool.by_slot.len());
                 let mut walked = 0;
                 let mut cur = pool.lru_head;
@@ -442,7 +466,7 @@ mod tests {
         let key = vec![7u8; 54];
         let slot = s.reserve(1)[0];
         s.commit(&[(slot, key.clone())]);
-        assert_eq!(s.lookup(&[key.clone()])[0], Some(slot));
+        assert_eq!(s.lookup(std::slice::from_ref(&key))[0], Some(slot));
         s.reset();
         assert!(s.lookup(&[key])[0].is_none());
     }
