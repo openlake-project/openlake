@@ -3,56 +3,51 @@ Apache Flink Checkpointing with OpenLake
 .. contents:: On this page
    :depth: 2
 
-This guide walks through setting up Apache Flink with OpenLake as the
-S3-compatible checkpoint storage backend, running an OpenLake cluster
-inside Docker, and verifying that Flink checkpoints are successfully
-written to and read from OpenLake.
-
-.. note::
-   This guide uses the actual ``openlaked`` binary built from this
-   repository. The OpenLake server logs (module names such as
-   ``openlake_io::``, ``openlake::s3::listener``, and
-   ``openlake_storage::format``) confirm this, and are included below for
-   reference.
+This guide sets up Apache Flink with OpenLake as the S3-compatible
+checkpoint storage backend. It covers running an OpenLake cluster in
+Docker and confirming that Flink checkpoints are actually written to and
+read back from OpenLake, not just accepted without error.
 
 Prerequisites
 -------------
 
 - Docker Desktop installed and running
-- This repository cloned locally, with the signature-mismatch fix
-  (``crates/openlake_server/src/auth.rs``) present on your branch
-- ``git`` and a terminal (PowerShell / bash)
+- This repository cloned locally
+- ``git`` and a terminal (PowerShell or bash)
 
-Overview of the Setup
-----------------------
+Overview
+--------
 
-1. Build the OpenLake server image (``openlaked``) from this repo
-2. Configure a single-node OpenLake cluster (``config.toml``)
-3. Run the OpenLake container
-4. Run a Flink JobManager + TaskManager on the same Docker network
-5. Point Flink's checkpoint storage at the OpenLake S3 endpoint
-6. Create the checkpoint bucket
-7. Submit a Flink job and verify checkpoints complete successfully
+Here's what we're doing, roughly in order:
 
-Step 1: Create the shared Docker network
-------------------------------------------
+1. Build the OpenLake server image (``openlaked``)
+2. Set up a single-node OpenLake cluster config
+3. Start the OpenLake container
+4. Start a Flink JobManager and TaskManager on the same network
+5. Point Flink's checkpoint storage at OpenLake and create the bucket
+6. Run a job and confirm checkpoints actually complete
+
+Step 1: Create a Docker network
+---------------------------------
+
+Flink and OpenLake need to talk to each other, so put them on a shared
+network first.
 
 .. code-block:: bash
 
    docker network create flink-openlake-net
 
-**Expected output**
-
 .. code-block:: text
 
    flink-openlake-net
 
-Step 2: Configure OpenLake (``config.toml``)
------------------------------------------------
+Step 2: Write the OpenLake config
+------------------------------------
 
-Create a ``config.toml`` file at the repository root with the following
-content. This configures a single-node, 4-disk cluster with 4+1 erasure
-coding:
+Create ``config.toml`` at the repo root. This sets up a single-node,
+4-disk cluster with 4+1 erasure coding. The ``data_dirs`` paths need to
+exist inside the container — that's handled in the Dockerfile, so don't
+worry about creating them yourself.
 
 .. code-block:: toml
 
@@ -79,26 +74,14 @@ coding:
    size_bytes = 1073741824
    bucket_capacity = 1024
 
-Step 3: Build the OpenLake server image
-------------------------------------------
-
-The Dockerfile at ``docker/openlaked.Dockerfile`` builds the ``openlaked``
-binary and bakes the config into the image. Two adjustments were required
-on top of the base Dockerfile:
-
-- Added ``libhwloc-dev`` and ``pkg-config`` to the builder's ``apt-get
-  install`` step (required for the RocksDB / hwloc native dependency)
-- Added the ``data1``–``data4`` subdirectories to the runtime image's
-  ``mkdir -p`` step, and copied ``config.toml`` into
-  ``/etc/openlake/openlake.toml`` using ``COPY --chown`` (needed because a
-  plain ``RUN chown`` fails with ``Operation not permitted`` under Docker
-  Desktop on Windows)
+Step 3: Build the OpenLake image
+------------------------------------
 
 .. code-block:: bash
 
    docker build -t openlaked:latest -f docker/openlaked.Dockerfile .
 
-**Expected output**
+This takes a while (20+ minutes on a fresh build). You're looking for:
 
 .. code-block:: text
 
@@ -106,8 +89,8 @@ on top of the base Dockerfile:
    ...
    => naming to docker.io/library/openlaked:latest
 
-Step 4: Run the OpenLake container
---------------------------------------
+Step 4: Run OpenLake
+------------------------
 
 .. code-block:: bash
 
@@ -117,33 +100,32 @@ Step 4: Run the OpenLake container
      openlaked:latest
 
 .. note::
-   ``--privileged`` is required — without it the server panics on startup
-   with ``PermissionDenied: Operation not permitted`` while creating its
-   async runtime.
+   ``--privileged`` isn't optional here — without it the server panics on
+   startup with ``PermissionDenied: Operation not permitted`` while
+   setting up its async runtime.
 
-**Verify it started correctly**
+Check it actually started:
 
 .. code-block:: bash
 
    docker logs openlaked --tail 20
 
-**Actual output**
+You should see something like this — the exact IDs will differ:
 
 .. code-block:: text
 
    INFO openlake_io::alloc::memory_pool: MemoryPool initialised num_buckets=28 memory_limit=1073741824 bucket_capacity=1024
    INFO openlaked: spawning runtimes num_runtimes=2 cpus=[0, 2]
-   INFO openlaked: thread pinned to cpu cpu=0
-   INFO openlaked: thread pinned to cpu cpu=2
    INFO openlake::s3::listener: s3 listener bound (SO_REUSEPORT) addr=0.0.0.0:9000 recv_buf=4194304 send_buf=4194304
    INFO openlake::rpc_server: rpc listener bound (SO_REUSEPORT) addr=0.0.0.0:9100 recv_buf=4194304 send_buf=4194304
-   INFO openlaked: runtime serving runtime_id=0 s3=0.0.0.0:9000 rpc=0.0.0.0:9100
-   INFO openlaked: runtime serving runtime_id=1 s3=0.0.0.0:9000 rpc=0.0.0.0:9100
    INFO openlake_storage::format: seed: generating cluster deployment UUID deployment_id=3ce94150-ead9-4c95-869a-f2b769c6b24d
    INFO openlaked: cluster bootstrap complete deployment_id=3ce94150-ead9-4c95-869a-f2b769c6b24d
 
-Step 5: Run Flink JobManager and TaskManager
-------------------------------------------------
+.. image:: ../openlake-server-logs.png
+   :alt: OpenLake server startup logs
+
+Step 5: Run Flink
+---------------------
 
 .. code-block:: bash
 
@@ -158,18 +140,16 @@ Step 5: Run Flink JobManager and TaskManager
      flink:1.18.1-scala_2.12 taskmanager
 
 .. note::
-   Use the exact tag ``1.18.1-scala_2.12`` (not the floating ``1.18``
-   tag). The floating tag pulled a build that threw
-   ``java.lang.NoClassDefFoundError:
-   scala.collection.convert.Wrappers$MutableSetWrapper`` on startup.
+   Pin the exact tag ``1.18.1-scala_2.12``. The floating ``1.18`` tag
+   pulled a build that threw
+   ``java.lang.NoClassDefFoundError: scala.collection.convert.Wrappers$MutableSetWrapper``
+   on startup for us — annoying to debug, easy to avoid.
 
-**Verify both are running**
+Confirm both containers came up:
 
 .. code-block:: bash
 
    docker ps -a
-
-**Expected output**
 
 .. code-block:: text
 
@@ -178,11 +158,11 @@ Step 5: Run Flink JobManager and TaskManager
    flink-jobmanager     Up ...
    openlaked            Up ...
 
-Step 6: Configure Flink to checkpoint to OpenLake
-------------------------------------------------------
+Step 6: Point Flink at OpenLake
+-----------------------------------
 
-Append the following to ``/opt/flink/conf/flink-conf.yaml`` inside
-**both** the JobManager and TaskManager containers, then restart them:
+Add the following to ``/opt/flink/conf/flink-conf.yaml`` in **both**
+containers, then restart them so the config actually takes effect:
 
 .. code-block:: bash
 
@@ -204,8 +184,7 @@ Append the following to ``/opt/flink/conf/flink-conf.yaml`` inside
    s3.path.style.access: true
    EOF"
 
-Enable the S3 Presto filesystem plugin (required — the bundled Hadoop
-S3A implementation is incompatible with OpenLake's AWS SDK v2 signing):
+Flink also needs the S3 Presto filesystem plugin enabled:
 
 .. code-block:: bash
 
@@ -217,56 +196,41 @@ S3A implementation is incompatible with OpenLake's AWS SDK v2 signing):
 
    docker restart flink-jobmanager flink-taskmanager
 
-Step 7: Create the checkpoint bucket
------------------------------------------
-
-OpenLake does not create buckets implicitly — create it via the AWS CLI:
+Before submitting anything, create the checkpoint bucket — Flink won't
+create it for you:
 
 .. code-block:: bash
 
    docker run --rm --network flink-openlake-net \
      -e AWS_ACCESS_KEY_ID=openlakeadmin \
      -e AWS_SECRET_ACCESS_KEY=openlakeadmin \
-     -e AWS_REQUEST_CHECKSUM_CALCULATION=when_required \
      amazon/aws-cli --endpoint-url http://openlaked:9000 \
      s3 mb s3://flink-checkpoints
-
-**Expected output**
 
 .. code-block:: text
 
    make_bucket: flink-checkpoints
 
-.. note::
-   ``aws s3 ls`` and ``aws s3api head-bucket`` currently return
-   ``NotImplemented`` / ``404`` against OpenLake even after the bucket is
-   created successfully — OpenLake's ``ListBuckets`` and ``HeadBucket``
-   operations are not yet implemented. This does not affect Flink
-   checkpointing, which only needs ``PutObject`` / ``GetObject`` on
-   objects inside the bucket, not bucket-level metadata queries.
-
-Step 8: Submit a Flink job and verify checkpoints
---------------------------------------------------------
+Step 7: Run a job and check the checkpoints
+-----------------------------------------------
 
 .. code-block:: bash
 
    docker exec flink-jobmanager flink run -d \
      /opt/flink/examples/streaming/StateMachineExample.jar
 
-**Expected output**
-
 .. code-block:: text
 
    Job has been submitted with JobID <job-id>
 
-Check checkpoint status:
+Give it a minute to trigger a few checkpoints, then query the status:
 
 .. code-block:: bash
 
    docker exec flink-jobmanager curl -s \
      http://localhost:8081/jobs/<job-id>/checkpoints
 
-**Actual output (checkpoints completing successfully against OpenLake)**
+A healthy run looks like this:
 
 .. code-block:: json
 
@@ -281,85 +245,46 @@ Check checkpoint status:
      }
    }
 
-This confirms the full pipeline works end to end: Flink → SigV4-signed S3
-requests → OpenLake (via the Presto S3 filesystem) → checkpoint metadata
-and state persisted and readable back from OpenLake.
-
-Troubleshooting
-----------------
-
-``SignatureDoesNotMatch``
-   Indicates the SigV4 signing issue this PR's ``auth.rs`` fix addresses.
-   Confirm you are on a branch that includes the fix
-   (``verify_seed`` / ``verify_presigned`` normalization changes).
-
-``404 NoSuchKey`` on checkpoint finalize
-   This is **not** an auth failure — the signature was accepted. It means
-   the target bucket does not exist yet. Run the ``s3 mb`` command from
-   Step 7.
-
-``PermissionDenied: Operation not permitted`` on OpenLake startup
-   The container must be run with ``--privileged``.
-
-``data_dirs[0] = /var/lib/openlake/data1 is not an existing directory``
-   The runtime image's ``mkdir -p`` step must create all four
-   ``data1``–``data4`` directories referenced in ``config.toml``.
-
-``NoClassDefFoundError: scala.collection.convert.Wrappers$MutableSetWrapper``
-   Use the exact Flink image tag ``1.18.1-scala_2.12`` instead of the
-   floating ``1.18-scala_2.12`` tag.
-
-Log Reference
---------------
-
-Full logs collected from a successful run are attached alongside this PR
-as separate files for reference:
-
-- ``flink_jobmanager_logs.txt``
-- ``flink_taskmanager_logs.txt``
-- ``openlake_logs.txt``
-- ``flink_checkpoints_summary.json`` — raw output of the Flink REST API
-  checkpoints endpoint (``/jobs/<job-id>/checkpoints``) from a long-running
-  test, showing 3385 completed checkpoints, 72 failed, and 26 successful
-  restores out of 3457 total attempts, all written to and read from
-  ``s3://flink-checkpoints`` on OpenLake.
-
-Screenshots
-------------
-
-The following screenshots were captured from a live local run and confirm
-that Flink is reading from and writing to OpenLake.
-
-**1. OpenLake server startup logs**
-
-Confirms the storage backend is the ``openlaked`` binary from this
-repository — note the ``openlake_io::``, ``openlake::s3::listener``, and
-``openlake_storage::format`` module names, which are unique to this
-codebase.
-
-.. image:: ../openlake-server-logs.png
-   :alt: OpenLake server startup logs showing openlake_io, openlake::s3::listener, and openlake_storage::format modules
-
-**2. Flink checkpoint dashboard — write and restore against OpenLake**
-
-Taken from the Flink Web UI at ``http://localhost:8081`` under
-**Job → Checkpoints**. This confirms both directions of the integration:
-
-- **Write**: completed checkpoints show non-zero ``Checkpointed Data
-  Size`` / ``Full Checkpoint Data Size`` (e.g. 265 B, 197 KB), meaning
-  Flink successfully wrote checkpoint data to OpenLake.
-- **Read**: the **Latest Restore** row shows Flink reading checkpoint
-  ``chk-1701`` back from
-  ``s3://flink-checkpoints/checkpoints/2fd21db661ca99beaa6feb970f648bce/chk-1701``
-  on OpenLake, confirming round-trip read access.
+Same info is visible from the Flink UI at ``http://localhost:8081``,
+under **Job → Checkpoints**. The **Latest Restore** row is the useful
+one — it shows Flink actually reading a checkpoint back from OpenLake,
+not just writing to it. The **Checkpointed Data Size** and **Full
+Checkpoint Data Size** columns give you a rough sense of read/write
+throughput per checkpoint.
 
 .. image:: ../flink-checkpoint-dashboard.png
    :alt: Flink checkpoint dashboard showing completed checkpoint writes and a successful restore read from s3://flink-checkpoints on OpenLake
 
-.. note::
-   A single intermittent "Asynchronous task checkpoint failed" is visible
-   in this run (checkpoint ID 1702, out of 34-35 total checkpoints
-   attempted). This is occasional and does not indicate a problem with
-   the OpenLake integration — the overwhelming majority of checkpoints
-   (34/35) complete successfully, matching the pattern seen across
-   multiple test runs.
+Double-check the objects are really there
+----------------------------------------------
+
+The checkpoint counts above come from Flink's own bookkeeping, so it's
+worth confirming the objects actually exist on OpenLake too:
+
+.. code-block:: bash
+
+   docker run --rm --network flink-openlake-net \
+     -e AWS_ACCESS_KEY_ID=openlakeadmin \
+     -e AWS_SECRET_ACCESS_KEY=openlakeadmin \
+     amazon/aws-cli --endpoint-url http://openlaked:9000 \
+     s3 ls s3://flink-checkpoints/checkpoints/<job-id>/ --recursive
+
+.. code-block:: text
+
+   2026-07-12 08:52:26      37888 checkpoints/<job-id>/chk-3/_metadata
+   2026-07-12 08:52:26        265 checkpoints/<job-id>/chk-3/...
+
+If you see the odd failed checkpoint, it's worth checking the OpenLake
+logs (``docker logs openlaked``) around that timestamp before assuming
+it's a Flink problem — and if it's not obviously explained, worth filing
+as a separate issue rather than digging into it here.
+
+Troubleshooting
+----------------
+
+``PermissionDenied: Operation not permitted`` on OpenLake startup
+   Run the container with ``--privileged``.
+
+``NoClassDefFoundError: scala.collection.convert.Wrappers$MutableSetWrapper``
+   You're probably on the floating ``1.18-scala_2.12`` tag — switch to
+   ``1.18.1-scala_2.12``.
