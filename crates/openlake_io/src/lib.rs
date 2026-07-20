@@ -14,6 +14,8 @@
 pub mod alloc;
 pub mod backend;
 pub mod error;
+pub mod kv;
+pub mod shm;
 #[cfg(all(feature = "rdma", target_os = "linux"))]
 pub mod kv_slab;
 pub mod local_fs;
@@ -35,7 +37,8 @@ pub use alloc::{MemoryPool, MemoryPoolConfig, PooledBuffer};
 pub use backend::{LockPeer, StorageBackend};
 pub use error::{IoError, IoResult};
 #[cfg(all(feature = "rdma", target_os = "linux"))]
-pub use kv_slab::KvSlab;
+pub use kv_slab::RdmaSlab;
+pub use kv::{HostSlab, KvSlab};
 pub use local_fs::{LocalFsBackend, MULTIPART_VOL, STAGING_VOL, SYSTEM_BUCKET};
 pub use purge::init_purge_worker;
 pub use remote_fs::{PeerClient, RemoteBackend};

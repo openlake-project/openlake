@@ -22,8 +22,8 @@ futures-util = { workspace = true }
 send_wrapper = { workspace = true }
 # URL-safe-no-pad base64 for encoding the bincode `Request` envelope
 # into the `x-openlake-rpc` HTTP header on the streaming-write
-# route. Same encoder MinIO and rustfs use for upload-IDs and other
-# header-borne tokens, so the alphabet matches AWS conventions.
+# route. The URL-safe alphabet matches AWS conventions for
+# upload-IDs and other header-borne tokens.
 base64       = { workspace = true }
 
 bytes        = { workspace = true }
