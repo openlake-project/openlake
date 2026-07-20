@@ -1,0 +1,26 @@
+[package]
+name                   = "openlake_kv_client"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+
+# `openlake_client` is the module name Python imports; it must match the
+# `#[pymodule]` in lib.rs. cdylib builds the extension; rlib keeps the crate
+# linkable from Rust tests.
+[lib]
+name       = "openlake_client"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+rdma = ["openlake_io/rdma"]
+
+[dependencies]
+openlake_io = { path = "../openlake_io" }
+
+compio  = { workspace = true }
+libc    = "0.2"
+futures = { workspace = true }
+pyo3    = { version = "0.29", features = ["abi3-py310", "extension-module"] }
+tracing = { workspace = true }
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
