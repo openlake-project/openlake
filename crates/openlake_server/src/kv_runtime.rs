@@ -1,14 +1,3 @@
-//! KV-node bootstrap. Two transports, one engine, one slab abstraction:
-//!
-//! - `run_tcp`: a `HostSlab` (plain host RAM, no ibverbs) behind a
-//!   `KvEngine`, served over the rpc plane's `/v1/kv` route. Builds and
-//!   runs on any host.
-//! - `run` (rdma only): a `RdmaSlab` (ib-registered) behind the same
-//!   `KvEngine`; slot verbs over the rdma plane, payload one-sided.
-//!
-//! A kv node never peers with other kv nodes; clients hold the fleet
-//! list and attach to each directly.
-
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,13 +29,23 @@ pub async fn run_tcp(
     let listener = rpc_server::bind_reuseport(cfg.rpc_addr)
         .with_context(|| format!("kv-tcp: bind rpc on {}", cfg.rpc_addr))?;
     let disks: Rc<Vec<Rc<dyn StorageBackend>>> = Rc::new(Vec::new());
-    let endpoints = Arc::new(std::sync::Mutex::new(openlake_io::rpc::RdmaEndpointsReply {
-        complete: true,
-        endpoints: Vec::new(),
-    }));
+    let endpoints = Arc::new(std::sync::Mutex::new(
+        openlake_io::rpc::RdmaEndpointsReply {
+            complete: true,
+            endpoints: Vec::new(),
+        },
+    ));
     let acceptor = tls.rpc_acceptor().map(Rc::new);
     tracing::info!(rpc = %cfg.rpc_addr, "kv node (tcp) serving");
-    rpc_server::serve(listener, disks, lock_server, acceptor, endpoints, Some(engine)).await
+    rpc_server::serve(
+        listener,
+        disks,
+        lock_server,
+        acceptor,
+        endpoints,
+        Some(engine),
+    )
+    .await
 }
 
 #[cfg(all(feature = "rdma", target_os = "linux"))]
@@ -114,7 +113,9 @@ pub async fn run(
         })
     };
 
-    let node = Rc::new(openlake_io::rdma::RdmaNode::finalize(&rdma_cfg, setup, routing));
+    let node = Rc::new(openlake_io::rdma::RdmaNode::finalize(
+        &rdma_cfg, setup, routing,
+    ));
     kv.set_on_attach({
         let sock = node.sock.clone();
         move |id, rt| sock.reset_peer(openlake_io::rdma::PeerKey::new(id, rt))

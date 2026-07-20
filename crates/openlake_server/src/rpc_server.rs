@@ -58,6 +58,8 @@ use openlake_io::{IoError, IoResult, StorageBackend};
 
 use crate::lock_server::LockServer;
 use crate::s3::listener::TlsTcpListener;
+use openlake_io::kv::{KvRequest, KvResponse};
+use openlake_storage::KvEngine;
 
 const LISTEN_BACKLOG: i32 = 1024;
 
@@ -126,6 +128,7 @@ struct RpcAppStateInner {
     disks: Vec<Rc<dyn StorageBackend>>,
     locks: Arc<LockServer>,
     endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+    kv: Option<Rc<KvEngine>>,
 }
 
 // SAFETY: every `RpcAppState` clone stays on the runtime that
@@ -138,12 +141,14 @@ impl RpcAppState {
         disks: Vec<Rc<dyn StorageBackend>>,
         locks: Arc<LockServer>,
         endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+        kv: Option<Rc<KvEngine>>,
     ) -> Self {
         Self {
             inner: Rc::new(RpcAppStateInner {
                 disks,
                 locks,
                 endpoints,
+                kv,
             }),
         }
     }
@@ -155,6 +160,9 @@ impl RpcAppState {
     }
     fn endpoints(&self) -> &Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>> {
         &self.inner.endpoints
+    }
+    fn kv(&self) -> Option<&Rc<KvEngine>> {
+        self.inner.kv.as_ref()
     }
 }
 
@@ -168,10 +176,12 @@ pub async fn serve(
     locks: Arc<LockServer>,
     tls: Option<Rc<TlsAcceptor>>,
     endpoints: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+    kv: Option<Rc<KvEngine>>,
 ) -> anyhow::Result<()> {
-    let state = RpcAppState::new(disks.iter().cloned().collect(), locks, endpoints);
+    let state = RpcAppState::new(disks.iter().cloned().collect(), locks, endpoints, kv);
     let app: Router = Router::new()
         .route("/v1/rpc", post(handle_unary))
+        .route("/v1/kv", post(handle_kv))
         .route("/v1/rpc/stream-write", put(handle_stream_write))
         .route("/v1/rpc/stream-read", post(handle_stream_read))
         .with_state(state);
@@ -238,11 +248,42 @@ async fn handle_unary(State(state): State<RpcAppState>, body: Body) -> Response 
         );
     }
     let resp = SendWrapper::new(async move {
-        dispatch(state.disks(), state.locks(), state.endpoints(), req).await
+        dispatch(
+            state.disks(),
+            state.locks(),
+            state.endpoints(),
+            state.kv(),
+            req,
+        )
+        .await
     })
     .await;
     let body_bytes = rpc::encode(&resp).unwrap_or_default();
     rpc_ok(body_bytes)
+}
+
+async fn handle_kv(State(state): State<RpcAppState>, body: Body) -> Response {
+    let bytes = match axum::body::to_bytes(body, UNARY_BODY_LIMIT).await {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                IoError::Io(std::io::Error::other(e.to_string())),
+            )
+        }
+    };
+    let req: KvRequest = match rpc::decode(&bytes) {
+        Ok(r) => r,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, e),
+    };
+    let resp = SendWrapper::new(async move {
+        match state.kv() {
+            Some(engine) => engine.serve_tcp(req),
+            None => KvResponse::Err("not a kv node".into()),
+        }
+    })
+    .await;
+    rpc_ok(rpc::encode(&resp).unwrap_or_default())
 }
 
 /// `PUT /v1/rpc/stream-write` — streaming PUT.
@@ -501,6 +542,7 @@ pub(crate) async fn dispatch(
     disks: &[Rc<dyn StorageBackend>],
     locks: &Arc<LockServer>,
     endpoints: &Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
+    kv: Option<&Rc<KvEngine>>,
     req: Request,
 ) -> RpcResponse {
     use openlake_io::{DeleteOptions, RenameOptions, UpdateMetadataOpts};
@@ -773,6 +815,41 @@ pub(crate) async fn dispatch(
         }
 
         GetRdmaEndpoints => RpcResponse::RdmaEndpoints(endpoints.lock().unwrap().clone()),
+
+        RdmaAttach {
+            client_node_id,
+            epoch,
+            endpoints: client_eps,
+        } => {
+            #[cfg(all(feature = "rdma", target_os = "linux"))]
+            {
+                use openlake_io::rpc::{CLIENT_NODE_ID_BASE, CLIENT_NODE_ID_MAX};
+                let res = match kv {
+                    None => Err("not a kv node".into()),
+                    _ if !(CLIENT_NODE_ID_BASE..=CLIENT_NODE_ID_MAX).contains(&client_node_id) => {
+                        Err(format!("client id {client_node_id} outside [{CLIENT_NODE_ID_BASE}, {CLIENT_NODE_ID_MAX}]"))
+                    }
+                    Some(engine) => engine.attach(client_node_id, &client_eps, epoch),
+                };
+                match res {
+                    Ok(()) => {
+                        tracing::info!(client_node_id, epoch, "rdma client attached");
+                        RpcResponse::RdmaAttached(endpoints.lock().unwrap().clone())
+                    }
+                    Err(why) => {
+                        tracing::warn!(client_node_id, why, "rdma attach denied");
+                        RpcResponse::RdmaAttachDenied(why)
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "rdma", target_os = "linux")))]
+            {
+                let _ = (&kv, epoch, &client_eps);
+                RpcResponse::RdmaAttachDenied(format!(
+                    "node {client_node_id} tried rdma attach on a server built without rdma"
+                ))
+            }
+        }
     }
 }
 

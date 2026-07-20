@@ -50,16 +50,9 @@ pub struct RdmaConfig {
     pub bulk_buf_size: usize,
     pub bulk_pool_cap: usize,
     pub num_cluster_nodes: u16,
-    /// Floor for posted receive buffers. The default sizing scales with the
-    /// cluster, which is wrong for a node whose peers are attached clients
-    /// (a kv node is a 1-node cluster serving many clients); such nodes set
-    /// this to fill the SRQ.
     pub min_recv_bufs: usize,
-    /// Posted receive capacity; with `peer_credit` it bounds concurrent peers.
     pub srq_depth: u32,
-    /// DCI send-queue depth.
     pub max_send_wr: u32,
-    /// Per-peer in-flight send window.
     pub peer_credit: u32,
 }
 

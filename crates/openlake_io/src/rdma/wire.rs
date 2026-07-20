@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::rpc::{DiskIdx, Request, Response};
 
-pub const ENVELOPE_MAGIC: u32 = 0x52444D33; // "RDM3": 54-byte KeyHash
+pub const ENVELOPE_MAGIC: u32 = 0x52444D33;
 
 pub use crate::kv::KeyHash;
 
@@ -50,7 +50,6 @@ pub enum RdmaRequest {
         slot_idxs: Vec<u32>,
     },
     Generic(Request),
-    /// Unbind every slot and return the whole slab to the free list.
     Reset,
 }
 
