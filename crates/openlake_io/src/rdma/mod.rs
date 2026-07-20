@@ -21,7 +21,7 @@ pub use bootstrap::{ClusterRoutingTable, LocalEndpoint};
 pub use buffers::{Buffers, BUF_SIZE};
 pub use device::IbDevice;
 pub use node::{PeerEndpoint, PendingResponse, RdmaConfig, RdmaNode, RdmaQos, RdmaSetup};
-pub use rdma_buf::{RdmaBuf, RdmaBufPool};
+pub use rdma_buf::{ExternalMr, RdmaBuf, RdmaBufPool};
 pub use socket::{CqPump, IbSocket};
 pub use wr::PeerKey;
 

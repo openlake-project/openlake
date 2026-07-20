@@ -12,7 +12,6 @@ use super::device::IbDevice;
 
 pub const BUF_SIZE: usize = 16 * 1024;
 pub const SEND_BUF_CNT: usize = 4;
-pub const PEER_CREDIT_BUDGET: u32 = SEND_BUF_CNT as u32;
 const PAGE_ALIGN: usize = 4096;
 
 pub fn buf_ack_batch() -> u32 {

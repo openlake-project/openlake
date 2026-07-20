@@ -69,6 +69,58 @@ impl Drop for RdmaBufInner {
     }
 }
 
+/// Registration over caller-owned memory (e.g. a KV cache). Local access
+/// only: the region is a source of WRITEs and destination of READs that we
+/// initiate, never remotely addressed. The caller guarantees
+/// `[addr, addr+len)` stays valid and mapped for the MR's lifetime.
+pub struct ExternalMr {
+    mr: NonNull<ibv_mr>,
+    pub addr: u64,
+    pub len: u64,
+    _dev: Rc<IbDevice>,
+}
+
+impl ExternalMr {
+    pub fn register(dev: Rc<IbDevice>, addr: u64, len: u64) -> io::Result<Self> {
+        if addr == 0 || len == 0 {
+            return Err(io::Error::other("register: zero addr or len"));
+        }
+        let flags = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE.0
+            | ibv_access_flags::IBV_ACCESS_RELAXED_ORDERING.0;
+        let mr = unsafe {
+            ibv_reg_mr(
+                dev.pd.as_ptr(),
+                addr as *mut _,
+                len as usize,
+                flags as i32,
+            )
+        };
+        let mr = NonNull::new(mr).ok_or_else(io::Error::last_os_error)?;
+        Ok(Self {
+            mr,
+            addr,
+            len,
+            _dev: dev,
+        })
+    }
+
+    pub fn lkey(&self) -> u32 {
+        unsafe { (*self.mr.as_ptr()).lkey }
+    }
+
+    pub fn contains(&self, addr: u64, len: u64) -> bool {
+        addr >= self.addr && addr.saturating_add(len) <= self.addr + self.len
+    }
+}
+
+impl Drop for ExternalMr {
+    fn drop(&mut self) {
+        unsafe {
+            ibv_dereg_mr(self.mr.as_ptr());
+        }
+    }
+}
+
 pub struct RdmaBuf {
     inner: Option<Box<RdmaBufInner>>,
 }

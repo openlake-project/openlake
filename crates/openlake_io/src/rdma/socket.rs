@@ -18,9 +18,7 @@ use rdma_mummy_sys::{
     ibv_wr_start,
 };
 
-use super::buffers::{
-    buf_ack_batch, RecvBuffers, SendBuffers, BUF_SIZE, PEER_CREDIT_BUDGET, SEND_BUF_CNT,
-};
+use super::buffers::{buf_ack_batch, RecvBuffers, SendBuffers, BUF_SIZE, SEND_BUF_CNT};
 use super::device::{IbDevice, PORT_NUM};
 use super::mlx5dv_sys::{
     mlx5dv_create_qp, mlx5dv_dc_type_MLX5DV_DCTYPE_DCI, mlx5dv_dc_type_MLX5DV_DCTYPE_DCT,
@@ -40,9 +38,6 @@ fn wc_status_str(status: i32) -> &'static str {
         .unwrap_or("<utf8 invalid>")
 }
 
-const CQ_DEPTH: i32 = 4096;
-const MAX_SEND_WR: u32 = 256;
-const SRQ_DEPTH: u32 = 1024;
 const MAX_RD_ATOMIC: u8 = 16;
 const MIN_RNR_TIMER: u8 = 1;
 const QP_TIMEOUT: u8 = 14;
@@ -80,9 +75,12 @@ pub struct IbSocket {
     pub(super) self_key: PeerKey,
 
     pub(super) per_peer: RefCell<HashMap<PeerKey, PeerCredit>>,
+    pub(super) peer_credit: u32,
 
     pub(super) completion: RefCell<HashMap<u64, oneshot::Sender<i32>>>,
     pub(super) next_wr_id: Cell<u64>,
+    pub(super) sq_free: Cell<usize>,
+    pub(super) sq_waiters: RefCell<Vec<oneshot::Sender<()>>>,
 }
 
 impl IbSocket {
@@ -90,20 +88,27 @@ impl IbSocket {
         self.self_dct_identifier
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         dev: Rc<IbDevice>,
         dc_key: u64,
         qos: RdmaQos,
         self_key: PeerKey,
         recv_buf_cnt: usize,
+        srq_depth: u32,
+        max_send_wr: u32,
+        peer_credit: u32,
     ) -> io::Result<Self> {
         unsafe {
             let comp_channel = ibv_create_comp_channel(dev.ctx.as_ptr());
             let comp_channel = NonNull::new(comp_channel)
                 .ok_or_else(|| io::Error::other("ibv_create_comp_channel returned NULL"))?;
+            // Derived, never configured: an undersized CQ overruns, which is
+            // fatal, not backpressure.
+            let cq_depth = (srq_depth + max_send_wr).next_power_of_two() as i32;
             let cq = ibv_create_cq(
                 dev.ctx.as_ptr(),
-                CQ_DEPTH,
+                cq_depth,
                 ptr::null_mut(),
                 comp_channel.as_ptr(),
                 0,
@@ -124,7 +129,7 @@ impl IbSocket {
             }
 
             let mut srq_attr: ibv_srq_init_attr = mem::zeroed();
-            srq_attr.attr.max_wr = SRQ_DEPTH;
+            srq_attr.attr.max_wr = srq_depth;
             srq_attr.attr.max_sge = 1;
             let srq = ibv_create_srq(dev.pd.as_ptr(), &mut srq_attr);
             let srq = NonNull::new(srq).ok_or_else(|| {
@@ -138,7 +143,7 @@ impl IbSocket {
             // mlx5dv assigns the DCT number during the RTR transition, not at create.
             let self_dct_identifier = (*dct.as_ptr()).qp_num;
 
-            let dci = create_dci(&dev, cq.as_ptr())
+            let dci = create_dci(&dev, cq.as_ptr(), max_send_wr)
                 .map_err(|e| io::Error::other(format!("create_dci: {e}")))?;
             transition_dci(dci.as_ptr(), &dev, qos)
                 .map_err(|e| io::Error::other(format!("transition_dci: {e}")))?;
@@ -159,8 +164,11 @@ impl IbSocket {
                 self_dct_identifier,
                 self_key,
                 per_peer: RefCell::new(HashMap::new()),
+                peer_credit,
                 completion: RefCell::new(HashMap::new()),
                 next_wr_id: Cell::new(1),
+                sq_free: Cell::new((max_send_wr as usize).saturating_sub(SQ_RESERVE).max(1)),
+                sq_waiters: RefCell::new(Vec::new()),
             };
             for i in 0..recv_buf_cnt {
                 sock.post_recv(i as u32)?;
@@ -186,7 +194,7 @@ impl IbSocket {
                 let mut per_peer = self.per_peer.borrow_mut();
                 let entry = per_peer.entry(peer).or_insert_with(PeerCredit::new);
                 let outstanding = entry.sent.wrapping_sub(entry.acked);
-                if outstanding < PEER_CREDIT_BUDGET as u64 {
+                if outstanding < self.peer_credit as u64 {
                     entry.sent = entry.sent.wrapping_add(1);
                     break;
                 }
@@ -236,6 +244,17 @@ impl IbSocket {
             }
         }
         Ok(total)
+    }
+
+    /// Forget a peer's credit ledger. Called when a client re-attaches: the
+    /// old conversation is dead, and any un-acked debt it left behind would
+    /// otherwise wedge replies to the new incarnation forever.
+    pub fn reset_peer(&self, peer: PeerKey) {
+        if let Some(e) = self.per_peer.borrow_mut().remove(&peer) {
+            for w in e.wakers {
+                let _ = w.send(());
+            }
+        }
     }
 
     pub fn attempt_singular_rcv(&self, out: &mut Vec<u8>) -> Option<()> {
@@ -365,6 +384,106 @@ impl IbSocket {
         Ok(())
     }
 
+    async fn sq_acquire(&self, want: usize) -> usize {
+        loop {
+            let free = self.sq_free.get();
+            if free > 0 {
+                let n = want.min(free);
+                self.sq_free.set(free - n);
+                return n;
+            }
+            let (tx, rx) = oneshot::channel();
+            self.sq_waiters.borrow_mut().push(tx);
+            let _ = rx.await;
+        }
+    }
+
+    fn sq_release(&self, n: usize) {
+        self.sq_free.set(self.sq_free.get() + n);
+        for tx in self.sq_waiters.borrow_mut().drain(..) {
+            let _ = tx.send(());
+        }
+    }
+
+    pub async fn rdma_chain(
+        &self,
+        write: bool,
+        ops: &[(u64, u32, u32, u64)],
+        remote_rkey: u32,
+        ah: *mut ibv_ah,
+        peer_dct_num: u32,
+        peer_dc_key: u64,
+    ) -> io::Result<()> {
+        let mut posted = 0;
+        while posted < ops.len() {
+            let ta = std::time::Instant::now();
+            let n = self.sq_acquire(CHAIN_WINDOW.min(ops.len() - posted)).await;
+            let t_acq = ta.elapsed();
+            let tp = std::time::Instant::now();
+            let window = &ops[posted..posted + n];
+            let (tx, rx) = oneshot::channel();
+            let last_wr_id;
+            unsafe {
+                let qpx = ibv_qp_to_qp_ex(self.dci.as_ptr());
+                let mqpx = mlx5dv_qp_ex_from_ibv_qp_ex(qpx);
+                ibv_wr_start(qpx);
+                for (k, &(local_addr, local_len, local_lkey, remote_addr)) in
+                    window.iter().enumerate()
+                {
+                    let id = self.next_wr_id.get();
+                    self.next_wr_id.set(id + 1);
+                    (*qpx).wr_id = id;
+                    (*qpx).wr_flags = if k + 1 == n {
+                        ibv_send_flags::IBV_SEND_SIGNALED.0 as u32
+                    } else {
+                        0
+                    };
+                    if write {
+                        ibv_wr_rdma_write(qpx, remote_rkey, remote_addr);
+                    } else {
+                        ibv_wr_rdma_read(qpx, remote_rkey, remote_addr);
+                    }
+                    ibv_wr_set_sge(qpx, local_lkey, local_addr, local_len);
+                    ((*mqpx).wr_set_dc_addr.expect("wr_set_dc_addr"))(
+                        mqpx,
+                        ah,
+                        peer_dct_num,
+                        peer_dc_key,
+                    );
+                }
+                last_wr_id = self.next_wr_id.get() - 1;
+                self.completion.borrow_mut().insert(last_wr_id, tx);
+                let rc = ibv_wr_complete(qpx);
+                if rc != 0 {
+                    self.completion.borrow_mut().remove(&last_wr_id);
+                    self.sq_release(n);
+                    return Err(io::Error::from_raw_os_error(rc));
+                }
+            }
+            let t_post = tp.elapsed();
+            let tw = std::time::Instant::now();
+            let status = rx.await.map_err(|_| io::Error::other("pump dropped"));
+            self.sq_release(n);
+            let status = status?;
+            if status != 0 {
+                return Err(io::Error::other(format!(
+                    "rdma_chain wc.status={status} ({})",
+                    wc_status_str(status)
+                )));
+            }
+            if oltrace() {
+                eprintln!(
+                    "OLTRACE win write={write} n={n} acq_us={} post_us={} wait_us={}",
+                    t_acq.as_micros(),
+                    t_post.as_micros(),
+                    tw.elapsed().as_micros(),
+                );
+            }
+            posted += n;
+        }
+        Ok(())
+    }
+
     pub(super) fn post_send_with_id(
         &self,
         wr_id: u64,
@@ -475,13 +594,25 @@ unsafe fn create_dct(
         .ok_or_else(io::Error::last_os_error)
 }
 
-unsafe fn create_dci(dev: &IbDevice, cq: *mut ibv_cq) -> io::Result<NonNull<ibv_qp>> {
+const CHAIN_WINDOW: usize = 128;
+const SQ_RESERVE: usize = 32;
+
+fn oltrace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("OPENLAKE_TRACE").is_some())
+}
+
+unsafe fn create_dci(
+    dev: &IbDevice,
+    cq: *mut ibv_cq,
+    max_send_wr: u32,
+) -> io::Result<NonNull<ibv_qp>> {
     let mut a: ibv_qp_init_attr_ex = mem::zeroed();
     a.qp_type = ibv_qp_type::IBV_QPT_DRIVER as u32;
     a.send_cq = cq;
     a.recv_cq = cq;
     a.pd = dev.pd.as_ptr();
-    a.cap.max_send_wr = MAX_SEND_WR;
+    a.cap.max_send_wr = max_send_wr;
     a.cap.max_send_sge = 1;
     a.comp_mask = rdma_mummy_sys::ibv_qp_init_attr_mask::IBV_QP_INIT_ATTR_PD.0
         | rdma_mummy_sys::ibv_qp_init_attr_mask::IBV_QP_INIT_ATTR_SEND_OPS_FLAGS.0;
