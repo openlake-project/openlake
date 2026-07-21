@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [features]
 rdma = ["openlake_io/rdma", "openlake_storage/rdma"]
+vendored-hwloc = ["hwlocality/vendored"]
 
 [dependencies]
 openlake_io      = { path = "../openlake_io" }
