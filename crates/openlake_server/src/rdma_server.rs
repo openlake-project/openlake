@@ -83,8 +83,10 @@ async fn handle(
             let sender = match node
                 .peer_at(from_node_id, from_runtime_id)
                 .cloned()
-                .or_else(|| kv.as_ref().and_then(|e| e.peer_at(from_node_id, from_runtime_id)))
-            {
+                .or_else(|| {
+                    kv.as_ref()
+                        .and_then(|e| e.peer_at(from_node_id, from_runtime_id))
+                }) {
                 Some(p) => p,
                 None => {
                     tracing::warn!("rdma_server: unknown sender (node={from_node_id}, runtime={from_runtime_id})");

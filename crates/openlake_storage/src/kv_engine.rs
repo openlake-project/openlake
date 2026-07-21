@@ -107,15 +107,19 @@ impl KvEngine {
         if slot_bytes > 0 && self.slab.borrow().is_none() {
             let dev = self.dev.clone().expect("rdma engine built with a device");
             let slot_count = (self.capacity_bytes / slot_bytes as u64).max(1) as usize;
-            let slab = openlake_io::RdmaSlab::new(dev, slot_bytes as usize, slot_count, self.reserve_ttl)
-                .map_err(|e| format!("rdma slab create: {e}"))?;
+            let slab =
+                openlake_io::RdmaSlab::new(dev, slot_bytes as usize, slot_count, self.reserve_ttl)
+                    .map_err(|e| format!("rdma slab create: {e}"))?;
             let meta = openlake_io::rpc::SlabMeta {
                 slab_base: slab.slab_base(),
                 rkey: slab.rkey(),
                 slot_bytes: slab.slot_bytes(),
             };
             *self.slab.borrow_mut() = Some(Rc::new(slab));
-            let registry = self.registry.as_ref().expect("rdma engine built with a registry");
+            let registry = self
+                .registry
+                .as_ref()
+                .expect("rdma engine built with a registry");
             for ep in registry.lock().unwrap().endpoints.iter_mut() {
                 ep.kv_slab = Some(meta);
             }
