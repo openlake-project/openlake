@@ -11,7 +11,11 @@ fn human_bytes(n: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
-    if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", U[i]) }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", U[i])
+    }
 }
 
 pub struct KvEngine {
@@ -89,7 +93,11 @@ impl KvEngine {
         }
         match &*self.slab.borrow() {
             Some(slab) => {
-                let committed = if let KvRequest::Commit { entries } = &req { entries.len() } else { 0 };
+                let committed = if let KvRequest::Commit { entries } = &req {
+                    entries.len()
+                } else {
+                    0
+                };
                 let resp = kv::serve_tcp(&**slab, req);
                 match &resp {
                     KvResponse::Looked { slots } => tracing::info!(
@@ -140,8 +148,9 @@ impl KvEngine {
         if slot_bytes > 0 && self.slab.borrow().is_none() {
             let dev = self.dev.clone().expect("rdma engine built with a device");
             let slot_count = (self.capacity_bytes / slot_bytes as u64).max(1) as usize;
-            let slab = openlake_io::RdmaSlab::new(dev, slot_bytes as usize, slot_count, self.reserve_ttl)
-                .map_err(|e| format!("rdma slab create: {e}"))?;
+            let slab =
+                openlake_io::RdmaSlab::new(dev, slot_bytes as usize, slot_count, self.reserve_ttl)
+                    .map_err(|e| format!("rdma slab create: {e}"))?;
             let meta = openlake_io::rpc::SlabMeta {
                 slab_base: slab.slab_base(),
                 rkey: slab.rkey(),
@@ -154,7 +163,10 @@ impl KvEngine {
                 slot_count,
             );
             *self.slab.borrow_mut() = Some(Rc::new(slab));
-            let registry = self.registry.as_ref().expect("rdma engine built with a registry");
+            let registry = self
+                .registry
+                .as_ref()
+                .expect("rdma engine built with a registry");
             for ep in registry.lock().unwrap().endpoints.iter_mut() {
                 ep.kv_slab = Some(meta);
             }

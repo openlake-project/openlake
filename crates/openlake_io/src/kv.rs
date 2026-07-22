@@ -204,11 +204,7 @@ unsafe impl Send for HostSlab {}
 unsafe impl Sync for HostSlab {}
 
 impl HostSlab {
-    pub fn new(
-        slot_bytes: u32,
-        slot_count: u32,
-        reserve_ttl: Duration,
-    ) -> std::io::Result<Self> {
+    pub fn new(slot_bytes: u32, slot_count: u32, reserve_ttl: Duration) -> std::io::Result<Self> {
         let name = format!(
             "/openlake_kv_{}_{}",
             std::process::id(),
