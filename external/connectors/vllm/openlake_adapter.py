@@ -11,7 +11,6 @@ import time
 from dataclasses import dataclass
 
 import torch
-
 import vllm.envs as envs
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
@@ -23,8 +22,8 @@ from vllm.v1.core.kv_cache_utils import (
     maybe_convert_block_hash,
     resolve_kv_cache_block_sizes,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 logger = init_logger(__name__)
@@ -813,7 +812,6 @@ class OpenLakeWorker:
     def __init__(self, vllm_config, kv_cache_config):
         _require_fixed_hash_seed()
         import openlake_client
-
         from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
