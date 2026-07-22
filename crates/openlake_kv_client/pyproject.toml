@@ -4,16 +4,13 @@ build-backend = "maturin"
 
 [project]
 name = "openlake-vllm"
-version = "0.6.0"
+version = "0.6.1"
 description = "OpenLake high performance KV cache client and server for vLLM."
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 
 [project.scripts]
 openlaked = "openlake_client.__main__:main"
-
-[project.entry-points."vllm.general_plugins"]
-openlake = "openlake_client:register"
 
 [tool.maturin]
 module-name = "openlake_client._native"

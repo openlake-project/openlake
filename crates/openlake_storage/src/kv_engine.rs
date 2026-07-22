@@ -4,6 +4,16 @@ use std::time::Duration;
 
 use openlake_io::kv::{self, HostSlab, KvRequest, KvResponse, KvSlab};
 
+fn human_bytes(n: u64) -> String {
+    const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let (mut v, mut i) = (n as f64, 0);
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 { format!("{n} B") } else { format!("{v:.1} {}", U[i]) }
+}
+
 pub struct KvEngine {
     slab: RefCell<Option<Rc<dyn KvSlab>>>,
     capacity_bytes: u64,
@@ -64,13 +74,36 @@ impl KvEngine {
             if host_backed && *slot_bytes > 0 && self.slab.borrow().is_none() {
                 let slot_count = (self.capacity_bytes / *slot_bytes as u64).max(1) as u32;
                 match HostSlab::new(*slot_bytes, slot_count, self.reserve_ttl) {
-                    Ok(s) => *self.slab.borrow_mut() = Some(Rc::new(s)),
+                    Ok(s) => {
+                        tracing::info!(
+                            "Handshake for mmap slabs, serving demand of {} per block, {} leased capacity, {} blocks.",
+                            human_bytes(*slot_bytes as u64),
+                            human_bytes(self.capacity_bytes),
+                            slot_count,
+                        );
+                        *self.slab.borrow_mut() = Some(Rc::new(s));
+                    }
                     Err(e) => return KvResponse::Err(format!("kv slab create: {e}")),
                 }
             }
         }
         match &*self.slab.borrow() {
-            Some(slab) => kv::serve_tcp(&**slab, req),
+            Some(slab) => {
+                let committed = if let KvRequest::Commit { entries } = &req { entries.len() } else { 0 };
+                let resp = kv::serve_tcp(&**slab, req);
+                match &resp {
+                    KvResponse::Looked { slots } => tracing::info!(
+                        "kv load lookup: {} blocks queried, {} hits served",
+                        slots.len(),
+                        slots.iter().filter(|s| s.is_some()).count(),
+                    ),
+                    KvResponse::Ok if committed > 0 => {
+                        tracing::info!("kv store: {} blocks committed", committed)
+                    }
+                    _ => {}
+                }
+                resp
+            }
             None => match req {
                 KvRequest::Attach { .. } => KvResponse::Attached {
                     shm_name: String::new(),
@@ -114,6 +147,12 @@ impl KvEngine {
                 rkey: slab.rkey(),
                 slot_bytes: slab.slot_bytes(),
             };
+            tracing::info!(
+                "Handshake for RDMA slabs from client {client}, serving demand of {} per block, {} leased capacity, {} blocks.",
+                human_bytes(slot_bytes as u64),
+                human_bytes(self.capacity_bytes),
+                slot_count,
+            );
             *self.slab.borrow_mut() = Some(Rc::new(slab));
             let registry = self.registry.as_ref().expect("rdma engine built with a registry");
             for ep in registry.lock().unwrap().endpoints.iter_mut() {

@@ -2,6 +2,7 @@
 
 import dataclasses
 import hashlib
+import inspect
 import os
 import queue
 import struct
@@ -23,9 +24,19 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 logger = init_logger(__name__)
+
+# support multiple vLLM versions
+_RBM_TAKES_BOUNDARIES = (
+    "reachable_boundaries"
+    in inspect.signature(FullAttentionManager.reachable_block_mask).parameters
+)
+_FLCH_RETURNS_LENGTH = str(
+    inspect.signature(FullAttentionManager.find_longest_cache_hit).return_annotation
+).endswith(", int]")
 
 KEY_BYTES = 16
 SLOT_HEADER_BYTES = 54
@@ -199,9 +210,14 @@ class Coordinator:
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
             use_eagle = g_idx in self.eagle_group_ids
-            reachable_boundaries = (
-                () if num_prompt_tokens is None else (num_prompt_tokens - 1,)
-            )
+            if _RBM_TAKES_BOUNDARIES:
+                boundary_kwargs = {
+                    "reachable_boundaries": ()
+                    if num_prompt_tokens is None
+                    else (num_prompt_tokens - 1,)
+                }
+            else:
+                boundary_kwargs = {"num_prompt_tokens": num_prompt_tokens}
             mask = manager_cls.reachable_block_mask(
                 start_block=start_chunk,
                 end_block=end_chunk,
@@ -209,7 +225,7 @@ class Coordinator:
                 kv_cache_spec=spec,
                 use_eagle=use_eagle,
                 retention_interval=retention_interval,
-                reachable_boundaries=reachable_boundaries,
+                **boundary_kwargs,
             )
             if mask is not None:
                 assert len(mask) == end_chunk - start_chunk
@@ -249,11 +265,16 @@ class Coordinator:
 
         if len(self.attention_groups) == 1:
             spec, ids, manager = self.attention_groups[0]
-            hit_blocks, hit_length = manager.find_longest_cache_hit(
+            res = manager.find_longest_cache_hit(
                 block_hashes=self.block_hashes_for_spec(block_hashes, spec),
                 max_length=max_length, kv_cache_group_ids=ids, block_pool=pool,
                 kv_cache_spec=spec, drop_eagle_block=(0 in eagle_idx),
                 alignment_tokens=spec.block_size)
+            if _FLCH_RETURNS_LENGTH:
+                hit_blocks, hit_length = res
+            else:
+                hit_blocks = res
+                hit_length = len(hit_blocks[0]) * spec.block_size
             blocks_by_group: list = [[] for _ in range(num_groups)]
             for gid, blks in zip(ids, hit_blocks, strict=True):
                 blocks_by_group[gid] = blks
@@ -275,11 +296,16 @@ class Coordinator:
                     continue
                 drop = i in eagle_idx and i not in verified
                 bound = min(curr + spec.block_size, max_length) if drop else curr
-                hit_blocks, length = manager.find_longest_cache_hit(
+                res = manager.find_longest_cache_hit(
                     block_hashes=self.block_hashes_for_spec(block_hashes, spec),
                     max_length=bound, kv_cache_group_ids=ids, block_pool=pool,
                     kv_cache_spec=spec, drop_eagle_block=drop,
                     alignment_tokens=self.lcm_block_size)
+                if _FLCH_RETURNS_LENGTH:
+                    hit_blocks, length = res
+                else:
+                    hit_blocks = res
+                    length = len(hit_blocks[0]) * spec.block_size
                 if drop:
                     verified.add(i)
                 elif length < curr:
