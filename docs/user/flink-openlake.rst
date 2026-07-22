@@ -41,38 +41,15 @@ network first.
 
    flink-openlake-net
 
-Step 2: Write the OpenLake config
+Step 2: The OpenLake config
 ------------------------------------
 
-Create ``config.toml`` at the repo root. This sets up a single-node,
-4-disk cluster with 4+1 erasure coding. The ``data_dirs`` paths need to
-exist inside the container — that's handled in the Dockerfile, so don't
-worry about creating them yourself.
+This demo runs a single-node OpenLake cluster. Its config ships at
+``crates/openlake_server/configs/storage-tcp-flink.toml`` — a 4-disk node with
+3+1 erasure coding (tolerates the loss of one disk):
 
-.. code-block:: toml
-
-   self_id = 1
-   data_dirs = ["/var/lib/openlake/data1", "/var/lib/openlake/data2", "/var/lib/openlake/data3", "/var/lib/openlake/data4"]
-   s3_addr = "0.0.0.0:9000"
-   rpc_addr = "0.0.0.0:9100"
-   set_drive_count = 4
-   default_parity_count = 1
-   region = "us-east-1"
-   transport = "h2"
-
-   [[credentials]]
-   access_key = "openlakeadmin"
-   secret_key = "openlakeadmin"
-
-   [[nodes]]
-   id = 1
-   rpc_addr = "127.0.0.1:9100"
-   disk_count = 4
-
-   [memory_pool]
-   enabled = true
-   size_bytes = 1073741824
-   bucket_capacity = 1024
+.. literalinclude:: ../../crates/openlake_server/configs/storage-tcp-flink.toml
+   :language: toml
 
 Step 3: Build the OpenLake image
 ------------------------------------
