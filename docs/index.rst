@@ -119,3 +119,18 @@ Potential future documentation sections include:
 * Configuration reference
 * API documentation
 * Troubleshooting playbooks and runbooks
+.. toctree::
+   :maxdepth: 2
+   :caption: Developer Guide
+   :hidden:
+
+   developer/environment_setup
+
+.. toctree::
+   :maxdepth: 2
+   :caption: User Guide
+   :hidden:
+
+   user/flink-openlake
+   user/cli_reference
+   user/cluster_operations
