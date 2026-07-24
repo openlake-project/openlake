@@ -1,0 +1,24 @@
+.progress-container{
+    margin-top:20px;
+    }
+    
+    .progress-bar{
+    height:12px;
+    background:#e5e7eb;
+    border-radius:10px;
+    overflow:hidden;
+    }
+    
+    .progress-fill{
+    height:100%;
+    background:#2563eb;
+    border-radius:10px;
+    transition:width .4s ease;
+    }
+    
+    .progress-container p{
+    margin-top:12px;
+    text-align:center;
+    color:#6b7280;
+    font-size:15px;
+    }

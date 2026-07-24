@@ -1,0 +1,76 @@
+.profile-menu{
+position:absolute;
+top:65px;
+right:20px;
+width:260px;
+background:white;
+border-radius:16px;
+box-shadow:0 15px 40px rgba(0,0,0,.15);
+padding:20px;
+z-index:1600;
+}
+
+.profile-top{
+display:flex;
+align-items:center;
+gap:15px;
+padding-bottom:20px;
+border-bottom:1px solid #eee;
+margin-bottom:15px;
+}
+
+.avatar-large{
+width:50px;
+height:50px;
+border-radius:50%;
+background:#2563eb;
+display:flex;
+justify-content:center;
+align-items:center;
+color:white;
+font-size:20px;
+font-weight:bold;
+}
+
+.profile-top p{
+font-size:13px;
+color:#6b7280;
+}
+
+.profile-menu button{
+width:100%;
+display:flex;
+align-items:center;
+gap:12px;
+padding:12px;
+border:none;
+background:none;
+cursor:pointer;
+border-radius:10px;
+font-size:15px;
+}
+
+.profile-menu button:hover{
+background:#eff6ff;
+}
+
+.logout{
+color:#dc2626;
+}
+
+body.dark .profile-menu{
+background:#1f2937;
+color:white;
+}
+
+body.dark .profile-top{
+border-bottom:1px solid #374151;
+}
+
+body.dark .profile-top p{
+color:#d1d5db;
+}
+
+body.dark .profile-menu button:hover{
+background:#374151;
+}

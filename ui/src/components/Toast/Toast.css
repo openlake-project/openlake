@@ -1,0 +1,24 @@
+.toast{
+    position:fixed;
+    bottom:25px;
+    right:25px;
+    background:#10b981;
+    color:white;
+    padding:16px 24px;
+    border-radius:12px;
+    box-shadow:0 10px 30px rgba(0,0,0,.2);
+    font-weight:600;
+    z-index:2000;
+    animation:toast .3s ease;
+    }
+    
+    @keyframes toast{
+    from{
+    opacity:0;
+    transform:translateY(20px);
+    }
+    to{
+    opacity:1;
+    transform:translateY(0);
+    }
+    }

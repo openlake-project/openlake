@@ -1,0 +1,154 @@
+.home-page{
+    max-width:1400px;
+    margin:auto;
+    padding:24px 32px;
+    }
+    .home-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:18px;
+    }
+    
+    .home-header h1{
+    font-size:34px;
+    font-weight:700;
+    margin-bottom:8px;
+    }
+    
+    .home-header p{
+    color:#6b7280;
+    }
+    
+    .search-box{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    margin-bottom:25px;
+    }
+    
+    .bucket-list{
+    display:flex;
+    flex-direction:column;
+    gap:16px;
+    }
+    
+    .bucket-card{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:22px;
+    border:1px solid #e5e7eb;
+    border-radius:14px;
+    background:white;
+    cursor:pointer;
+    transition:.2s;
+    }
+    
+    .bucket-card:hover{
+    border-color:#2563eb;
+    box-shadow:0 4px 12px rgba(0,0,0,.05);
+    }
+    
+    .bucket-card h3{
+    margin:0;
+    font-size:18px;
+    }
+    
+    .bucket-card p{
+    margin-top:8px;
+    color:#6b7280;
+    }
+    
+    .bucket-right{
+    display:flex;
+    gap:50px;
+    font-weight:600;
+    color:#374151;
+    }
+    .bucket-table{
+        width:100%;
+        border-collapse:collapse;
+        background:white;
+        border-radius:14px;
+        overflow:hidden;
+        border:1px solid #e5e7eb;
+        }
+        
+        .bucket-table th{
+        text-align:left;
+        padding:20px,18px;
+        font-size:14px;
+        color:#6b7280;
+        border-bottom:1px solid #e5e7eb;
+        }
+        
+        .bucket-table td{
+        padding:20px,18px;
+        border-bottom:1px solid #f3f4f6;
+        }
+        
+        .bucket-table tbody tr{
+        cursor:pointer;
+        transition:.2s;
+        }
+        
+        .bucket-table tbody tr:hover{
+            background:#f8fafc;
+            }
+
+            .empty-state{
+                display:flex;
+                flex-direction:column;
+                justify-content:center;
+                align-items:center;
+                padding:80px 20px;
+                background:white;
+                border:1px solid #e5e7eb;
+                border-radius:14px;
+                text-align:center;
+                }
+                
+                .empty-state h3{
+                margin-bottom:10px;
+                font-size:22px;
+                font-weight:600;
+                }
+                
+                .empty-state p{
+                color:#6b7280;
+                font-size:15px;
+                }
+                .bucket-table tbody tr{
+                    cursor:pointer;
+                    transition:.2s;
+                    }
+                    
+                    .bucket-table tbody tr:hover{
+                        background:#f8fafc;
+                    }
+                    .empty-state{
+                        display:flex;
+                        flex-direction:column;
+                        align-items:center;
+                        justify-content:center;
+                        padding:80px 20px;
+                        border:1px solid #e5e7eb;
+                        border-radius:14px;
+                        background:white;
+                        }
+                        
+                        .empty-icon{
+                        font-size:42px;
+                        margin-bottom:18px;
+                        }
+                        
+                        .empty-state h3{
+                        font-size:22px;
+                        margin-bottom:10px;
+                        }
+                        
+                        .empty-state p{
+                        color:#6b7280;
+                        margin-bottom:20px;
+                        }
