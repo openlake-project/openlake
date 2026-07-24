@@ -34,6 +34,8 @@ Resources for contributors and developers working on OpenLake.
      - Description
    * - Environment Setup
      - Build prerequisites, Docker configuration, dependency installation, and local development workflow.
+    * - KV Offload for Inference Engines
+     - Using OpenLake as a KV cache backend for inference engines, including local shared-memory and cross-node RDMA deployments.
    * - Testing
      - Unit tests, integration tests, validation suites, and benchmarks.
    * - Contributing
