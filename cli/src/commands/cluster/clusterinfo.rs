@@ -130,3 +130,28 @@ pub async fn run(args: ClusterInfoArgs) -> Result<()> {
 
     Ok(())
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlake_server::config::Credential;
+
+    #[test]
+    fn test_sign_cluster_info_returns_auth_headers() {
+        let cred = Credential {
+            access_key: "admin".to_string(),
+            secret_key: "admin".to_string(),
+        };
+
+        let headers = sign_cluster_info(
+            "http://127.0.0.1:9000/openlake/admin/v1/cluster/info",
+            "127.0.0.1:9000",
+            &cred,
+            "us-east-1",
+        )
+        .unwrap();
+
+        assert!(headers.contains_key("authorization"));
+        assert!(headers.contains_key("x-amz-date"));
+        assert!(headers.contains_key("x-amz-content-sha256"));
+    }
+}
