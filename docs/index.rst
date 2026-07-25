@@ -1,123 +1,46 @@
-================================
-OpenLake Documentation Structure
-================================
+=======================
+OpenLake Documentation
+=======================
 
-.. contents:: On this page
-   :depth: 2
+Welcome to the OpenLake documentation.
 
-Overview
-========
+OpenLake is a distributed object storage system designed for modern data
+processing and AI workloads. This documentation provides guides for setting up
+development environments, integrating OpenLake with data processing frameworks,
+and operating OpenLake clusters.
 
-This document proposes the initial documentation hierarchy for OpenLake.
-
-The goal is to provide a structured learning path for both developers and users,
-covering development workflows, deployment, operations, and system architecture.
-
-.. note::
-
-   This document describes the proposed documentation organization.
-   Individual pages will be implemented incrementally.
-
-Documentation Layout
-====================
+The documentation is organized into guides for developers, users, and
+operators working with OpenLake.
 
 Developer Guide
----------------
+===============
 
-Resources for contributors and developers working on OpenLake.
+.. toctree::
+   :maxdepth: 1
 
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
+   Developer Environment Setup <developer/environment_setup>
 
-   * - Section
-     - Description
-   * - Environment Setup
-     - Build prerequisites, Docker configuration, dependency installation, and local development workflow.
-   * - Testing
-     - Unit tests, integration tests, validation suites, and benchmarks.
-   * - Contributing
-     - Contribution workflow, coding guidelines, pull request process, and code review expectations.
+Integration Guides
+==================
 
-User Guide
-----------
+.. toctree::
+   :maxdepth: 1
 
-Documentation for deploying and operating OpenLake clusters.
-
-Cluster Setup
-~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
-
-   * - Section
-     - Description
-   * - Local / Development Deployment
-     - Single-node setup for evaluation, development, and testing.
-   * - Multi-Node Deployment
-     - Production deployment across multiple nodes with high availability.
-
-Examples
-~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
-
-   * - Section
-     - Description
-   * - Example Workloads
-     - Sample workloads demonstrating OpenLake capabilities and common use cases.
-   * - Integration Examples
-     - Integrations with applications, storage workflows, and third-party tools.
-   * - Spark Integration
-     - Example workflow for reading and writing data with Apache Spark.
+   Spark Integration <examples/spark_openlake>
+   Flink Integration <user/flink-openlake>
 
 Operations
-~~~~~~~~~~
+==========
 
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
+.. toctree::
+   :maxdepth: 1
 
-   * - Section
-     - Description
-   * - Benchmarks
-     - Running benchmark suites and interpreting performance results.
-   * - CLI Reference
-     - Command reference with options, flags, and usage examples.
-   * - Cluster Operations
-     - Monitoring, troubleshooting, maintenance procedures, and health checks.
+   Cluster Operations <cluster_operations>
 
-Architecture
-------------
+Reference
+=========
 
-Technical documentation describing OpenLake internals and system design.
+.. toctree::
+   :maxdepth: 1
 
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
-
-   * - Topic
-     - Description
-   * - System Overview
-     - High-level architecture, component interactions, and data flow.
-   * - Storage Engine
-     - Object storage implementation, data layout, and I/O path.
-   * - RDMA Design
-     - RDMA communication architecture, protocol details, and performance considerations.
-   * - Cluster Architecture
-     - Node coordination, metadata management, consensus, and fault tolerance.
-
-Future Additions
-================
-
-Potential future documentation sections include:
-
-* Performance tuning and optimization guides
-* Security, authentication, and access control
-* Upgrade and migration procedures
-* Configuration reference
-* API documentation
-* Troubleshooting playbooks and runbooks
+   CLI Reference <cli_reference>
