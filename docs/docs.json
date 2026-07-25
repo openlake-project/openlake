@@ -1,0 +1,44 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "OpenLake",
+  "description": "Distributed object storage for GPU workloads",
+  "colors": {
+    "primary": "#2563EB",
+    "light": "#3B82F6",
+    "dark": "#1D4ED8"
+  },
+  "navigation": {
+    "anchors": [
+      {
+        "anchor": "GitHub",
+        "icon": "github",
+        "href": "https://github.com/openlake-project/openlake"
+      },
+      {
+        "anchor": "OpenLake Website",
+        "icon": "globe",
+        "href": "https://theopenlake.com"
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/openlake-project/openlake"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "OpenLake Website",
+      "href": "https://theopenlake.com"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/openlake-project/openlake",
+      "discord": "https://discord.gg/TNXqVSnP6x"
+    }
+  }
+}
