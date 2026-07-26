@@ -1,9 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use aws_credential_types::Credentials;
 use aws_sigv4::http_request::{
-    sign, PayloadChecksumKind, PercentEncodingMode, SessionTokenMode,
-    SignableBody, SignableRequest, SigningSettings,
-    UriPathNormalizationMode,
+    sign, PayloadChecksumKind, PercentEncodingMode, SessionTokenMode, SignableBody,
+    SignableRequest, SigningSettings, UriPathNormalizationMode,
 };
 use aws_sigv4::sign::v4;
 use aws_smithy_runtime_api::client::identity::Identity;
@@ -88,10 +87,7 @@ pub async fn run(args: ClusterInfoArgs) -> Result<()> {
 
     let s3_port = cfg.s3_port.unwrap_or_else(|| cfg.s3_addr.port());
 
-    let endpoint = std::net::SocketAddr::new(
-        cfg.nodes[0].rpc_addr.ip(),
-        s3_port,
-    );
+    let endpoint = std::net::SocketAddr::new(cfg.nodes[0].rpc_addr.ip(), s3_port);
 
     let scheme = if cfg.s3_tls.is_some() {
         "https"
@@ -107,19 +103,10 @@ pub async fn run(args: ClusterInfoArgs) -> Result<()> {
         .first()
         .context("no credentials configured")?;
 
-    let signed = sign_cluster_info(
-        &url,
-        &host,
-        cred,
-        &cfg.region,
-    )?;
+    let signed = sign_cluster_info(&url, &host, cred, &cfg.region)?;
 
     let client = cyper::Client::new();
-    let response = client
-        .get(&url)?
-        .headers(signed)
-        .send()
-        .await?;
+    let response = client.get(&url)?.headers(signed).send().await?;
 
     if !response.status().is_success() {
         anyhow::bail!("Request failed with status: {}", response.status());
