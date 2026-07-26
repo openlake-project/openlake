@@ -147,19 +147,50 @@ pub struct Config {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct KvSlabToml {
-    pub capacity_gb: u64,
+    #[serde(default)]
+    pub capacity_gb: Option<u64>,
+    #[serde(default)]
+    pub cpu_ram_frac: Option<f64>,
     #[serde(default = "default_kv_reserve_ttl_secs")]
     pub reserve_ttl_secs: u64,
 }
 
 impl KvSlabToml {
-    pub fn capacity_bytes(&self) -> u64 {
-        self.capacity_gb * 1024 * 1024 * 1024
+    pub fn capacity_bytes(&self) -> anyhow::Result<u64> {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        // cpu_ram_frac (fraction of system RAM, floored to whole GiB) wins over capacity_gb.
+        if let Some(frac) = self.cpu_ram_frac {
+            anyhow::ensure!(
+                frac > 0.0 && frac <= 1.0,
+                "[kv_slab] cpu_ram_frac must be in (0.0, 1.0], got {frac}"
+            );
+            let gb = (total_system_ram_bytes()? as f64 * frac) as u64 / GIB;
+            anyhow::ensure!(gb > 0, "[kv_slab] cpu_ram_frac {frac} yields under 1 GiB");
+            return Ok(gb * GIB);
+        }
+        let gb = self
+            .capacity_gb
+            .ok_or_else(|| anyhow::anyhow!("[kv_slab] set cpu_ram_frac or capacity_gb"))?;
+        Ok(gb * GIB)
     }
 }
 
 fn default_kv_reserve_ttl_secs() -> u64 {
     60
+}
+
+fn total_system_ram_bytes() -> anyhow::Result<u64> {
+    for line in std::fs::read_to_string("/proc/meminfo")?.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb: u64 = rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("malformed MemTotal in /proc/meminfo"))?;
+            return Ok(kb * 1024);
+        }
+    }
+    anyhow::bail!("MemTotal not found in /proc/meminfo")
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -311,7 +342,7 @@ impl Config {
 
         if cfg.mode == Mode::Kv {
             if cfg.kv_slab.is_none() {
-                anyhow::bail!("mode = \"kv\" requires a [kv_slab] block with capacity_gb");
+                anyhow::bail!("mode = \"kv\" requires a [kv_slab] block");
             }
             if cfg.nodes.len() != 1 {
                 anyhow::bail!("mode = \"kv\" nodes are standalone; list only this node");
@@ -454,4 +485,40 @@ fn validate_tls_files(t: &TlsConfig, label: &str) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod kv_slab_tests {
+    use super::*;
+
+    fn slab(capacity_gb: Option<u64>, cpu_ram_frac: Option<f64>) -> KvSlabToml {
+        KvSlabToml {
+            capacity_gb,
+            cpu_ram_frac,
+            reserve_ttl_secs: 60,
+        }
+    }
+
+    #[test]
+    fn frac_out_of_range_errors() {
+        assert!(slab(None, Some(0.0)).capacity_bytes().is_err());
+        assert!(slab(None, Some(1.5)).capacity_bytes().is_err());
+    }
+
+    #[test]
+    fn neither_set_errors() {
+        assert!(slab(None, None).capacity_bytes().is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn frac_wins_and_floors_to_whole_gib() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let bytes = slab(Some(1), Some(0.5)).capacity_bytes().unwrap();
+        assert_eq!(bytes % GIB, 0);
+        assert_eq!(
+            bytes,
+            (total_system_ram_bytes().unwrap() as f64 * 0.5) as u64 / GIB * GIB
+        );
+    }
 }

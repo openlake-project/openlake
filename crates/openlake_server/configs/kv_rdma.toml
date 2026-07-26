@@ -18,7 +18,8 @@ rpc_addr   = "0.0.0.0:9400"
 disk_count = 0
 
 [kv_slab]
-capacity_gb      = 10
+# fraction of system RAM for the KV slab (floored to whole GiB); wins over capacity_gb
+cpu_ram_frac     = 0.5
 reserve_ttl_secs = 60
 
 [rdma]

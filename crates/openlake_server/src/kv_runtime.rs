@@ -19,7 +19,7 @@ pub async fn run_tcp(
 ) -> anyhow::Result<()> {
     let slab_cfg = cfg.kv_slab.expect("validated: kv mode has [kv_slab]");
     let engine = Rc::new(KvEngine::new_tcp(
-        slab_cfg.capacity_bytes(),
+        slab_cfg.capacity_bytes()?,
         Duration::from_secs(slab_cfg.reserve_ttl_secs),
     ));
 
@@ -77,7 +77,7 @@ pub async fn run(
     tracing::info!(max_clients, "kv admission cap");
     let kv = Rc::new(KvEngine::new_rdma(
         setup.dev.clone(),
-        slab_cfg.capacity_bytes(),
+        slab_cfg.capacity_bytes()?,
         Duration::from_secs(slab_cfg.reserve_ttl_secs),
         max_clients,
         endpoint_registry.clone(),
