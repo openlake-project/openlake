@@ -1,0 +1,124 @@
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.bucket-details-modal {
+  width: 440px;
+  background: white;
+  border-radius: 16px;
+  padding: 28px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.modal-header h2 {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #64748b;
+}
+
+.bd-loading {
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+.bd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.bd-list dt {
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 4px;
+}
+
+.bd-list dd {
+  font-size: 14px;
+  color: #0f172a;
+}
+
+.bd-versioning-row dd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bd-toggle {
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  border: none;
+  cursor: pointer;
+  position: relative;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.bd-toggle-on {
+  background: #2563eb;
+}
+
+.bd-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 0.2s;
+}
+
+.bd-toggle-on .bd-toggle-knob {
+  transform: translateX(18px);
+}
+
+.bd-toggle-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 24px;
+}
+
+.cancel-btn {
+  background: #f1f5f9;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.field-error {
+  color: #dc2626;
+  font-size: 13px;
+}

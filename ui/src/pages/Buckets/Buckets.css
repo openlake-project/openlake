@@ -1,0 +1,211 @@
+.buckets-page{
+
+    display:flex;
+    
+    flex-direction:column;
+    
+    gap:30px;
+    
+    }
+    
+    .bucket-header{
+    
+    display:flex;
+    
+    justify-content:space-between;
+    
+    align-items:center;
+    
+    }
+    
+    .bucket-header p{
+    
+    color:#6b7280;
+    
+    margin-top:6px;
+    
+    }
+    
+    .create-btn{
+    
+    display:flex;
+    
+    align-items:center;
+    
+    gap:10px;
+    
+    background:#2563eb;
+    
+    color:white;
+    
+    border:none;
+    
+    padding:12px 20px;
+    
+    border-radius:10px;
+    
+    cursor:pointer;
+    
+    font-size:15px;
+    
+    transition:.2s;
+    
+    }
+    
+    .create-btn:hover{
+    
+    background:#1d4ed8;
+    
+    }
+    
+    .toolbar{
+    
+    display:flex;
+    
+    justify-content:flex-end;
+    
+    }
+    
+    .search{
+    
+    display:flex;
+    
+    align-items:center;
+    
+    gap:10px;
+    
+    background:white;
+    
+    padding:12px 18px;
+    
+    border-radius:10px;
+    
+    border:1px solid #ddd;
+    
+    width:300px;
+    
+    }
+    
+    .search input{
+    
+    border:none;
+    
+    outline:none;
+    
+    width:100%;
+    
+    font-size:15px;
+    
+    }
+    
+    .bucket-table{
+    
+    background:white;
+    
+    border-radius:15px;
+    
+    padding:25px;
+    
+    box-shadow:0 2px 10px rgba(0,0,0,.05);
+    
+    }
+    
+    table{
+    
+    width:100%;
+    
+    border-collapse:collapse;
+    
+    }
+    
+    th{
+    
+    text-align:left;
+    
+    padding:18px;
+    
+    border-bottom:2px solid #eee;
+    
+    }
+    
+    td{
+    
+    padding:18px;
+    
+    border-bottom:1px solid #eee;
+    
+    }
+    
+    tr:hover{
+    
+    background:#f8fafc;
+    
+    }
+    
+    .bucket-name{
+    
+    display:flex;
+    
+    align-items:center;
+    
+    gap:12px;
+    
+    font-weight:600;
+    
+    }
+    
+    .badge{
+    
+    background:#dcfce7;
+    
+    color:#15803d;
+    
+    padding:6px 12px;
+    
+    border-radius:20px;
+    
+    font-size:13px;
+    
+    font-weight:600;
+    
+    }
+    
+    .icon-btn{
+    
+    border:none;
+    
+    background:#eff6ff;
+    
+    color:#2563eb;
+    
+    padding:10px;
+    
+    border-radius:8px;
+    
+    cursor:pointer;
+    
+    margin-right:8px;
+    
+    transition:.2s;
+    
+    }
+    
+    .icon-btn:hover{
+    
+    background:#dbeafe;
+    
+    }
+    
+    .delete{
+    
+    background:#fee2e2;
+    
+    color:#dc2626;
+    
+    }
+    
+    .delete:hover{
+    
+    background:#fecaca;
+    
+    }
