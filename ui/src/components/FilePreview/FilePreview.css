@@ -1,0 +1,95 @@
+.preview-overlay{
+position:fixed;
+inset:0;
+background:rgba(0,0,0,.35);
+display:flex;
+justify-content:flex-end;
+z-index:1200;
+}
+
+.preview-panel{
+width:380px;
+background:white;
+height:100vh;
+padding:30px;
+box-shadow:-5px 0 20px rgba(0,0,0,.15);
+animation:slide .25s ease;
+overflow:auto;
+}
+
+@keyframes slide{
+from{
+transform:translateX(100%);
+}
+to{
+transform:translateX(0);
+}
+}
+
+.preview-header{
+display:flex;
+justify-content:space-between;
+align-items:center;
+margin-bottom:25px;
+}
+
+.close-preview{
+border:none;
+background:none;
+font-size:22px;
+cursor:pointer;
+}
+
+.preview-icon{
+display:flex;
+justify-content:center;
+margin:20px 0;
+color:#2563eb;
+}
+
+.preview-panel h3{
+text-align:center;
+margin-bottom:30px;
+}
+
+.details{
+display:flex;
+flex-direction:column;
+gap:18px;
+}
+
+.details div{
+display:flex;
+justify-content:space-between;
+padding-bottom:10px;
+border-bottom:1px solid #eee;
+}
+
+.details span{
+color:#6b7280;
+}
+
+.preview-actions{
+display:flex;
+gap:12px;
+margin-top:35px;
+}
+
+.preview-actions button{
+flex:1;
+padding:12px;
+border:none;
+border-radius:10px;
+cursor:pointer;
+font-size:15px;
+}
+
+.download{
+background:#2563eb;
+color:white;
+}
+
+.delete{
+background:#fee2e2;
+color:#dc2626;
+}

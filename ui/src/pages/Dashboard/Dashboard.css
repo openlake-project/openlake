@@ -1,0 +1,246 @@
+.home-page{
+    max-width:1400px;
+    margin:auto;
+    padding:24px 32px;
+    }
+    .home-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:18px;
+    }
+    
+    .home-header h1{
+    font-size:34px;
+    font-weight:700;
+    margin-bottom:8px;
+    }
+    
+    .home-header p{
+    color:#6b7280;
+    }
+    
+    .search-box{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    margin-bottom:25px;
+    }
+    
+    .bucket-list{
+    display:flex;
+    flex-direction:column;
+    gap:16px;
+    }
+    
+    .bucket-card{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    padding:22px;
+    border:1px solid #e5e7eb;
+    border-radius:14px;
+    background:white;
+    cursor:pointer;
+    transition:.2s;
+    }
+    
+    .bucket-card:hover{
+    border-color:#2563eb;
+    box-shadow:0 4px 12px rgba(0,0,0,.05);
+    }
+    
+    .bucket-card h3{
+    margin:0;
+    font-size:18px;
+    }
+    
+    .bucket-card p{
+    margin-top:8px;
+    color:#6b7280;
+    }
+    
+    .bucket-right{
+    display:flex;
+    gap:50px;
+    font-weight:600;
+    color:#374151;
+    }
+    .bucket-table{
+        width:100%;
+        border-collapse:collapse;
+        background:white;
+        border-radius:14px;
+        overflow:hidden;
+        border:1px solid #e5e7eb;
+        }
+        
+        .bucket-table th{
+        text-align:left;
+        padding:20px,18px;
+        font-size:14px;
+        color:#6b7280;
+        border-bottom:1px solid #e5e7eb;
+        }
+        
+        .bucket-table td{
+        padding:20px,18px;
+        border-bottom:1px solid #f3f4f6;
+        }
+        
+        .bucket-table tbody tr{
+        cursor:pointer;
+        transition:.2s;
+        }
+        
+        .bucket-table tbody tr:hover{
+            background:#f8fafc;
+            }
+
+            .empty-state{
+                display:flex;
+                flex-direction:column;
+                justify-content:center;
+                align-items:center;
+                padding:80px 20px;
+                background:white;
+                border:1px solid #e5e7eb;
+                border-radius:14px;
+                text-align:center;
+                }
+                
+                .empty-state h3{
+                margin-bottom:10px;
+                font-size:22px;
+                font-weight:600;
+                }
+                
+                .empty-state p{
+                color:#6b7280;
+                font-size:15px;
+                }
+                .bucket-table tbody tr{
+                    cursor:pointer;
+                    transition:.2s;
+                    }
+                    
+                    .bucket-table tbody tr:hover{
+                        background:#f8fafc;
+                    }
+                    .empty-state{
+                        display:flex;
+                        flex-direction:column;
+                        align-items:center;
+                        justify-content:center;
+                        padding:80px 20px;
+                        border:1px solid #e5e7eb;
+                        border-radius:14px;
+                        background:white;
+                        }
+                        
+                        .empty-icon{
+                        font-size:42px;
+                        margin-bottom:18px;
+                        }
+                        
+                        .empty-state h3{
+                        font-size:22px;
+                        margin-bottom:10px;
+                        }
+                        
+                        .empty-state p{
+                        color:#6b7280;
+                        margin-bottom:20px;
+                        }
+.home-header-actions{
+    display:flex;
+    gap:10px;
+}
+
+.health-badge{
+    margin-left:10px;
+    font-size:12px;
+    font-weight:600;
+    padding:2px 8px;
+    border-radius:999px;
+}
+
+.health-checking{
+    background:#f1f5f9;
+    color:#64748b;
+}
+
+.health-online{
+    background:#dcfce7;
+    color:#15803d;
+}
+
+.health-offline{
+    background:#fee2e2;
+    color:#dc2626;
+}
+
+.dashboard-note{
+    font-size:13px;
+    color:#94a3b8;
+    margin-bottom:16px;
+}
+
+.dashboard-error{
+    color:#dc2626;
+    font-size:14px;
+    margin-bottom:12px;
+}
+
+.spin{
+    animation:spin .8s linear infinite;
+}
+
+@keyframes spin{
+    from{ transform:rotate(0deg); }
+    to{ transform:rotate(360deg); }
+}
+
+.bucket-row-actions{
+    display:flex;
+    gap:8px;
+    align-items:center;
+}
+
+.connection-diagnostics{
+    display:flex;
+    gap:10px;
+    align-items:flex-start;
+    background:#fef2f2;
+    border:1px solid #fecaca;
+    color:#991b1b;
+    border-radius:10px;
+    padding:14px 16px;
+    margin-bottom:16px;
+    font-size:13px;
+}
+
+.connection-diagnostics code{
+    background:rgba(0,0,0,.06);
+    padding:1px 5px;
+    border-radius:4px;
+    font-size:12px;
+}
+
+.connection-diagnostics p{
+    margin-top:4px;
+}
+
+.base-url-readout{
+    font-size:12.5px;
+    color:#64748b;
+    margin-bottom:14px;
+}
+
+.base-url-readout code{
+    background:#f1f5f9;
+    padding:2px 8px;
+    border-radius:6px;
+    font-size:12px;
+    color:#0f172a;
+}

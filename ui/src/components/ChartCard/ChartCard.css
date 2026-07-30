@@ -1,0 +1,11 @@
+.chart-card{
+    background:white;
+    padding:25px;
+    border-radius:16px;
+    box-shadow:0 2px 12px rgba(0,0,0,.06);
+    }
+    
+    .chart-card h2{
+    margin-bottom:20px;
+    font-size:20px;
+    }
