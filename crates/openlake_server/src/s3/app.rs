@@ -88,7 +88,9 @@ async fn serve_admin_config(cfg: Arc<Config>) -> axum::Json<Config> {
     if let Some(r) = c.rdma.as_mut() {
         r.self_node_id = 0;
     }
-
+    for cr in &mut c.credentials {
+        cr.secret_key = "***".into();
+    }
     axum::Json(c)
 }
 
