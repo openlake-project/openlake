@@ -1,0 +1,92 @@
+.modal-overlay{
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,.45);
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    z-index:1000;
+    }
+    
+    .modal{
+    width:500px;
+    background:white;
+    border-radius:16px;
+    padding:30px;
+    box-shadow:0 20px 60px rgba(0,0,0,.2);
+    animation:popup .2s ease;
+    }
+    
+    @keyframes popup{
+    from{
+    transform:scale(.9);
+    opacity:0;
+    }
+    to{
+    transform:scale(1);
+    opacity:1;
+    }
+    }
+    
+    .modal-header{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    margin-bottom:25px;
+    }
+    
+    .close-btn{
+    border:none;
+    background:none;
+    font-size:24px;
+    cursor:pointer;
+    }
+    
+    .form-group{
+    display:flex;
+    flex-direction:column;
+    gap:8px;
+    margin-bottom:20px;
+    }
+    
+    .form-group input,
+    .form-group select{
+    padding:12px;
+    border:1px solid #ddd;
+    border-radius:10px;
+    font-size:15px;
+    }
+    
+    .checkbox{
+    display:flex;
+    align-items:center;
+    gap:10px;
+    margin-bottom:30px;
+    }
+    
+    .modal-footer{
+    display:flex;
+    justify-content:flex-end;
+    gap:15px;
+    }
+    
+    .cancel-btn{
+    padding:12px 22px;
+    background:#f3f4f6;
+    border:none;
+    border-radius:10px;
+    cursor:pointer;
+    }
+    
+    .create-btn{
+    padding:12px 22px;
+    background:#2563eb;
+    color:white;
+    border:none;
+    border-radius:10px;
+    cursor:pointer;
+    }
+    
+    .create-btn:hover{
+    background:#1d4ed8;
+    }
