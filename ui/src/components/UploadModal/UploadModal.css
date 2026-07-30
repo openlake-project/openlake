@@ -89,3 +89,8 @@
     .upload-btn-modal:hover{
     background:#1d4ed8;
     }
+.upload-error{
+    color:#dc2626;
+    font-size:13px;
+    margin-top:8px;
+}

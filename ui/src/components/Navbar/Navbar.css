@@ -46,3 +46,20 @@
     .icon-btn:hover{
     background:#f8fafc;
     }
+.connection-dot{
+    width:9px;
+    height:9px;
+    border-radius:50%;
+    display:inline-block;
+    margin-right:2px;
+}
+
+.dot-online{
+    background:#10b981;
+    box-shadow:0 0 0 3px rgba(16,185,129,.15);
+}
+
+.dot-offline{
+    background:#ef4444;
+    box-shadow:0 0 0 3px rgba(239,68,68,.15);
+}

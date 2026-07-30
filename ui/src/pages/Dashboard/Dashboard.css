@@ -152,3 +152,95 @@
                         color:#6b7280;
                         margin-bottom:20px;
                         }
+.home-header-actions{
+    display:flex;
+    gap:10px;
+}
+
+.health-badge{
+    margin-left:10px;
+    font-size:12px;
+    font-weight:600;
+    padding:2px 8px;
+    border-radius:999px;
+}
+
+.health-checking{
+    background:#f1f5f9;
+    color:#64748b;
+}
+
+.health-online{
+    background:#dcfce7;
+    color:#15803d;
+}
+
+.health-offline{
+    background:#fee2e2;
+    color:#dc2626;
+}
+
+.dashboard-note{
+    font-size:13px;
+    color:#94a3b8;
+    margin-bottom:16px;
+}
+
+.dashboard-error{
+    color:#dc2626;
+    font-size:14px;
+    margin-bottom:12px;
+}
+
+.spin{
+    animation:spin .8s linear infinite;
+}
+
+@keyframes spin{
+    from{ transform:rotate(0deg); }
+    to{ transform:rotate(360deg); }
+}
+
+.bucket-row-actions{
+    display:flex;
+    gap:8px;
+    align-items:center;
+}
+
+.connection-diagnostics{
+    display:flex;
+    gap:10px;
+    align-items:flex-start;
+    background:#fef2f2;
+    border:1px solid #fecaca;
+    color:#991b1b;
+    border-radius:10px;
+    padding:14px 16px;
+    margin-bottom:16px;
+    font-size:13px;
+}
+
+.connection-diagnostics code{
+    background:rgba(0,0,0,.06);
+    padding:1px 5px;
+    border-radius:4px;
+    font-size:12px;
+}
+
+.connection-diagnostics p{
+    margin-top:4px;
+}
+
+.base-url-readout{
+    font-size:12.5px;
+    color:#64748b;
+    margin-bottom:14px;
+}
+
+.base-url-readout code{
+    background:#f1f5f9;
+    padding:2px 8px;
+    border-radius:6px;
+    font-size:12px;
+    color:#0f172a;
+}
