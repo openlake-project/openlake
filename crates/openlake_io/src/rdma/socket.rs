@@ -262,6 +262,11 @@ impl IbSocket {
                 len as usize,
             );
         }
+        if self.recv_bufs.take_deficit() {
+            let _ = self.post_recv(idx);
+        } else {
+            self.recv_bufs.swap_in(idx);
+        }
         Some(())
     }
 
@@ -806,11 +811,17 @@ fn handle_wc(sock: &IbSocket, wc: &ibv_wc, recv_tx: &mpsc::UnboundedSender<()>) 
                     }
                     ImmType::Close | ImmType::Other => {}
                 }
+                let _ = sock.post_recv(buf_idx);
             } else {
                 sock.recv_bufs.push(buf_idx, wc.byte_len);
                 let _ = recv_tx.unbounded_send(());
+                match sock.recv_bufs.swap_out() {
+                    Some(free_idx) => {
+                        let _ = sock.post_recv(free_idx);
+                    }
+                    None => sock.recv_bufs.note_deficit(),
+                }
             }
-            let _ = sock.post_recv(buf_idx);
         }
         _ => {}
     }

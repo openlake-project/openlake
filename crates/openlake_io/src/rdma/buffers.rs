@@ -178,13 +178,17 @@ impl SendBuffers {
 pub struct RecvBuffers {
     base: Buffers,
     queue: RefCell<VecDeque<(u32, u32)>>,
+    free: RefCell<Vec<u32>>,
+    deficit: Cell<usize>,
 }
 
 impl RecvBuffers {
     pub fn new(dev: Rc<IbDevice>, buf_cnt: usize, buf_size: usize) -> io::Result<Self> {
         Ok(RecvBuffers {
-            base: Buffers::new(dev, buf_cnt, buf_size)?,
+            base: Buffers::new(dev, buf_cnt * 2, buf_size)?,
             queue: RefCell::new(VecDeque::with_capacity(buf_cnt)),
+            free: RefCell::new((buf_cnt as u32..buf_cnt as u32 * 2).collect()),
+            deficit: Cell::new(0),
         })
     }
     pub fn push(&self, idx: u32, len: u32) {
@@ -192,6 +196,24 @@ impl RecvBuffers {
     }
     pub fn pop(&self) -> Option<(u32, u32)> {
         self.queue.borrow_mut().pop_front()
+    }
+    pub fn swap_out(&self) -> Option<u32> {
+        self.free.borrow_mut().pop()
+    }
+    pub fn swap_in(&self, idx: u32) {
+        self.free.borrow_mut().push(idx);
+    }
+    pub fn note_deficit(&self) {
+        self.deficit.set(self.deficit.get() + 1);
+    }
+    pub fn take_deficit(&self) -> bool {
+        let d = self.deficit.get();
+        if d > 0 {
+            self.deficit.set(d - 1);
+            true
+        } else {
+            false
+        }
     }
     pub fn base(&self) -> &Buffers {
         &self.base
