@@ -19,9 +19,9 @@ use async_trait::async_trait;
 use futures_util::future::join_all;
 use openlake_io::stream::ByteSink;
 use openlake_io::{
-    BucketMeta, ByteStream, DeleteOptions, ErasureInfo, FileInfo, IoError, ObjectPartInfo,
-    PooledBuffer, RenameDataResp, StorageBackend, UpdateMetadataOpts, VersioningStatus,
-    MULTIPART_VOL, STAGING_VOL, SYSTEM_BUCKET,
+    BucketMeta, ByteStream, DeleteOptions, DiskInfo, ErasureInfo, FileInfo, IoError,
+    ObjectPartInfo, PooledBuffer, RenameDataResp, StorageBackend, UpdateMetadataOpts,
+    VersioningStatus, MULTIPART_VOL, STAGING_VOL, SYSTEM_BUCKET,
 };
 use uuid::Uuid;
 
@@ -328,7 +328,18 @@ impl Engine {
             Err(StorageError::BucketNotFound(bucket.to_owned()))
         }
     }
+    pub async fn disk_info(&self) -> StorageResult<Vec<DiskInfo>> {
+    let backends = self.all_backends()?;
 
+    let mut disk_infos = Vec::new();
+
+    for backend in backends {
+        let info = backend.disk_info().await?;
+        disk_infos.push(info);
+    }
+
+    Ok(disk_infos)
+}
     pub async fn delete_bucket(&self, bucket: &str, force: bool) -> StorageResult<()> {
         validate_bucket_name(bucket)?;
         let _lock = self

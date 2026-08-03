@@ -9,13 +9,13 @@ use std::convert::Infallible;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use axum::extract::connect_info::Connected;
+use axum::debug_handler;
 use axum::routing::{get, put};
 use axum::Router;
 use compio::net::TcpListener;
 use compio::tls::TlsAcceptor;
 use std::net::SocketAddr;
-
+use axum::extract::{connect_info::Connected, State};
 use crate::config::Config;
 use crate::s3::error::{not_found, AppError};
 use crate::s3::handlers::{buckets, objects};
@@ -23,10 +23,15 @@ use crate::s3::listener::TlsTcpListener;
 use crate::s3::middleware::sigv4::sigv4;
 use crate::s3::state::AppState;
 
-pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
+pub fn build_router(
+    state: AppState,
+    cfg: Arc<Config>,
+    disk_info: Vec<openlake_io::DiskInfo>,
+) -> Router {
     let admin_cfg = cfg.clone();
     let ping_cfg = cfg.clone();
-    let disk_cfg = cfg.clone();
+    let disk_state = state.clone();
+    
     let bucket_routes = put(buckets::put_bucket)
         .delete(buckets::delete_bucket)
         .head(buckets::head_bucket)
@@ -51,9 +56,11 @@ pub fn build_router(state: AppState, cfg: Arc<Config>) -> Router {
         )
         .route(
             "/openlake/admin/v1/disk",
-            get(move || {
-                let cfg = disk_cfg.clone();
-                async move { serve_admin_disk(cfg).await }
+            get({
+                let disk_info = disk_info.clone();
+                move || async move {
+                    axum::Json(disk_info)
+                }
             }),
         )
         .route("/{bucket}", bucket_routes.clone())
@@ -90,6 +97,8 @@ async fn serve_admin_config(cfg: Arc<Config>) -> axum::Json<Config> {
 /// Liveness response for `GET /openlake/admin/v1/ping`. Served on the S3
 /// listener (behind SigV4) so cluster tooling can check a node without
 /// touching the inter-node RPC plane.
+
+
 #[derive(serde::Serialize)]
 struct Ping {
     status: &'static str,
@@ -102,17 +111,13 @@ async fn serve_admin_ping(cfg: Arc<Config>) -> axum::Json<Ping> {
         node_id: cfg.self_id,
     })
 }
-#[derive(serde::Serialize)]
-struct DiskInfo {
-    status: &'static str,
-    node_id: u16,
-}
 
-async fn serve_admin_disk(cfg: Arc<Config>) -> axum::Json<DiskInfo> {
-    axum::Json(DiskInfo {
-        status: "ok",
-        node_id: cfg.self_id,
-    })
+#[debug_handler]
+async fn serve_admin_disk(
+    State(state): State<AppState>,
+) -> Result<axum::Json<Vec<openlake_io::DiskInfo>>, AppError>  {
+    let disks = state.engine().disk_info().await?;
+    Ok(axum::Json(disks))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,7 +141,8 @@ pub async fn serve(
     tls: Option<Rc<TlsAcceptor>>,
     cfg: Arc<Config>,
 ) -> Result<(), Infallible> {
-    let app = build_router(state, cfg);
+    let disk_info = state.engine().disk_info().await?;
+    let app = build_router(state, cfg, disk_info);
 
     match tls {
         None => {
