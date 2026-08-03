@@ -9,6 +9,7 @@ use openlake_storage::KvEngine;
 
 use crate::config;
 use crate::lock_server::LockServer;
+use crate::node_agent;
 use crate::rpc_server;
 use crate::tls_material::TlsMaterial;
 
@@ -22,6 +23,7 @@ pub async fn run_tcp(
         slab_cfg.capacity_bytes()?,
         Duration::from_secs(slab_cfg.reserve_ttl_secs),
     ));
+    node_agent::spawn(cfg.clone(), tls.clone(), Some(engine.metrics()))?;
 
     let listener = rpc_server::bind_reuseport(cfg.rpc_addr)
         .with_context(|| format!("kv-tcp: bind rpc on {}", cfg.rpc_addr))?;
@@ -82,6 +84,7 @@ pub async fn run(
         max_clients,
         endpoint_registry.clone(),
     ));
+    node_agent::spawn(cfg.clone(), tls.clone(), Some(kv.metrics()))?;
 
     let routing = Arc::new(openlake_io::rdma::ClusterRoutingTable::new(cfg.self_id));
     let rpc_listener = rpc_server::bind_reuseport(cfg.rpc_addr)

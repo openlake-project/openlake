@@ -117,8 +117,7 @@ impl SlotPool {
             .collect()
     }
 
-    #[cfg(test)]
-    pub fn occupancy(&self) -> usize {
+    pub(crate) fn occupancy(&self) -> usize {
         self.by_hash.len()
     }
 
@@ -189,6 +188,7 @@ pub trait KvSlab {
     fn reset(&self);
     fn slot_bytes(&self) -> u32;
     fn slot_count(&self) -> u32;
+    fn used_slots(&self) -> u32;
     fn shm_name(&self) -> Option<&str>;
 }
 
@@ -245,6 +245,9 @@ impl KvSlab for HostSlab {
     }
     fn slot_count(&self) -> u32 {
         self.slot_count
+    }
+    fn used_slots(&self) -> u32 {
+        self.slots.borrow().occupancy() as u32
     }
     fn shm_name(&self) -> Option<&str> {
         Some(&self.name)

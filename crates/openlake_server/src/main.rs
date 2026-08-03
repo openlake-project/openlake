@@ -31,9 +31,11 @@
 
 mod auth;
 mod config;
+mod hardware_inventory;
 mod in_memory_store;
 mod kv_runtime;
 mod lock_server;
+mod node_agent;
 #[cfg(all(feature = "rdma", target_os = "linux"))]
 mod rdma_server;
 mod rpc_server;
@@ -340,6 +342,9 @@ async fn run_storage_runtime(
     endpoint_registry: Arc<std::sync::Mutex<openlake_io::rpc::RdmaEndpointsReply>>,
     store: in_memory_store::InMemoryStore,
 ) -> anyhow::Result<()> {
+    if runtime_id == 0 {
+        node_agent::spawn(cfg.clone(), tls.clone(), None)?;
+    }
     // Extract the three TLS handles from the shared material.
     // S3 acceptor / RPC acceptor go through `Rc` for runtime-local
     // sharing: `TlsAcceptor` is a cheap `Arc<ServerConfig>` wrapper

@@ -2274,6 +2274,7 @@ dependencies = [
  "rustls-pemfile",
  "send_wrapper",
  "serde",
+ "serde_json",
  "sha2",
  "socket2",
  "tempfile",

@@ -58,6 +58,9 @@ impl KvSlab for RdmaSlab {
     fn slot_count(&self) -> u32 {
         self.buffers.buf_cnt() as u32
     }
+    fn used_slots(&self) -> u32 {
+        self.slots.borrow().occupancy() as u32
+    }
     fn shm_name(&self) -> Option<&str> {
         None
     }

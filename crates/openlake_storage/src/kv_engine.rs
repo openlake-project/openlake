@@ -1,8 +1,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use openlake_io::kv::{self, HostSlab, KvRequest, KvResponse, KvSlab};
+use serde::Serialize;
 
 fn human_bytes(n: u64) -> String {
     const U: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -21,6 +24,7 @@ fn human_bytes(n: u64) -> String {
 pub struct KvEngine {
     slab: RefCell<Option<Rc<dyn KvSlab>>>,
     capacity_bytes: u64,
+    metrics: Arc<KvEngineMetrics>,
     reserve_ttl: Duration,
     #[cfg(all(feature = "rdma", target_os = "linux"))]
     dev: Option<Rc<openlake_io::rdma::IbDevice>>,
@@ -32,11 +36,73 @@ pub struct KvEngine {
     on_attach: RefCell<Option<Box<dyn Fn(u16, u16)>>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct KvEngineStats {
+    pub configured_capacity_bytes: u64,
+    pub attached: bool,
+    pub slot_bytes: Option<u32>,
+    pub slot_count: Option<u32>,
+    pub used_slots: Option<u32>,
+    pub used_bytes: u64,
+}
+
+pub struct KvEngineMetrics {
+    capacity_bytes: u64,
+    attached: AtomicBool,
+    slot_bytes: AtomicU32,
+    slot_count: AtomicU32,
+    used_slots: AtomicU32,
+}
+
+impl KvEngineMetrics {
+    fn new(capacity_bytes: u64) -> Self {
+        Self {
+            capacity_bytes,
+            attached: AtomicBool::new(false),
+            slot_bytes: AtomicU32::new(0),
+            slot_count: AtomicU32::new(0),
+            used_slots: AtomicU32::new(0),
+        }
+    }
+
+    fn update(&self, slab: &dyn KvSlab) {
+        self.slot_bytes.store(slab.slot_bytes(), Ordering::Relaxed);
+        self.slot_count.store(slab.slot_count(), Ordering::Relaxed);
+        self.used_slots.store(slab.used_slots(), Ordering::Relaxed);
+        self.attached.store(true, Ordering::Release);
+    }
+
+    pub fn snapshot(&self) -> KvEngineStats {
+        if self.attached.load(Ordering::Acquire) {
+            let slot_bytes = self.slot_bytes.load(Ordering::Relaxed);
+            let used_slots = self.used_slots.load(Ordering::Relaxed);
+            KvEngineStats {
+                configured_capacity_bytes: self.capacity_bytes,
+                attached: true,
+                slot_bytes: Some(slot_bytes),
+                slot_count: Some(self.slot_count.load(Ordering::Relaxed)),
+                used_slots: Some(used_slots),
+                used_bytes: u64::from(slot_bytes) * u64::from(used_slots),
+            }
+        } else {
+            KvEngineStats {
+                configured_capacity_bytes: self.capacity_bytes,
+                attached: false,
+                slot_bytes: None,
+                slot_count: None,
+                used_slots: None,
+                used_bytes: 0,
+            }
+        }
+    }
+}
+
 impl KvEngine {
     pub fn new_tcp(capacity_bytes: u64, reserve_ttl: Duration) -> Self {
         Self {
             slab: RefCell::new(None),
             capacity_bytes,
+            metrics: Arc::new(KvEngineMetrics::new(capacity_bytes)),
             reserve_ttl,
             #[cfg(all(feature = "rdma", target_os = "linux"))]
             dev: None,
@@ -60,6 +126,7 @@ impl KvEngine {
         Self {
             slab: RefCell::new(None),
             capacity_bytes,
+            metrics: Arc::new(KvEngineMetrics::new(capacity_bytes)),
             reserve_ttl,
             dev: Some(dev),
             registry: Some(registry),
@@ -91,6 +158,14 @@ impl KvEngine {
                 }
             }
         }
+        let update_metrics = matches!(
+            &req,
+            KvRequest::Attach { .. }
+                | KvRequest::Reserve { .. }
+                | KvRequest::Commit { .. }
+                | KvRequest::Release { .. }
+                | KvRequest::Reset
+        );
         match &*self.slab.borrow() {
             Some(slab) => {
                 let committed = if let KvRequest::Commit { entries } = &req {
@@ -99,6 +174,9 @@ impl KvEngine {
                     0
                 };
                 let resp = kv::serve_tcp(&**slab, req);
+                if update_metrics {
+                    self.metrics.update(&**slab);
+                }
                 match &resp {
                     KvResponse::Looked { slots } => tracing::info!(
                         "kv load lookup: {} blocks queried, {} hits served",
@@ -123,6 +201,14 @@ impl KvEngine {
                 ),
             },
         }
+    }
+
+    pub fn stats(&self) -> KvEngineStats {
+        self.metrics.snapshot()
+    }
+
+    pub fn metrics(&self) -> Arc<KvEngineMetrics> {
+        self.metrics.clone()
     }
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
@@ -163,6 +249,9 @@ impl KvEngine {
                 slot_count,
             );
             *self.slab.borrow_mut() = Some(Rc::new(slab));
+            if let Some(slab) = self.slab.borrow().as_ref() {
+                self.metrics.update(&**slab);
+            }
             let registry = self
                 .registry
                 .as_ref()
@@ -197,7 +286,11 @@ impl KvEngine {
                 "no kv slab yet: call attach first for client discovery/exchange".into(),
             )));
         };
-        match req {
+        let update_metrics = matches!(
+            &req,
+            BatchReserve { .. } | BatchCommit { .. } | BatchRelease { .. } | Reset
+        );
+        let response = match req {
             BatchReserve { count } => RdmaResponse::BatchReserved {
                 slots: slab.reserve(count),
             },
@@ -221,7 +314,11 @@ impl KvEngine {
                 RdmaResponse::ResetDone
             }
             req => unreachable!("kv engine routed a foreign request: {req:?}"),
+        };
+        if update_metrics {
+            self.metrics.update(&**slab);
         }
+        response
     }
 }
 
@@ -282,5 +379,32 @@ mod tests {
         let (again, sb, sc) = attach(&e, 8192);
         assert_eq!(again, first);
         assert_eq!((sb, sc), (4096, 16));
+    }
+
+    #[test]
+    fn stats_report_attached_slab_occupancy() {
+        let e = KvEngine::new_tcp(64 * 1024, Duration::from_secs(60));
+        assert_eq!(e.stats().used_bytes, 0);
+        let (_, slot_bytes, slot_count) = attach(&e, 1024);
+
+        let before = e.stats();
+        assert!(before.attached);
+        assert_eq!(before.slot_bytes, Some(slot_bytes));
+        assert_eq!(before.slot_count, Some(slot_count));
+        assert_eq!(before.used_slots, Some(0));
+        assert_eq!(before.used_bytes, 0);
+
+        let slot = match e.serve_tcp(KvRequest::Reserve { count: 1 }) {
+            KvResponse::Reserved { slots } => slots[0],
+            other => panic!("reserve: {other:?}"),
+        };
+        assert!(matches!(
+            e.serve_tcp(KvRequest::Commit {
+                entries: vec![(slot, vec![7; 54])],
+            }),
+            KvResponse::Ok
+        ));
+        assert_eq!(e.stats().used_slots, Some(1));
+        assert_eq!(e.stats().used_bytes, 1024);
     }
 }
