@@ -51,6 +51,11 @@ pub enum RdmaRequest {
     },
     Generic(Request),
     Reset,
+    /// Resolve slots for an actual KV data transfer. Kept separate from
+    /// `BatchLookup` so existence probes do not inflate served-block metrics.
+    BatchRead {
+        key_hashes: Vec<Vec<u8>>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

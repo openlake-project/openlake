@@ -257,7 +257,7 @@ impl Protocol for ShmLocalProtocol {
             .ok_or_else(|| format!("node {node} not attached"))?;
         let slots = match call(
             &n.addr,
-            &KvRequest::Lookup {
+            &KvRequest::Read {
                 keys: keys.to_vec(),
             },
         )? {

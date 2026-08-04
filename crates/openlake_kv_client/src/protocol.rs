@@ -707,7 +707,7 @@ async fn do_get(
     let slots = match unary(
         &node,
         node_id,
-        RdmaRequest::BatchLookup {
+        RdmaRequest::BatchRead {
             key_hashes: key_hashes.iter().map(|k| k.to_vec()).collect(),
         },
     )
