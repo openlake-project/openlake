@@ -75,7 +75,6 @@ async fn serve(
                 transport: match cfg.transport {
                     TransportMode::H2 => "h2",
                     TransportMode::Rdma => "rdma",
-                    TransportMode::Ucx => "ucx",
                 },
                 data_paths: cfg.data_dirs.clone(),
                 kv_cache: None,

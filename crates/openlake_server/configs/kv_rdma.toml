@@ -23,6 +23,7 @@ cpu_ram_frac     = 0.5
 reserve_ttl_secs = 60
 
 [rdma]
+backend      = "dct"
 self_node_id = 0
 dev_name     = "mlx5_0"
 dc_key       = 4919

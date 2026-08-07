@@ -74,22 +74,20 @@ pub async fn run_ucx(
     let acceptor = tls.rpc_acceptor().map(Rc::new);
 
     let control_engine = engine.clone();
-    compio::runtime::spawn(async move {
-        loop {
-            while worker.progress() != 0 {}
-            loop {
-                match worker.poll_control() {
-                    Ok(Some(body)) => handle_ucx_control(&control_engine, &body),
-                    Ok(None) => break,
-                    Err(error) => {
-                        tracing::warn!(%error, "UCX control receive failed");
-                        break;
-                    }
+    compio::runtime::spawn(std::future::poll_fn(move |cx| {
+        for _ in 0..64 {
+            match worker.poll_control() {
+                Ok(Some(body)) => handle_ucx_control(&control_engine, &body),
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "UCX control receive failed");
+                    break;
                 }
             }
-            compio::time::sleep(Duration::from_micros(50)).await;
         }
-    })
+        cx.waker().wake_by_ref();
+        std::task::Poll::<()>::Pending
+    }))
     .detach();
 
     tracing::info!(rpc = %cfg.rpc_addr, "kv node (ucx) serving");
@@ -170,7 +168,7 @@ pub async fn run(
         cfg.rdma.as_ref().expect("validated: kv rdma has [rdma]"),
         0,
         cfg.nodes.len() as u16,
-    );
+    )?;
     rdma_cfg.min_recv_bufs = usize::MAX;
     let (setup, my_endpoint) =
         openlake_io::rdma::RdmaNode::start_local(&rdma_cfg).context("rdma start_local")?;

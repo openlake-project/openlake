@@ -54,8 +54,12 @@ fn main() -> anyhow::Result<()> {
         let ord: u16 = s.parse()?;
         let toml_self_id = cfg.self_id;
         cfg.self_id = ord;
-        if let Some(rdma) = cfg.rdma.as_mut() {
-            rdma.self_node_id = ord;
+        if let Some(rdma) = cfg
+            .rdma
+            .as_mut()
+            .filter(|rdma| rdma.backend == config::RdmaBackend::Dct)
+        {
+            rdma.self_node_id = Some(ord);
         }
         tracing::warn!(
             env_self_id = ord,
@@ -72,7 +76,11 @@ fn main() -> anyhow::Result<()> {
     openlake_io::init_purge_worker();
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
-    if let Some(rdma_cfg) = cfg.rdma.as_ref() {
+    if let Some(rdma_cfg) = cfg
+        .rdma
+        .as_ref()
+        .filter(|rdma| rdma.backend == config::RdmaBackend::Dct)
+    {
         let to = std::time::Duration::from_secs(rdma_cfg.network_timeout_secs);
         openlake_io::rdma_backend::set_rdma_network_timeout(to);
     }
@@ -123,12 +131,17 @@ fn main() -> anyhow::Result<()> {
                             config::TransportMode::Rdma => {
                                 #[cfg(all(feature = "rdma", target_os = "linux"))]
                                 {
-                                    rt.block_on(kv_runtime::run(
-                                        cfg,
-                                        lock_server,
-                                        tls,
-                                        endpoint_registry,
-                                    ))
+                                    match cfg.rdma.as_ref().expect("validated: [rdma]").backend {
+                                        config::RdmaBackend::Dct => rt.block_on(kv_runtime::run(
+                                            cfg,
+                                            lock_server,
+                                            tls,
+                                            endpoint_registry,
+                                        )),
+                                        config::RdmaBackend::Ucx => {
+                                            rt.block_on(kv_runtime::run_ucx(cfg, lock_server, tls))
+                                        }
+                                    }
                                 }
                                 #[cfg(not(all(feature = "rdma", target_os = "linux")))]
                                 {
@@ -139,18 +152,6 @@ fn main() -> anyhow::Result<()> {
                             }
                             config::TransportMode::H2 => {
                                 rt.block_on(kv_runtime::run_tcp(cfg, lock_server, tls))
-                            }
-                            config::TransportMode::Ucx => {
-                                #[cfg(all(feature = "rdma", target_os = "linux"))]
-                                {
-                                    rt.block_on(kv_runtime::run_ucx(cfg, lock_server, tls))
-                                }
-                                #[cfg(not(all(feature = "rdma", target_os = "linux")))]
-                                {
-                                    anyhow::bail!(
-                                        "kv UCX transport requires the rdma feature on linux"
-                                    )
-                                }
                             }
                         },
                         config::Mode::Storage => rt.block_on(run_storage_runtime(
@@ -346,7 +347,7 @@ async fn run_storage_runtime(
                     cfg.rdma.as_ref().expect("rdma transport requires [rdma]"),
                     runtime_id as u16,
                     cfg.nodes.len() as u16,
-                );
+                )?;
                 let (setup, my_endpoint) = openlake_io::rdma::RdmaNode::start_local(&rdma_cfg)
                     .context("rdma start_local")?;
                 {
@@ -358,7 +359,7 @@ async fn run_storage_runtime(
                 }
                 Some((setup, rdma_cfg))
             }
-            config::TransportMode::H2 | config::TransportMode::Ucx => None,
+            config::TransportMode::H2 => None,
         };
 
     let auth_state = Rc::new(auth::AuthState::new(cfg.region.clone(), &cfg.credentials));
@@ -489,9 +490,6 @@ async fn run_storage_runtime(
             config::TransportMode::Rdma => {
                 anyhow::bail!("rdma transport selected but build lacks rdma feature");
             }
-            config::TransportMode::Ucx => {
-                anyhow::bail!("UCX transport currently supports KV mode only");
-            }
         }
     }
 
@@ -615,15 +613,20 @@ pub(crate) fn build_rdma_config(
     t: &config::RdmaToml,
     runtime_id: u16,
     num_cluster_nodes: u16,
-) -> openlake_io::rdma::RdmaConfig {
-    openlake_io::rdma::RdmaConfig {
-        self_node_id: t.self_node_id,
+) -> anyhow::Result<openlake_io::rdma::RdmaConfig> {
+    anyhow::ensure!(
+        t.backend == config::RdmaBackend::Dct,
+        "native RDMA configuration requires backend = \"dct\""
+    );
+    let qos = t.qos.as_ref().context("[rdma.qos] is required")?;
+    Ok(openlake_io::rdma::RdmaConfig {
+        self_node_id: t.self_node_id.context("[rdma] self_node_id is required")?,
         runtime_id,
-        dev_name: t.dev_name.clone(),
-        dc_key: t.dc_key,
+        dev_name: t.dev_name.clone().context("[rdma] dev_name is required")?,
+        dc_key: t.dc_key.context("[rdma] dc_key is required")?,
         qos: openlake_io::rdma::RdmaQos {
-            traffic_class: t.qos.traffic_class,
-            service_level: t.qos.service_level,
+            traffic_class: qos.traffic_class,
+            service_level: qos.service_level,
         },
         bulk_buf_size: openlake_storage::DEFAULT_EC_PER_SHARD_BYTES,
         bulk_pool_cap: t.bulk_pool_cap,
@@ -632,5 +635,5 @@ pub(crate) fn build_rdma_config(
         srq_depth: t.srq_depth,
         max_send_wr: t.max_send_wr,
         peer_credit: t.peer_credit,
-    }
+    })
 }

@@ -209,7 +209,15 @@ fn run(client_id: u16, rx: mpsc::Receiver<Cmd>, ready: mpsc::Sender<Result<(), S
         nodes: HashMap::new(),
         memory: Vec::new(),
     };
-    while let Ok(command) = rx.recv() {
+    loop {
+        let command = match rx.try_recv() {
+            Ok(command) => command,
+            Err(mpsc::TryRecvError::Empty) => {
+                std::hint::spin_loop();
+                continue;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => break,
+        };
         match command {
             Cmd::Attach {
                 addr,
@@ -423,7 +431,7 @@ fn unary(state: &State, node_id: u16, payload: RdmaRequest) -> Result<RdmaRespon
                 "node {node_id}: UCX control response timeout ({CONTROL_TIMEOUT:?})"
             ));
         }
-        thread::yield_now();
+        std::hint::spin_loop();
     }
 }
 
