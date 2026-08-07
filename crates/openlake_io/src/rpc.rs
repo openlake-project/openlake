@@ -230,6 +230,14 @@ pub enum Request {
         endpoints: Vec<LocalRdmaEndpoint>,
         slot_bytes: u32,
     },
+
+    UcxAttach {
+        protocol_version: u16,
+        client_node_id: u16,
+        epoch: u64,
+        worker_address: Vec<u8>,
+        slot_bytes: u32,
+    },
 }
 
 pub const CLIENT_NODE_ID_BASE: u16 = 2_048;
@@ -260,6 +268,20 @@ pub enum Response {
     RdmaAttached(RdmaEndpointsReply),
     RdmaAttachDenied(String),
     Err(WireError),
+    UcxAttached(UcxEndpointReply),
+    UcxAttachDenied(String),
+}
+
+pub const UCX_PROTOCOL_VERSION: u16 = 1;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UcxEndpointReply {
+    pub protocol_version: u16,
+    pub worker_address: Vec<u8>,
+    pub slab_base: u64,
+    pub packed_rkey: Vec<u8>,
+    pub slot_bytes: u32,
+    pub slot_count: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

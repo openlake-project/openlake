@@ -190,6 +190,12 @@ pub trait KvSlab {
     fn slot_count(&self) -> u32;
     fn used_slots(&self) -> u32;
     fn shm_name(&self) -> Option<&str>;
+    fn base_address(&self) -> Option<u64> {
+        None
+    }
+    fn byte_len(&self) -> u64 {
+        u64::from(self.slot_bytes()) * u64::from(self.slot_count())
+    }
 }
 
 pub struct HostSlab {
@@ -251,6 +257,9 @@ impl KvSlab for HostSlab {
     }
     fn shm_name(&self) -> Option<&str> {
         Some(&self.name)
+    }
+    fn base_address(&self) -> Option<u64> {
+        Some(self.base as u64)
     }
 }
 

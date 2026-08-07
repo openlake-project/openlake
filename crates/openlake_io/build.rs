@@ -1,7 +1,28 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     #[cfg(all(feature = "rdma", target_os = "linux"))]
-    rdma::bindgen_mlx5dv();
+    {
+        rdma::bindgen_mlx5dv();
+        ucx::build_shim();
+    }
+}
+
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+mod ucx {
+    pub fn build_shim() {
+        println!("cargo:rerun-if-changed=src/ucx_shim.c");
+        let ucx = pkg_config::Config::new()
+            .atleast_version("1.12")
+            .probe("ucx")
+            .expect("the `rdma` feature requires OpenUCX development headers (ucx.pc)");
+        let mut build = cc::Build::new();
+        build.file("src/ucx_shim.c");
+        for path in ucx.include_paths {
+            build.include(path);
+        }
+        build.flag_if_supported("-std=c11");
+        build.compile("openlake_ucx_shim");
+    }
 }
 
 #[cfg(all(feature = "rdma", target_os = "linux"))]

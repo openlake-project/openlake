@@ -138,7 +138,7 @@ pub struct Config {
     #[serde(default)]
     pub mode: Mode,
     #[serde(default)]
-    pub transport: TransportMode, // h2 (default) | rdma
+    pub transport: TransportMode,
     #[serde(default)]
     pub rdma: Option<RdmaToml>, // required when transport = rdma
     #[serde(default)]
@@ -199,6 +199,7 @@ pub enum TransportMode {
     #[default]
     H2,
     Rdma,
+    Ucx,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -465,6 +466,16 @@ impl Config {
             if !cfg!(all(feature = "rdma", target_os = "linux")) {
                 anyhow::bail!(
                     "transport = \"rdma\" requires the `rdma` cargo feature on a Linux build"
+                );
+            }
+        }
+        if cfg.transport == TransportMode::Ucx {
+            if cfg.mode != Mode::Kv {
+                anyhow::bail!("transport = \"ucx\" currently supports mode = \"kv\" only");
+            }
+            if !cfg!(all(feature = "rdma", target_os = "linux")) {
+                anyhow::bail!(
+                    "transport = \"ucx\" requires the `rdma` cargo feature on a Linux build"
                 );
             }
         }

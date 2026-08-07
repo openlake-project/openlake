@@ -17,6 +17,7 @@ pub mod error;
 pub mod kv;
 #[cfg(all(feature = "rdma", target_os = "linux"))]
 pub mod kv_slab;
+pub mod kv_wire;
 pub mod local_fs;
 pub mod net_metrics;
 pub mod node_info;
@@ -31,6 +32,8 @@ pub mod shm;
 pub mod stream;
 pub mod tuning;
 pub mod types;
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+pub mod ucx;
 pub mod xl_meta;
 
 pub use alloc::{MemoryPool, MemoryPoolConfig, PooledBuffer};

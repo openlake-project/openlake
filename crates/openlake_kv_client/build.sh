@@ -2,11 +2,14 @@
 # Build one wheel that carries all four artifacts:
 #   client .so (maturin compiles) + openlaked (cargo) + connector .py + configs.
 #   ./build.sh          -> openlake-vllm      (non-RDMA)
-#   ./build.sh rdma     -> openlake-vllm-ib   (--features rdma)
 set -euo pipefail
 cd "$(dirname "$0")"
 
 VARIANT="${1:-cpu}"
+case "$VARIANT" in
+  cpu|rdma) ;;
+  *) echo "usage: $0 [rdma]" >&2; exit 2 ;;
+esac
 PKG="python/openlake_client"
 FEAT=""
 AUDIT=""
@@ -27,9 +30,11 @@ cp ../../external/connectors/vllm/*.py "$PKG/"
 sed -i 's|vllm\.distributed\.kv_transfer\.kv_connector\.v1\.openlake_|openlake_client.openlake_|g' "$PKG"/openlake_*.py
 
 # 3. default configs
+rm -rf "$PKG/configs"
 mkdir -p "$PKG/configs"
-cp ../openlake_server/configs/kv_local.toml ../openlake_server/configs/kv_rdma.toml "$PKG/configs/"
+cp ../openlake_server/configs/kv_local.toml "$PKG/configs/"
 if [ "$VARIANT" = "rdma" ]; then
+  cp ../openlake_server/configs/kv_rdma.toml ../openlake_server/configs/kv_ucx.toml "$PKG/configs/"
   cp ../openlake_server/configs/kv_rdma.toml "$PKG/configs/default.toml"
 else
   cp ../openlake_server/configs/kv_local.toml "$PKG/configs/default.toml"

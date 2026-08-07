@@ -52,9 +52,11 @@ rdma-mummy-sys = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.build-dependencies]
 bindgen = { version = "0.71", optional = true }
+cc = { version = "1", optional = true }
+pkg-config = { version = "0.3", optional = true }
 
 [features]
-rdma = ["dep:rdma-mummy-sys", "dep:bindgen"]
+rdma = ["dep:rdma-mummy-sys", "dep:bindgen", "dep:cc", "dep:pkg-config"]
 
 [dev-dependencies]
 tempfile           = { workspace = true }
