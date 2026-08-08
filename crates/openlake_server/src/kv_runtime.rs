@@ -77,7 +77,11 @@ pub async fn run_ucx(
     compio::runtime::spawn(std::future::poll_fn(move |cx| {
         for _ in 0..64 {
             match worker.poll_control() {
-                Ok(Some(body)) => handle_ucx_control(&control_engine, &body),
+                Ok(Some(body)) => {
+                    let engine = control_engine.clone();
+                    compio::runtime::spawn(async move { handle_ucx_control(engine, &body).await })
+                        .detach();
+                }
                 Ok(None) => break,
                 Err(error) => {
                     tracing::warn!(%error, "UCX control receive failed");
@@ -103,7 +107,7 @@ pub async fn run_ucx(
 }
 
 #[cfg(all(feature = "rdma", target_os = "linux"))]
-fn handle_ucx_control(engine: &KvEngine, body: &[u8]) {
+async fn handle_ucx_control(engine: Rc<KvEngine>, body: &[u8]) {
     use openlake_io::kv_wire::{Envelope, RdmaResponse, ENVELOPE_MAGIC};
     use openlake_io::rpc::{self, Response, WireError};
 
@@ -148,8 +152,13 @@ fn handle_ucx_control(engine: &KvEngine, body: &[u8]) {
             return;
         }
     };
-    if let Err(error) = engine.send_ucx_control(client, &response) {
-        tracing::warn!(client, %error, "UCX control response failed");
+    match engine.send_ucx_control(client, response) {
+        Ok(request) => {
+            if let Err(error) = request.await {
+                tracing::warn!(client, %error, "UCX control response failed");
+            }
+        }
+        Err(error) => tracing::warn!(client, %error, "UCX control response failed"),
     }
 }
 

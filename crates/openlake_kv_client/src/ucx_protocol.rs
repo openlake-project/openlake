@@ -1,22 +1,26 @@
 #![cfg(all(feature = "rdma", target_os = "linux"))]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::mpsc;
+use std::rc::Rc;
+use std::sync::mpsc as sync_mpsc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use futures::channel::{mpsc, oneshot};
+use futures::future::try_join_all;
+use futures::StreamExt;
 use openlake_io::kv_wire::{CommitEntry, Envelope, RdmaRequest, RdmaResponse, ENVELOPE_MAGIC};
 use openlake_io::rpc::{self, Request, Response, UcxEndpointReply, UCX_PROTOCOL_VERSION};
-use openlake_io::ucx::{UcxEndpoint, UcxMemory, UcxRkey, UcxWorker};
+use openlake_io::ucx::{UcxEndpoint, UcxMemory, UcxRequest, UcxRkey, UcxWorker};
 
 use crate::transport::{Protocol, Scatter, Waiter};
 
 const KEY_BYTES: usize = 54;
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
-const CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const RPC_PATH: &str = "/v1/rpc";
 
 enum Cmd {
@@ -24,38 +28,38 @@ enum Cmd {
         addr: String,
         node_id: u16,
         slot_bytes: u32,
-        reply: mpsc::Sender<Result<usize, String>>,
+        reply: sync_mpsc::Sender<Result<usize, String>>,
     },
     Register {
         addr: u64,
         len: u64,
-        reply: mpsc::Sender<Result<(), String>>,
+        reply: sync_mpsc::Sender<Result<(), String>>,
     },
     Exists {
         node: u16,
         keys: Vec<Vec<u8>>,
-        reply: mpsc::Sender<Result<Vec<i32>, String>>,
+        reply: sync_mpsc::Sender<Result<Vec<i32>, String>>,
     },
     Put {
         node: u16,
         keys: Vec<Vec<u8>>,
         scatters: Vec<Scatter>,
-        reply: mpsc::Sender<Result<Vec<i32>, String>>,
+        reply: sync_mpsc::Sender<Result<Vec<i32>, String>>,
     },
     Get {
         node: u16,
         keys: Vec<Vec<u8>>,
         scatters: Vec<Scatter>,
-        reply: mpsc::Sender<Result<Vec<i32>, String>>,
+        reply: sync_mpsc::Sender<Result<Vec<i32>, String>>,
     },
     Reset {
         node: u16,
-        reply: mpsc::Sender<Result<(), String>>,
+        reply: sync_mpsc::Sender<Result<(), String>>,
     },
 }
 
 struct Node {
-    rkey: UcxRkey,
+    rkey: Option<UcxRkey>,
     endpoint: UcxEndpoint,
     slab_base: u64,
     slot_bytes: u32,
@@ -76,24 +80,26 @@ impl RegisteredMemory {
     }
 }
 
-struct State {
+struct Shared {
     client_id: u16,
-    epoch: u64,
+    epoch: Cell<u64>,
     next_request_id: Cell<u64>,
     worker: UcxWorker,
-    nodes: HashMap<u16, Node>,
-    memory: Vec<RegisteredMemory>,
+    nodes: RefCell<HashMap<u16, Rc<Node>>>,
+    memory: RefCell<Vec<RegisteredMemory>>,
+    pending: RefCell<HashMap<u64, oneshot::Sender<Result<RdmaResponse, String>>>>,
+    control_error: RefCell<Option<String>>,
 }
 
 pub struct UcxProtocol {
-    tx: Option<mpsc::Sender<Cmd>>,
+    tx: Option<mpsc::UnboundedSender<Cmd>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl UcxProtocol {
     pub fn new(client_id: u16) -> Result<Self, String> {
-        let (tx, rx) = mpsc::channel();
-        let (ready_tx, ready_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::unbounded();
+        let (ready_tx, ready_rx) = sync_mpsc::channel();
         let thread = thread::Builder::new()
             .name("openlake-ucx-client".into())
             .spawn(move || run(client_id, rx, ready_tx))
@@ -113,20 +119,20 @@ impl UcxProtocol {
 
     fn begin<T>(
         &self,
-        make: impl FnOnce(mpsc::Sender<Result<T, String>>) -> Cmd,
-    ) -> Result<mpsc::Receiver<Result<T, String>>, String> {
-        let (reply, wait) = mpsc::channel();
+        make: impl FnOnce(sync_mpsc::Sender<Result<T, String>>) -> Cmd,
+    ) -> Result<sync_mpsc::Receiver<Result<T, String>>, String> {
+        let (reply, wait) = sync_mpsc::channel();
         self.tx
             .as_ref()
             .ok_or("UCX client is closed")?
-            .send(make(reply))
+            .unbounded_send(make(reply))
             .map_err(|_| "UCX client thread died".to_string())?;
         Ok(wait)
     }
 
     fn roundtrip<T>(
         &self,
-        make: impl FnOnce(mpsc::Sender<Result<T, String>>) -> Cmd,
+        make: impl FnOnce(sync_mpsc::Sender<Result<T, String>>) -> Cmd,
     ) -> Result<T, String> {
         self.begin(make)?
             .recv()
@@ -192,78 +198,150 @@ impl Drop for UcxProtocol {
     }
 }
 
-fn run(client_id: u16, rx: mpsc::Receiver<Cmd>, ready: mpsc::Sender<Result<(), String>>) {
-    let worker = match UcxWorker::new() {
-        Ok(worker) => worker,
+fn run(
+    client_id: u16,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
+    ready: sync_mpsc::Sender<Result<(), String>>,
+) {
+    let runtime = match runtime() {
+        Ok(runtime) => runtime,
         Err(error) => {
             let _ = ready.send(Err(error));
             return;
         }
     };
-    let _ = ready.send(Ok(()));
-    let mut state = State {
-        client_id,
-        epoch: 0,
-        next_request_id: Cell::new(1),
-        worker,
-        nodes: HashMap::new(),
-        memory: Vec::new(),
-    };
-    loop {
-        let command = match rx.try_recv() {
-            Ok(command) => command,
-            Err(mpsc::TryRecvError::Empty) => {
-                std::hint::spin_loop();
-                continue;
+    runtime.block_on(async move {
+        let worker = match UcxWorker::new() {
+            Ok(worker) => worker,
+            Err(error) => {
+                let _ = ready.send(Err(error));
+                return;
             }
-            Err(mpsc::TryRecvError::Disconnected) => break,
         };
-        match command {
-            Cmd::Attach {
-                addr,
-                node_id,
-                slot_bytes,
-                reply,
-            } => {
-                let _ = reply.send(attach(&mut state, &addr, node_id, slot_bytes));
-            }
-            Cmd::Register { addr, len, reply } => {
-                let result = register(&mut state, addr, len);
-                let _ = reply.send(result);
-            }
-            Cmd::Exists { node, keys, reply } => {
-                let _ = reply.send(exists(&state, node, keys));
-            }
-            Cmd::Put {
-                node,
-                keys,
-                scatters,
-                reply,
-            } => {
-                let _ = reply.send(put(&state, node, keys, scatters));
-            }
-            Cmd::Get {
-                node,
-                keys,
-                scatters,
-                reply,
-            } => {
-                let _ = reply.send(get(&state, node, keys, scatters));
-            }
-            Cmd::Reset { node, reply } => {
-                let _ = reply.send(reset(&state, node));
-            }
+        let shared = Rc::new(Shared {
+            client_id,
+            epoch: Cell::new(0),
+            next_request_id: Cell::new(1),
+            worker,
+            nodes: RefCell::new(HashMap::new()),
+            memory: RefCell::new(Vec::new()),
+            pending: RefCell::new(HashMap::new()),
+            control_error: RefCell::new(None),
+        });
+        compio::runtime::spawn(dispatch(shared.clone())).detach();
+        let _ = ready.send(Ok(()));
+
+        while let Some(command) = rx.next().await {
+            let shared = shared.clone();
+            compio::runtime::spawn(async move { handle(shared, command).await }).detach();
+        }
+    });
+}
+
+async fn handle(shared: Rc<Shared>, command: Cmd) {
+    match command {
+        Cmd::Attach {
+            addr,
+            node_id,
+            slot_bytes,
+            reply,
+        } => {
+            let _ = reply.send(attach(&shared, &addr, node_id, slot_bytes));
+        }
+        Cmd::Register { addr, len, reply } => {
+            let _ = reply.send(register(&shared, addr, len));
+        }
+        Cmd::Exists { node, keys, reply } => {
+            let _ = reply.send(exists(&shared, node, keys).await);
+        }
+        Cmd::Put {
+            node,
+            keys,
+            scatters,
+            reply,
+        } => {
+            let _ = reply.send(put(&shared, node, keys, scatters).await);
+        }
+        Cmd::Get {
+            node,
+            keys,
+            scatters,
+            reply,
+        } => {
+            let _ = reply.send(get(&shared, node, keys, scatters).await);
+        }
+        Cmd::Reset { node, reply } => {
+            let _ = reply.send(reset(&shared, node).await);
         }
     }
 }
 
-fn attach(state: &mut State, addr: &str, node_id: u16, slot_bytes: u32) -> Result<usize, String> {
-    state.epoch = state.epoch.wrapping_add(1).max(1);
+async fn dispatch(shared: Rc<Shared>) {
+    std::future::poll_fn(move |cx| {
+        for _ in 0..64 {
+            match shared.worker.poll_control() {
+                Ok(Some(body)) => route_control(&shared, &body),
+                Ok(None) => break,
+                Err(error) => {
+                    fail_control(&shared, error);
+                    return std::task::Poll::Ready(());
+                }
+            }
+        }
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    })
+    .await
+}
+
+fn route_control(shared: &Shared, body: &[u8]) {
+    let response = match rpc::decode::<Envelope>(body) {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(%error, "decode UCX control response");
+            return;
+        }
+    };
+    match response {
+        Envelope::Rsp {
+            magic,
+            request_id,
+            payload,
+        } => {
+            let Some(pending) = shared.pending.borrow_mut().remove(&request_id) else {
+                tracing::warn!(request_id, "unmatched UCX control response");
+                return;
+            };
+            let response = if magic == ENVELOPE_MAGIC {
+                Ok(payload)
+            } else {
+                Err(format!("invalid UCX response magic {magic:#x}"))
+            };
+            let _ = pending.send(response);
+        }
+        Envelope::Req { .. } => tracing::warn!("client received a UCX request envelope"),
+    }
+}
+
+fn fail_control(shared: &Shared, error: String) {
+    if shared.control_error.borrow().is_some() {
+        return;
+    }
+    tracing::warn!(%error, "UCX control receive failed");
+    *shared.control_error.borrow_mut() = Some(error.clone());
+    let pending = std::mem::take(&mut *shared.pending.borrow_mut());
+    for (_, reply) in pending {
+        let _ = reply.send(Err(error.clone()));
+    }
+}
+
+fn attach(shared: &Shared, addr: &str, node_id: u16, slot_bytes: u32) -> Result<usize, String> {
+    shared.epoch.set(shared.epoch.get().wrapping_add(1).max(1));
     let request = Request::UcxAttach {
         protocol_version: UCX_PROTOCOL_VERSION,
-        client_node_id: state.client_id,
-        epoch: state.epoch,
-        worker_address: state.worker.address()?,
+        client_node_id: shared.client_id,
+        epoch: shared.epoch.get(),
+        worker_address: shared.worker.address()?,
         slot_bytes,
     };
     let body = rpc::encode(&request).map_err(|e| format!("encode UCX attach: {e}"))?;
@@ -279,18 +357,22 @@ fn attach(state: &mut State, addr: &str, node_id: u16, slot_bytes: u32) -> Resul
         }
     };
     validate_reply(&reply, slot_bytes)?;
-    let endpoint = state.worker.connect(&reply.worker_address)?;
-    let rkey = endpoint.unpack_rkey(&reply.packed_rkey)?;
-    state.nodes.insert(
+    let endpoint = shared.worker.connect(&reply.worker_address)?;
+    let rkey = if reply.packed_rkey.is_empty() {
+        None
+    } else {
+        Some(endpoint.unpack_rkey(&reply.packed_rkey)?)
+    };
+    shared.nodes.borrow_mut().insert(
         node_id,
-        Node {
+        Rc::new(Node {
             rkey,
             endpoint,
             slab_base: reply.slab_base,
             slot_bytes: reply.slot_bytes,
-        },
+        }),
     );
-    Ok(state.nodes.len())
+    Ok(shared.nodes.borrow().len())
 }
 
 fn validate_reply(reply: &UcxEndpointReply, requested_slot_bytes: u32) -> Result<(), String> {
@@ -300,24 +382,42 @@ fn validate_reply(reply: &UcxEndpointReply, requested_slot_bytes: u32) -> Result
             reply.protocol_version, UCX_PROTOCOL_VERSION
         ));
     }
+    if reply.worker_address.is_empty() {
+        return Err("server returned an empty UCX worker address".into());
+    }
+    if requested_slot_bytes == 0 {
+        if reply.slot_bytes != 0
+            || reply.slot_count != 0
+            || reply.slab_base != 0
+            || !reply.packed_rkey.is_empty()
+        {
+            return Err("server returned data-plane metadata for a control-only UCX attach".into());
+        }
+        return Ok(());
+    }
     if reply.slot_bytes != requested_slot_bytes || reply.slot_count == 0 {
         return Err(format!(
             "invalid UCX slab: requested {requested_slot_bytes} bytes, server returned {} bytes x {} slots",
             reply.slot_bytes, reply.slot_count
         ));
     }
-    if reply.worker_address.is_empty() || reply.packed_rkey.is_empty() || reply.slab_base == 0 {
+    if reply.packed_rkey.is_empty() || reply.slab_base == 0 {
         return Err("server returned incomplete UCX endpoint metadata".into());
     }
     Ok(())
 }
 
-fn register(state: &mut State, addr: u64, len: u64) -> Result<(), String> {
-    if state.memory.iter().any(|memory| memory.contains(addr, len)) {
+fn register(shared: &Shared, addr: u64, len: u64) -> Result<(), String> {
+    if shared
+        .memory
+        .borrow()
+        .iter()
+        .any(|memory| memory.contains(addr, len))
+    {
         return Ok(());
     }
-    let memory = state.worker.register(addr, len)?;
-    state.memory.push(RegisteredMemory {
+    let memory = shared.worker.register(addr, len)?;
+    shared.memory.borrow_mut().push(RegisteredMemory {
         start: addr,
         len,
         _memory: memory,
@@ -325,10 +425,12 @@ fn register(state: &mut State, addr: u64, len: u64) -> Result<(), String> {
     Ok(())
 }
 
-fn node(state: &State, node_id: u16) -> Result<&Node, String> {
-    state
+fn node(shared: &Shared, node_id: u16) -> Result<Rc<Node>, String> {
+    shared
         .nodes
+        .borrow()
         .get(&node_id)
+        .cloned()
         .ok_or_else(|| format!("node {node_id} is not attached"))
 }
 
@@ -345,7 +447,7 @@ fn validate_keys(keys: &[Vec<u8>]) -> Result<(), String> {
 }
 
 fn validate_scatters(
-    state: &State,
+    shared: &Shared,
     node: &Node,
     keys: &[Vec<u8>],
     scatters: &[Scatter],
@@ -358,6 +460,7 @@ fn validate_scatters(
             keys.len()
         ));
     }
+    let memory = shared.memory.borrow();
     for (key_index, scatter) in scatters.iter().enumerate() {
         let payload: u64 = scatter.iter().map(|(_, length)| *length).sum();
         if payload == 0 || payload + KEY_BYTES as u64 > u64::from(node.slot_bytes) {
@@ -367,12 +470,7 @@ fn validate_scatters(
             ));
         }
         for &(address, length) in scatter {
-            if length == 0
-                || !state
-                    .memory
-                    .iter()
-                    .any(|memory| memory.contains(address, length))
-            {
+            if length == 0 || !memory.iter().any(|region| region.contains(address, length)) {
                 return Err(format!(
                     "key {key_index}: address {address:#x}+{length} is not registered"
                 ));
@@ -382,66 +480,79 @@ fn validate_scatters(
     Ok(())
 }
 
-fn unary(state: &State, node_id: u16, payload: RdmaRequest) -> Result<RdmaResponse, String> {
-    let node = node(state, node_id)?;
-    let request_id = state.next_request_id.get();
-    state.next_request_id.set(request_id.wrapping_add(1).max(1));
-    let request = Envelope::Req {
+async fn unary(
+    shared: &Shared,
+    node_id: u16,
+    payload: RdmaRequest,
+) -> Result<RdmaResponse, String> {
+    if let Some(error) = shared.control_error.borrow().clone() {
+        return Err(error);
+    }
+    let node = node(shared, node_id)?;
+    let request_id = shared.next_request_id.get();
+    shared
+        .next_request_id
+        .set(request_id.wrapping_add(1).max(1));
+    let envelope = Envelope::Req {
         magic: ENVELOPE_MAGIC,
-        from_node_id: state.client_id,
+        from_node_id: shared.client_id,
         from_runtime_id: 0,
         request_id,
         payload,
     };
-    let body = rpc::encode(&request).map_err(|e| format!("encode UCX control request: {e}"))?;
-    node.endpoint.send_control(&body)?;
+    let body = rpc::encode(&envelope).map_err(|e| format!("encode UCX control request: {e}"))?;
+    let (reply, wait) = oneshot::channel();
+    shared.pending.borrow_mut().insert(request_id, reply);
 
-    let deadline = Instant::now() + CONTROL_TIMEOUT;
-    loop {
-        while state.worker.progress() != 0 {}
-        if let Some(body) = state.worker.poll_control()? {
-            let response = rpc::decode::<Envelope>(&body)
-                .map_err(|e| format!("decode UCX control response: {e}"))?;
-            match response {
-                Envelope::Rsp {
-                    magic,
-                    request_id: response_id,
-                    payload,
-                } if magic == ENVELOPE_MAGIC && response_id == request_id => {
-                    if let RdmaResponse::Generic(Response::Err(error)) = &payload {
-                        return Err(format!("UCX control request failed: {error:?}"));
-                    }
-                    return Ok(payload);
-                }
-                Envelope::Rsp {
-                    request_id: response_id,
-                    ..
-                } => {
-                    return Err(format!(
-                        "unexpected UCX response id {response_id}, expected {request_id}"
-                    ));
-                }
-                Envelope::Req { .. } => {
-                    return Err("client received a UCX request envelope".into());
-                }
-            }
+    let send = match node.endpoint.send_control(body) {
+        Ok(send) => send,
+        Err(error) => {
+            shared.pending.borrow_mut().remove(&request_id);
+            return Err(error);
         }
-        if Instant::now() >= deadline {
+    };
+    if let Err(error) = await_request(send, "UCX control send").await {
+        shared.pending.borrow_mut().remove(&request_id);
+        return Err(error);
+    }
+
+    let response = match compio::time::timeout(OPERATION_TIMEOUT, wait).await {
+        Ok(Ok(response)) => response?,
+        Ok(Err(_)) => return Err("UCX control dispatcher dropped waiter".into()),
+        Err(_) => {
+            shared.pending.borrow_mut().remove(&request_id);
             return Err(format!(
-                "node {node_id}: UCX control response timeout ({CONTROL_TIMEOUT:?})"
+                "node {node_id}: UCX control response timeout ({OPERATION_TIMEOUT:?})"
             ));
         }
-        std::hint::spin_loop();
+    };
+    if let RdmaResponse::Generic(Response::Err(error)) = &response {
+        return Err(format!("UCX control request failed: {error:?}"));
+    }
+    Ok(response)
+}
+
+async fn await_requests(requests: Vec<UcxRequest>, operation: &str) -> Result<(), String> {
+    match compio::time::timeout(OPERATION_TIMEOUT, try_join_all(requests)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(format!("{operation}: {error}")),
+        Err(_) => Err(format!("{operation} timeout ({OPERATION_TIMEOUT:?})")),
     }
 }
 
-fn exists(state: &State, node_id: u16, keys: Vec<Vec<u8>>) -> Result<Vec<i32>, String> {
+async fn await_request(request: UcxRequest, operation: &str) -> Result<(), String> {
+    await_requests(vec![request], operation).await
+}
+
+async fn exists(shared: &Shared, node_id: u16, keys: Vec<Vec<u8>>) -> Result<Vec<i32>, String> {
     validate_keys(&keys)?;
     match unary(
-        state,
+        shared,
         node_id,
         RdmaRequest::BatchLookup { key_hashes: keys },
-    )? {
+    )
+    .await?
+    {
         RdmaResponse::BatchLookedUp { slots } => Ok(slots
             .into_iter()
             .map(|slot| slot.is_some() as i32)
@@ -450,35 +561,42 @@ fn exists(state: &State, node_id: u16, keys: Vec<Vec<u8>>) -> Result<Vec<i32>, S
     }
 }
 
-fn put(
-    state: &State,
+async fn put(
+    shared: &Shared,
     node_id: u16,
     keys: Vec<Vec<u8>>,
     scatters: Vec<Scatter>,
 ) -> Result<Vec<i32>, String> {
-    let node = node(state, node_id)?;
-    validate_scatters(state, node, &keys, &scatters)?;
+    let node = node(shared, node_id)?;
+    validate_scatters(shared, &node, &keys, &scatters)?;
+    let rkey = node
+        .rkey
+        .as_ref()
+        .ok_or("UCX node is attached for control operations only")?;
     if keys.is_empty() {
         return Ok(Vec::new());
     }
     let slots = match unary(
-        state,
+        shared,
         node_id,
         RdmaRequest::BatchReserve {
             count: keys.len() as u32,
         },
-    )? {
+    )
+    .await?
+    {
         RdmaResponse::BatchReserved { slots } => slots,
         other => return Err(format!("unexpected reserve response: {other:?}")),
     };
     if slots.len() != keys.len() {
         let _ = unary(
-            state,
+            shared,
             node_id,
             RdmaRequest::BatchRelease {
                 slot_idxs: slots.clone(),
             },
-        );
+        )
+        .await;
         return Err(format!(
             "store full: reserved {} of {} slots",
             slots.len(),
@@ -486,28 +604,38 @@ fn put(
         ));
     }
 
-    let transfer = (|| {
+    let requests = (|| -> Result<Vec<UcxRequest>, String> {
+        let mut requests = Vec::new();
         for ((key, scatter), slot) in keys.iter().zip(&scatters).zip(&slots) {
             let remote = node.slab_base + u64::from(*slot) * u64::from(node.slot_bytes);
-            node.endpoint
-                .put(key.as_ptr() as u64, KEY_BYTES as u64, remote, &node.rkey)?;
+            requests.push(node.endpoint.put(
+                key.as_ptr() as u64,
+                KEY_BYTES as u64,
+                remote,
+                rkey,
+            )?);
             let mut offset = KEY_BYTES as u64;
             for &(address, length) in scatter {
-                node.endpoint
-                    .put(address, length, remote + offset, &node.rkey)?;
+                requests.push(node.endpoint.put(address, length, remote + offset, rkey)?);
                 offset += length;
             }
         }
-        node.endpoint.flush()
+        requests.push(node.endpoint.flush()?);
+        Ok(requests)
     })();
+    let transfer = match requests {
+        Ok(requests) => await_requests(requests, "UCX write").await,
+        Err(error) => Err(error),
+    };
     if let Err(error) = transfer {
         let _ = unary(
-            state,
+            shared,
             node_id,
             RdmaRequest::BatchRelease {
                 slot_idxs: slots.clone(),
             },
-        );
+        )
+        .await;
         return Err(format!("UCX write failed; batch released: {error}"));
     }
 
@@ -516,30 +644,36 @@ fn put(
         .zip(keys)
         .map(|(&slot_idx, key_hash)| CommitEntry { slot_idx, key_hash })
         .collect();
-    match unary(state, node_id, RdmaRequest::BatchCommit { entries })? {
+    match unary(shared, node_id, RdmaRequest::BatchCommit { entries }).await? {
         RdmaResponse::BatchCommitted => Ok(vec![0; slots.len()]),
         other => Err(format!("unexpected commit response: {other:?}")),
     }
 }
 
-fn get(
-    state: &State,
+async fn get(
+    shared: &Shared,
     node_id: u16,
     keys: Vec<Vec<u8>>,
     scatters: Vec<Scatter>,
 ) -> Result<Vec<i32>, String> {
-    let node = node(state, node_id)?;
-    validate_scatters(state, node, &keys, &scatters)?;
+    let node = node(shared, node_id)?;
+    validate_scatters(shared, &node, &keys, &scatters)?;
+    let rkey = node
+        .rkey
+        .as_ref()
+        .ok_or("UCX node is attached for control operations only")?;
     if keys.is_empty() {
         return Ok(Vec::new());
     }
     let slots = match unary(
-        state,
+        shared,
         node_id,
         RdmaRequest::BatchRead {
             key_hashes: keys.clone(),
         },
-    )? {
+    )
+    .await?
+    {
         RdmaResponse::BatchLookedUp { slots } => slots,
         other => return Err(format!("unexpected read response: {other:?}")),
     };
@@ -548,6 +682,7 @@ fn get(
     }
 
     let mut headers = vec![0u8; keys.len() * KEY_BYTES];
+    let mut requests = Vec::new();
     let mut out = vec![0i32; keys.len()];
     for (index, slot) in slots.iter().enumerate() {
         let Some(slot) = slot else {
@@ -555,20 +690,20 @@ fn get(
             continue;
         };
         let remote = node.slab_base + u64::from(*slot) * u64::from(node.slot_bytes);
-        node.endpoint.get(
+        requests.push(node.endpoint.get(
             headers[index * KEY_BYTES..].as_mut_ptr() as u64,
             KEY_BYTES as u64,
             remote,
-            &node.rkey,
-        )?;
+            rkey,
+        )?);
         let mut offset = KEY_BYTES as u64;
         for &(address, length) in &scatters[index] {
-            node.endpoint
-                .get(address, length, remote + offset, &node.rkey)?;
+            requests.push(node.endpoint.get(address, length, remote + offset, rkey)?);
             offset += length;
         }
     }
-    node.endpoint.flush()?;
+    requests.push(node.endpoint.flush()?);
+    await_requests(requests, "UCX read").await?;
     for (index, slot) in slots.iter().enumerate() {
         if slot.is_some() && headers[index * KEY_BYTES..(index + 1) * KEY_BYTES] != keys[index][..]
         {
@@ -578,11 +713,27 @@ fn get(
     Ok(out)
 }
 
-fn reset(state: &State, node_id: u16) -> Result<(), String> {
-    match unary(state, node_id, RdmaRequest::Reset)? {
+async fn reset(shared: &Shared, node_id: u16) -> Result<(), String> {
+    match unary(shared, node_id, RdmaRequest::Reset).await? {
         RdmaResponse::ResetDone => Ok(()),
         other => Err(format!("unexpected reset response: {other:?}")),
     }
+}
+
+fn runtime() -> Result<compio::runtime::Runtime, String> {
+    let mut proactor = compio::driver::ProactorBuilder::new();
+    proactor
+        .capacity(4096)
+        .coop_taskrun(false)
+        .taskrun_flag(false);
+    #[cfg(not(target_os = "macos"))]
+    proactor.thread_pool_limit(0);
+
+    compio::runtime::RuntimeBuilder::new()
+        .with_proactor(proactor)
+        .event_interval(32)
+        .build()
+        .map_err(|e| format!("build compio runtime: {e}"))
 }
 
 fn post(addr: &str, path: &str, body: &[u8]) -> Result<Vec<u8>, String> {

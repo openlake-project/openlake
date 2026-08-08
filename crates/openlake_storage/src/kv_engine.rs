@@ -314,7 +314,7 @@ impl KvEngine {
         client_worker_address: &[u8],
         slot_bytes: u32,
     ) -> Result<openlake_io::rpc::UcxEndpointReply, String> {
-        if slot_bytes <= BLOCK_HASH_BYTES as u32 {
+        if slot_bytes != 0 && slot_bytes <= BLOCK_HASH_BYTES as u32 {
             return Err(format!(
                 "slot_bytes {slot_bytes} must exceed the {BLOCK_HASH_BYTES}-byte key header"
             ));
@@ -332,6 +332,19 @@ impl KvEngine {
             ));
         }
         let endpoint = state.worker.connect(client_worker_address)?;
+
+        if slot_bytes == 0 {
+            let reply = openlake_io::rpc::UcxEndpointReply {
+                protocol_version: openlake_io::rpc::UCX_PROTOCOL_VERSION,
+                worker_address: state.worker.address()?,
+                slab_base: 0,
+                packed_rkey: Vec::new(),
+                slot_bytes: 0,
+                slot_count: 0,
+            };
+            state.peers.insert(client, (epoch, endpoint));
+            return Ok(reply);
+        }
 
         if self.slab.borrow().is_none() {
             let slot_count = (self.capacity_bytes / u64::from(slot_bytes)).max(1) as u32;
@@ -375,7 +388,11 @@ impl KvEngine {
     }
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
-    pub fn send_ucx_control(&self, client: u16, body: &[u8]) -> Result<(), String> {
+    pub fn send_ucx_control(
+        &self,
+        client: u16,
+        body: Vec<u8>,
+    ) -> Result<openlake_io::ucx::UcxRequest, String> {
         let ucx = self.ucx.borrow();
         let state = ucx.as_ref().ok_or("engine is not configured for UCX")?;
         let (_, endpoint) = state

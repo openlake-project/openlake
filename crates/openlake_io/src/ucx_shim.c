@@ -11,6 +11,9 @@
 typedef struct {
     ucp_context_h context;
     ucp_worker_h worker;
+    void *control_request;
+    uint8_t *control_data;
+    size_t control_len;
 } ol_ucx_worker;
 
 typedef struct {
@@ -37,23 +40,32 @@ static int ol_error(char *error, size_t error_len, const char *operation,
     return (int)status;
 }
 
-static int ol_wait(ol_ucx_worker *worker, void *request, char *error,
-                   size_t error_len, const char *operation) {
+static int ol_start(void *request, void **out, char *error, size_t error_len,
+                    const char *operation) {
+    *out = NULL;
     if (request == NULL) {
         return 0;
     }
     if (UCS_PTR_IS_ERR(request)) {
         return ol_error(error, error_len, operation, UCS_PTR_STATUS(request));
     }
+    *out = request;
+    return 0;
+}
 
-    ucs_status_t status;
-    do {
+static void ol_cancel_request(ol_ucx_worker *worker, void *request) {
+    if (request == NULL) {
+        return;
+    }
+    ucs_status_t status = ucp_request_check_status(request);
+    if (status == UCS_INPROGRESS) {
+        ucp_request_cancel(worker->worker, request);
+    }
+    while (status == UCS_INPROGRESS) {
         ucp_worker_progress(worker->worker);
         status = ucp_request_check_status(request);
-    } while (status == UCS_INPROGRESS);
+    }
     ucp_request_free(request);
-    return status == UCS_OK ? 0
-                            : ol_error(error, error_len, operation, status);
 }
 
 int ol_ucx_worker_create(ol_ucx_worker **out, char *error, size_t error_len) {
@@ -100,6 +112,8 @@ void ol_ucx_worker_destroy(ol_ucx_worker *worker) {
     if (worker == NULL) {
         return;
     }
+    ol_cancel_request(worker, worker->control_request);
+    free(worker->control_data);
     ucp_worker_destroy(worker->worker);
     ucp_cleanup(worker->context);
     free(worker);
@@ -265,9 +279,11 @@ void ol_ucx_rkey_destroy(ol_ucx_rkey *rkey) {
     free(rkey);
 }
 
-int ol_ucx_put(ol_ucx_endpoint *endpoint, uint64_t local_address,
-               uint64_t length, uint64_t remote_address,
-               ol_ucx_rkey *rkey, char *error, size_t error_len) {
+int ol_ucx_put_start(ol_ucx_endpoint *endpoint, uint64_t local_address,
+                     uint64_t length, uint64_t remote_address,
+                     ol_ucx_rkey *rkey, void **out, char *error,
+                     size_t error_len) {
+    *out = NULL;
     if (endpoint->status != UCS_OK) {
         return ol_error(error, error_len, "UCX endpoint", endpoint->status);
     }
@@ -277,12 +293,14 @@ int ol_ucx_put(ol_ucx_endpoint *endpoint, uint64_t local_address,
                                 (const void *)(uintptr_t)local_address,
                                 (size_t)length, remote_address, rkey->rkey,
                                 &params);
-    return ol_wait(endpoint->owner, request, error, error_len, "ucp_put_nbx");
+    return ol_start(request, out, error, error_len, "ucp_put_nbx");
 }
 
-int ol_ucx_get(ol_ucx_endpoint *endpoint, uint64_t local_address,
-               uint64_t length, uint64_t remote_address,
-               ol_ucx_rkey *rkey, char *error, size_t error_len) {
+int ol_ucx_get_start(ol_ucx_endpoint *endpoint, uint64_t local_address,
+                     uint64_t length, uint64_t remote_address,
+                     ol_ucx_rkey *rkey, void **out, char *error,
+                     size_t error_len) {
+    *out = NULL;
     if (endpoint->status != UCS_OK) {
         return ol_error(error, error_len, "UCX endpoint", endpoint->status);
     }
@@ -291,23 +309,25 @@ int ol_ucx_get(ol_ucx_endpoint *endpoint, uint64_t local_address,
     void *request = ucp_get_nbx(endpoint->ep, (void *)(uintptr_t)local_address,
                                 (size_t)length, remote_address, rkey->rkey,
                                 &params);
-    return ol_wait(endpoint->owner, request, error, error_len, "ucp_get_nbx");
+    return ol_start(request, out, error, error_len, "ucp_get_nbx");
 }
 
-int ol_ucx_endpoint_flush(ol_ucx_endpoint *endpoint, char *error,
-                          size_t error_len) {
+int ol_ucx_endpoint_flush_start(ol_ucx_endpoint *endpoint, void **out,
+                                char *error, size_t error_len) {
+    *out = NULL;
     if (endpoint->status != UCS_OK) {
         return ol_error(error, error_len, "UCX endpoint", endpoint->status);
     }
     ucp_request_param_t params;
     memset(&params, 0, sizeof(params));
     void *request = ucp_ep_flush_nbx(endpoint->ep, &params);
-    return ol_wait(endpoint->owner, request, error, error_len,
-                   "ucp_ep_flush_nbx");
+    return ol_start(request, out, error, error_len, "ucp_ep_flush_nbx");
 }
 
-int ol_ucx_tag_send(ol_ucx_endpoint *endpoint, const uint8_t *data,
-                    size_t length, char *error, size_t error_len) {
+int ol_ucx_tag_send_start(ol_ucx_endpoint *endpoint, const uint8_t *data,
+                          size_t length, void **out, char *error,
+                          size_t error_len) {
+    *out = NULL;
     if (endpoint->status != UCS_OK) {
         return ol_error(error, error_len, "UCX endpoint", endpoint->status);
     }
@@ -319,8 +339,28 @@ int ol_ucx_tag_send(ol_ucx_endpoint *endpoint, const uint8_t *data,
     memset(&params, 0, sizeof(params));
     void *request = ucp_tag_send_nbx(endpoint->ep, data, length,
                                      OL_UCX_CONTROL_TAG, &params);
-    return ol_wait(endpoint->owner, request, error, error_len,
-                   "ucp_tag_send_nbx");
+    return ol_start(request, out, error, error_len, "ucp_tag_send_nbx");
+}
+
+int ol_ucx_request_poll(ol_ucx_worker *worker, void **request, char *error,
+                        size_t error_len) {
+    if (*request == NULL) {
+        return 0;
+    }
+    ucp_worker_progress(worker->worker);
+    ucs_status_t status = ucp_request_check_status(*request);
+    if (status == UCS_INPROGRESS) {
+        return OL_UCX_NO_MESSAGE;
+    }
+    ucp_request_free(*request);
+    *request = NULL;
+    return status == UCS_OK
+               ? 0
+               : ol_error(error, error_len, "UCX request", status);
+}
+
+void ol_ucx_request_cancel(ol_ucx_worker *worker, void *request) {
+    ol_cancel_request(worker, request);
 }
 
 int ol_ucx_tag_poll(ol_ucx_worker *worker, uint8_t **out, size_t *out_len,
@@ -328,6 +368,28 @@ int ol_ucx_tag_poll(ol_ucx_worker *worker, uint8_t **out, size_t *out_len,
     *out = NULL;
     *out_len = 0;
     ucp_worker_progress(worker->worker);
+
+    if (worker->control_request != NULL) {
+        ucs_status_t status =
+            ucp_request_check_status(worker->control_request);
+        if (status == UCS_INPROGRESS) {
+            return OL_UCX_NO_MESSAGE;
+        }
+        ucp_request_free(worker->control_request);
+        worker->control_request = NULL;
+        if (status != UCS_OK) {
+            free(worker->control_data);
+            worker->control_data = NULL;
+            worker->control_len = 0;
+            return ol_error(error, error_len, "ucp_tag_msg_recv_nbx",
+                            status);
+        }
+        *out = worker->control_data;
+        *out_len = worker->control_len;
+        worker->control_data = NULL;
+        worker->control_len = 0;
+        return 0;
+    }
 
     ucp_tag_recv_info_t info;
     ucp_tag_message_h message = ucp_tag_probe_nb(
@@ -345,13 +407,18 @@ int ol_ucx_tag_poll(ol_ucx_worker *worker, uint8_t **out, size_t *out_len,
     memset(&params, 0, sizeof(params));
     void *request = ucp_tag_msg_recv_nbx(worker->worker, copy, info.length,
                                          message, &params);
-    int status = ol_wait(worker, request, error, error_len,
-                         "ucp_tag_msg_recv_nbx");
-    if (status != 0) {
-        free(copy);
-        return status;
+    if (request == NULL) {
+        *out = copy;
+        *out_len = info.length;
+        return 0;
     }
-    *out = copy;
-    *out_len = info.length;
-    return 0;
+    if (UCS_PTR_IS_ERR(request)) {
+        ucs_status_t status = UCS_PTR_STATUS(request);
+        free(copy);
+        return ol_error(error, error_len, "ucp_tag_msg_recv_nbx", status);
+    }
+    worker->control_request = request;
+    worker->control_data = copy;
+    worker->control_len = info.length;
+    return OL_UCX_NO_MESSAGE;
 }
