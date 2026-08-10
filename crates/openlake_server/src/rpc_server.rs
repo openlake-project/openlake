@@ -851,6 +851,67 @@ pub(crate) async fn dispatch(
                 ))
             }
         }
+
+        UcxAttach {
+            protocol_version,
+            client_node_id,
+            epoch,
+            worker_address,
+            slot_bytes,
+            dry_run,
+        } => {
+            #[cfg(all(feature = "rdma", target_os = "linux"))]
+            {
+                use openlake_io::rpc::{
+                    CLIENT_NODE_ID_BASE, CLIENT_NODE_ID_MAX, UCX_PROTOCOL_VERSION,
+                };
+                let res = match kv {
+                    None => Err("not a kv node".into()),
+                    _ if protocol_version != UCX_PROTOCOL_VERSION => Err(format!(
+                        "UCX protocol version {protocol_version} is unsupported; expected {UCX_PROTOCOL_VERSION}"
+                    )),
+                    _ if !(CLIENT_NODE_ID_BASE..=CLIENT_NODE_ID_MAX).contains(&client_node_id) => {
+                        Err(format!(
+                            "client id {client_node_id} outside [{CLIENT_NODE_ID_BASE}, {CLIENT_NODE_ID_MAX}]"
+                        ))
+                    }
+                    Some(engine) => {
+                        engine.attach_ucx(
+                            client_node_id,
+                            epoch,
+                            &worker_address,
+                            slot_bytes,
+                            dry_run,
+                        )
+                    }
+                };
+                match res {
+                    Ok(reply) => {
+                        tracing::info!(client_node_id, epoch, dry_run, "ucx attach completed");
+                        RpcResponse::UcxAttached(reply)
+                    }
+                    Err(why) if dry_run => {
+                        tracing::debug!(client_node_id, why, "ucx probe not connected");
+                        RpcResponse::UcxAttached(openlake_io::rpc::UcxEndpointReply::disconnected())
+                    }
+                    Err(why) => {
+                        tracing::warn!(client_node_id, why, "ucx attach denied");
+                        RpcResponse::UcxAttachDenied(why)
+                    }
+                }
+            }
+            #[cfg(not(all(feature = "rdma", target_os = "linux")))]
+            {
+                let _ = (&kv, protocol_version, epoch, &worker_address, slot_bytes);
+                if dry_run {
+                    RpcResponse::UcxAttached(openlake_io::rpc::UcxEndpointReply::disconnected())
+                } else {
+                    RpcResponse::UcxAttachDenied(format!(
+                        "node {client_node_id} tried UCX attach on a server built without RDMA transports"
+                    ))
+                }
+            }
+        }
     }
 }
 

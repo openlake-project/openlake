@@ -19,20 +19,8 @@ rpc_addr   = "0.0.0.0:9400"
 disk_count = 0
 
 [kv_slab]
-# fraction of system RAM for the KV slab (floored to whole GiB); wins over capacity_gb
-cpu_ram_frac     = 0.5
-reserve_ttl_secs = 60
+capacity_gb          = 1
+reserve_ttl_secs     = 60
 
 [rdma]
-backend      = "dct"
-self_node_id = 0
-dev_name     = "mlx5_0"
-dc_key       = 4919
-srq_depth    = 4096
-max_send_wr  = 256
-peer_credit  = 4
-max_clients  = 512
-
-[rdma.qos]
-traffic_class = 0
-service_level = 0
+backend = "ucx"

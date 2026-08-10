@@ -61,6 +61,15 @@ pub struct KvEngine {
     backend: crate::kv_backend::KvBackend,
     #[cfg(all(feature = "rdma", target_os = "linux"))]
     on_attach: RefCell<Option<Box<dyn Fn(u16, u16)>>>,
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
+    ucx: RefCell<Option<UcxState>>,
+}
+
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+struct UcxState {
+    worker: openlake_io::ucx::UcxWorker,
+    memory: Option<openlake_io::ucx::UcxMemory>,
+    peers: HashMap<u16, (u64, openlake_io::ucx::UcxEndpoint)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -153,6 +162,8 @@ impl KvEngine {
             backend: crate::kv_backend::KvBackend::new(0),
             #[cfg(all(feature = "rdma", target_os = "linux"))]
             on_attach: RefCell::new(None),
+            #[cfg(all(feature = "rdma", target_os = "linux"))]
+            ucx: RefCell::new(None),
         }
     }
 
@@ -173,6 +184,30 @@ impl KvEngine {
             registry: Some(registry),
             backend: crate::kv_backend::KvBackend::new(max_clients),
             on_attach: RefCell::new(None),
+            ucx: RefCell::new(None),
+        }
+    }
+
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
+    pub fn new_ucx(
+        worker: openlake_io::ucx::UcxWorker,
+        capacity_bytes: u64,
+        reserve_ttl: Duration,
+    ) -> Self {
+        Self {
+            slab: RefCell::new(None),
+            capacity_bytes,
+            metrics: Arc::new(KvEngineMetrics::new(capacity_bytes)),
+            reserve_ttl,
+            dev: None,
+            registry: None,
+            backend: crate::kv_backend::KvBackend::new(0),
+            on_attach: RefCell::new(None),
+            ucx: RefCell::new(Some(UcxState {
+                worker,
+                memory: None,
+                peers: HashMap::new(),
+            })),
         }
     }
 
@@ -272,6 +307,119 @@ impl KvEngine {
     }
 
     #[cfg(all(feature = "rdma", target_os = "linux"))]
+    pub fn attach_ucx(
+        &self,
+        client: u16,
+        epoch: u64,
+        client_worker_address: &[u8],
+        slot_bytes: u32,
+        dry_run: bool,
+    ) -> Result<openlake_io::rpc::UcxEndpointReply, String> {
+        if slot_bytes != 0 && slot_bytes <= BLOCK_HASH_BYTES as u32 {
+            return Err(format!(
+                "slot_bytes {slot_bytes} must exceed the {BLOCK_HASH_BYTES}-byte key header"
+            ));
+        }
+
+        let mut ucx = self.ucx.borrow_mut();
+        let state = ucx.as_mut().ok_or("engine is not configured for UCX")?;
+        if dry_run {
+            let endpoint = state.worker.connect(client_worker_address)?;
+            return Ok(openlake_io::rpc::UcxEndpointReply {
+                protocol_version: openlake_io::rpc::UCX_PROTOCOL_VERSION,
+                is_connected: true,
+                worker_address: state.worker.address()?,
+                slab_base: 0,
+                packed_rkey: Vec::new(),
+                slot_bytes: 0,
+                slot_count: 0,
+                capabilities: endpoint.transports()?,
+            });
+        }
+        if state
+            .peers
+            .get(&client)
+            .is_some_and(|(held_epoch, _)| *held_epoch > epoch)
+        {
+            return Err(format!(
+                "client {client} has a newer attached epoch than {epoch}"
+            ));
+        }
+        let endpoint = state.worker.connect(client_worker_address)?;
+        if slot_bytes == 0 {
+            let reply = openlake_io::rpc::UcxEndpointReply {
+                protocol_version: openlake_io::rpc::UCX_PROTOCOL_VERSION,
+                is_connected: true,
+                worker_address: state.worker.address()?,
+                slab_base: 0,
+                packed_rkey: Vec::new(),
+                slot_bytes: 0,
+                slot_count: 0,
+                capabilities: Vec::new(),
+            };
+            state.peers.insert(client, (epoch, endpoint));
+            return Ok(reply);
+        }
+
+        if self.slab.borrow().is_none() {
+            let slot_count = (self.capacity_bytes / u64::from(slot_bytes)).max(1) as u32;
+            let slab = HostSlab::new(slot_bytes, slot_count, self.reserve_ttl)
+                .map_err(|e| format!("UCX slab create: {e}"))?;
+            tracing::info!(
+                "Handshake for UCX slab from client {client}, serving demand of {} per block, {} leased capacity, {} blocks.",
+                human_bytes(u64::from(slot_bytes)),
+                human_bytes(self.capacity_bytes),
+                slot_count,
+            );
+            *self.slab.borrow_mut() = Some(Rc::new(slab));
+        }
+
+        let slab = self.slab.borrow();
+        let slab = slab.as_ref().expect("UCX slab created above");
+        if slab.slot_bytes() != slot_bytes {
+            return Err(format!(
+                "slot size mismatch: slab uses {}, client requested {slot_bytes}",
+                slab.slot_bytes()
+            ));
+        }
+        if state.memory.is_none() {
+            let base = slab
+                .base_address()
+                .ok_or("UCX requires a host-addressable slab")?;
+            state.memory = Some(state.worker.register(base, slab.byte_len())?);
+            self.metrics.update(&**slab);
+        }
+        let memory = state.memory.as_ref().expect("UCX memory registered above");
+        let reply = openlake_io::rpc::UcxEndpointReply {
+            protocol_version: openlake_io::rpc::UCX_PROTOCOL_VERSION,
+            is_connected: true,
+            worker_address: state.worker.address()?,
+            slab_base: slab.base_address().expect("host slab has an address"),
+            packed_rkey: memory.packed_rkey()?,
+            slot_bytes: slab.slot_bytes(),
+            slot_count: slab.slot_count(),
+            capabilities: Vec::new(),
+        };
+        state.peers.insert(client, (epoch, endpoint));
+        Ok(reply)
+    }
+
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
+    pub fn send_ucx_control(
+        &self,
+        client: u16,
+        body: Vec<u8>,
+    ) -> Result<openlake_io::ucx::UcxRequest, String> {
+        let ucx = self.ucx.borrow();
+        let state = ucx.as_ref().ok_or("engine is not configured for UCX")?;
+        let (_, endpoint) = state
+            .peers
+            .get(&client)
+            .ok_or_else(|| format!("UCX client {client} is not attached"))?;
+        endpoint.send_control(body)
+    }
+
+    #[cfg(all(feature = "rdma", target_os = "linux"))]
     pub fn set_on_attach(&self, f: impl Fn(u16, u16) + 'static) {
         *self.on_attach.borrow_mut() = Some(Box::new(f));
     }
@@ -335,9 +483,9 @@ impl KvEngine {
     #[cfg(all(feature = "rdma", target_os = "linux"))]
     pub fn handle(
         &self,
-        req: openlake_io::rdma::wire::RdmaRequest,
-    ) -> openlake_io::rdma::wire::RdmaResponse {
-        use openlake_io::rdma::wire::{RdmaRequest::*, RdmaResponse};
+        req: openlake_io::kv_wire::RdmaRequest,
+    ) -> openlake_io::kv_wire::RdmaResponse {
+        use openlake_io::kv_wire::{RdmaRequest::*, RdmaResponse};
         use openlake_io::rpc::{Response, WireError};
 
         let slab = self.slab.borrow();
@@ -389,6 +537,14 @@ impl KvEngine {
             self.metrics.update(&**slab);
         }
         response
+    }
+}
+
+impl Drop for KvEngine {
+    fn drop(&mut self) {
+        #[cfg(all(feature = "rdma", target_os = "linux"))]
+        self.ucx.get_mut().take();
+        self.slab.get_mut().take();
     }
 }
 

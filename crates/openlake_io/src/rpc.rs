@@ -230,6 +230,15 @@ pub enum Request {
         endpoints: Vec<LocalRdmaEndpoint>,
         slot_bytes: u32,
     },
+
+    UcxAttach {
+        protocol_version: u16,
+        client_node_id: u16,
+        epoch: u64,
+        worker_address: Vec<u8>,
+        slot_bytes: u32,
+        dry_run: bool,
+    },
 }
 
 pub const CLIENT_NODE_ID_BASE: u16 = 2_048;
@@ -260,6 +269,43 @@ pub enum Response {
     RdmaAttached(RdmaEndpointsReply),
     RdmaAttachDenied(String),
     Err(WireError),
+    UcxAttached(UcxEndpointReply),
+    UcxAttachDenied(String),
+}
+
+pub const UCX_PROTOCOL_VERSION: u16 = 3;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UcxTransport {
+    pub transport: String,
+    pub device: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UcxEndpointReply {
+    pub protocol_version: u16,
+    pub is_connected: bool,
+    pub worker_address: Vec<u8>,
+    pub slab_base: u64,
+    pub packed_rkey: Vec<u8>,
+    pub slot_bytes: u32,
+    pub slot_count: u32,
+    pub capabilities: Vec<UcxTransport>,
+}
+
+impl UcxEndpointReply {
+    pub fn disconnected() -> Self {
+        Self {
+            protocol_version: UCX_PROTOCOL_VERSION,
+            is_connected: false,
+            worker_address: Vec::new(),
+            slab_base: 0,
+            packed_rkey: Vec::new(),
+            slot_bytes: 0,
+            slot_count: 0,
+            capabilities: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,4 +381,44 @@ pub fn decode<T: for<'a> Deserialize<'a>>(body: &[u8]) -> Result<T, IoError> {
     let (v, _) = bincode::serde::decode_from_slice::<T, _>(body, bincode::config::standard())
         .map_err(|e| IoError::Decode(e.to_string()))?;
     Ok(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ucx_dry_attach_wire_round_trip() {
+        let request = Request::UcxAttach {
+            protocol_version: UCX_PROTOCOL_VERSION,
+            client_node_id: CLIENT_NODE_ID_BASE,
+            epoch: 7,
+            worker_address: vec![1, 2, 3],
+            slot_bytes: 0,
+            dry_run: true,
+        };
+        let Request::UcxAttach { dry_run, .. } = decode(&encode(&request).unwrap()).unwrap() else {
+            unreachable!()
+        };
+        assert!(dry_run);
+
+        let reply = Response::UcxAttached(UcxEndpointReply {
+            protocol_version: UCX_PROTOCOL_VERSION,
+            is_connected: true,
+            worker_address: Vec::new(),
+            slab_base: 0,
+            packed_rkey: Vec::new(),
+            slot_bytes: 0,
+            slot_count: 0,
+            capabilities: vec![UcxTransport {
+                transport: "rc_mlx5".into(),
+                device: "mlx5_0:1".into(),
+            }],
+        });
+        let Response::UcxAttached(reply) = decode(&encode(&reply).unwrap()).unwrap() else {
+            unreachable!()
+        };
+        assert!(reply.is_connected);
+        assert_eq!(reply.capabilities[0].transport, "rc_mlx5");
+    }
 }

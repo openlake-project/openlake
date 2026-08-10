@@ -276,6 +276,32 @@ impl RemoteBackend {
             other => Err(unexpected(other)),
         }
     }
+
+    /// Create a temporary UCX endpoint and return its selected transport lanes.
+    /// The server does not allocate a slab, register memory, or retain the peer.
+    pub async fn ucx_dry_attach(
+        &self,
+        client_node_id: u16,
+        epoch: u64,
+        worker_address: Vec<u8>,
+    ) -> IoResult<rpc::UcxEndpointReply> {
+        match self
+            .unary(Request::UcxAttach {
+                protocol_version: rpc::UCX_PROTOCOL_VERSION,
+                client_node_id,
+                epoch,
+                worker_address,
+                slot_bytes: 0,
+                dry_run: true,
+            })
+            .await?
+        {
+            Response::UcxAttached(reply) => Ok(reply),
+            Response::UcxAttachDenied(why) => Err(IoError::Io(std::io::Error::other(why))),
+            Response::Err(error) => Err(error.into()),
+            other => Err(unexpected(other)),
+        }
+    }
 }
 
 // `call_unit!` / `call_typed!` are thin wrappers that the 22-method

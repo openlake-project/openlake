@@ -3,6 +3,8 @@ mod client;
 mod protocol;
 mod shm_local;
 mod transport;
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+mod ucx_protocol;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -12,6 +14,8 @@ use crate::client::{KvClient, StoreClient};
 use crate::protocol::RdmaProtocol;
 use crate::shm_local::ShmLocalProtocol;
 use crate::transport::Protocol;
+#[cfg(all(feature = "rdma", target_os = "linux"))]
+use crate::ucx_protocol::UcxProtocol;
 
 #[pyclass(name = "Client")]
 struct PyClient {
@@ -26,6 +30,15 @@ impl PyClient {
         py.detach(|| {
             let proto: Box<dyn Protocol> = if device == "local" {
                 Box::new(ShmLocalProtocol::new()?)
+            } else if device == "ucx" {
+                #[cfg(all(feature = "rdma", target_os = "linux"))]
+                {
+                    Box::new(UcxProtocol::new(client_id)?)
+                }
+                #[cfg(not(all(feature = "rdma", target_os = "linux")))]
+                {
+                    return Err("device \"ucx\" requires the RDMA-enabled package on Linux".into());
+                }
             } else {
                 #[cfg(all(feature = "rdma", target_os = "linux"))]
                 {

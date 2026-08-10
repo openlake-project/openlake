@@ -87,7 +87,7 @@ async fn serve_admin_config(cfg: Arc<Config>) -> axum::Json<Config> {
     let mut c = (*cfg).clone();
     c.self_id = 0;
     if let Some(r) = c.rdma.as_mut() {
-        r.self_node_id = 0;
+        r.self_node_id = r.self_node_id.map(|_| 0);
     }
     for cr in &mut c.credentials {
         cr.secret_key = "***".into();

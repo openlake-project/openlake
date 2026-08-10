@@ -111,6 +111,10 @@ pub struct Config {
     /// empty credential list so it cannot accidentally run open.
     pub credentials: Vec<Credential>,
     pub nodes: Vec<NodeAddr>,
+    /// Ordered KV-agent RPC endpoints used for peer discovery and telemetry.
+    /// KV engines remain standalone; this list does not create storage peers.
+    #[serde(default)]
+    pub kv_agents: Vec<SocketAddr>,
     /// Optional TLS for the customer-facing S3 listener. When absent
     /// the listener serves plaintext HTTP/1.1; when present it serves
     /// only HTTPS with the supplied cert chain + key.
@@ -138,7 +142,7 @@ pub struct Config {
     #[serde(default)]
     pub mode: Mode,
     #[serde(default)]
-    pub transport: TransportMode, // h2 (default) | rdma
+    pub transport: TransportMode,
     #[serde(default)]
     pub rdma: Option<RdmaToml>, // required when transport = rdma
     #[serde(default)]
@@ -203,6 +207,14 @@ pub enum TransportMode {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum RdmaBackend {
+    #[default]
+    Dct,
+    Ucx,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum Mode {
     #[default]
     Storage,
@@ -211,10 +223,16 @@ pub enum Mode {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RdmaToml {
-    pub self_node_id: u16,
-    pub dev_name: String,
-    pub dc_key: u64,
-    pub qos: RdmaQosToml,
+    #[serde(default)]
+    pub backend: RdmaBackend,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_node_id: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dev_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dc_key: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qos: Option<RdmaQosToml>,
     #[serde(default = "default_bulk_pool_cap")]
     pub bulk_pool_cap: usize,
     #[serde(default = "default_network_timeout_secs")]
@@ -347,8 +365,42 @@ impl Config {
             if cfg.nodes.len() != 1 {
                 anyhow::bail!("mode = \"kv\" nodes are standalone; list only this node");
             }
+            if cfg.kv_agents.len() > u16::MAX as usize + 1 {
+                anyhow::bail!(
+                    "kv_agents contains more than {} addressable nodes",
+                    u16::MAX as usize + 1
+                );
+            }
+            if !cfg.kv_agents.is_empty() && cfg.self_id as usize >= cfg.kv_agents.len() {
+                anyhow::bail!(
+                    "self_id {} is outside the ordered kv_agents list ({} entries)",
+                    cfg.self_id,
+                    cfg.kv_agents.len(),
+                );
+            }
+            let unique_agents = cfg
+                .kv_agents
+                .iter()
+                .collect::<std::collections::HashSet<_>>();
+            if unique_agents.len() != cfg.kv_agents.len() {
+                anyhow::bail!("kv_agents contains duplicate RPC endpoints");
+            }
+        } else if !cfg.kv_agents.is_empty() {
+            anyhow::bail!("kv_agents is only valid when mode = \"kv\"");
         }
-        if let Some(r) = &cfg.rdma {
+        if let Some(r) = cfg.rdma.as_ref().filter(|r| r.backend == RdmaBackend::Dct) {
+            if r.self_node_id.is_none() {
+                anyhow::bail!("[rdma] self_node_id is required for backend = \"dct\"");
+            }
+            if r.dev_name.as_deref().is_none_or(str::is_empty) {
+                anyhow::bail!("[rdma] dev_name is required for backend = \"dct\"");
+            }
+            if r.dc_key.is_none() {
+                anyhow::bail!("[rdma] dc_key is required for backend = \"dct\"");
+            }
+            if r.qos.is_none() {
+                anyhow::bail!("[rdma.qos] is required for backend = \"dct\"");
+            }
             if r.peer_credit == 0 {
                 anyhow::bail!("[rdma] peer_credit must be >= 1");
             }
@@ -462,10 +514,14 @@ impl Config {
             anyhow::bail!("transport = \"rdma\" requires an [rdma] config block");
         }
         if cfg.transport == TransportMode::Rdma {
+            let rdma = cfg.rdma.as_ref().expect("checked above");
             if !cfg!(all(feature = "rdma", target_os = "linux")) {
                 anyhow::bail!(
                     "transport = \"rdma\" requires the `rdma` cargo feature on a Linux build"
                 );
+            }
+            if rdma.backend == RdmaBackend::Ucx && cfg.mode != Mode::Kv {
+                anyhow::bail!("[rdma] backend = \"ucx\" currently supports mode = \"kv\" only");
             }
         }
         Ok(cfg)
@@ -520,5 +576,59 @@ mod kv_slab_tests {
             bytes,
             (total_system_ram_bytes().unwrap() as f64 * 0.5) as u64 / GIB * GIB
         );
+    }
+
+    #[test]
+    fn rdma_backend_defaults_to_dct() {
+        let rdma: RdmaToml = toml::from_str(
+            r#"
+self_node_id = 0
+dev_name = "mlx5_0"
+dc_key = 4919
+qos = { traffic_class = 0, service_level = 0 }
+"#,
+        )
+        .unwrap();
+        assert_eq!(rdma.backend, RdmaBackend::Dct);
+    }
+
+    #[test]
+    fn ucx_backend_does_not_require_dct_fields() {
+        let rdma: RdmaToml = toml::from_str("backend = \"ucx\"").unwrap();
+        assert_eq!(rdma.backend, RdmaBackend::Ucx);
+        assert!(rdma.dev_name.is_none());
+    }
+
+    #[test]
+    fn kv_mode_retains_the_ordered_agent_reference_list() {
+        let cfg = Config::from_toml(
+            r#"
+self_id = 1
+mode = "kv"
+rpc_addr = "0.0.0.0:9400"
+s3_addr = "0.0.0.0:9000"
+data_dirs = []
+set_drive_count = 1
+default_parity_count = 1
+region = "us-east-1"
+kv_agents = ["10.0.0.1:9400", "10.0.0.2:9400"]
+
+[[credentials]]
+access_key = "test"
+secret_key = "test"
+
+[[nodes]]
+id = 1
+rpc_addr = "0.0.0.0:9400"
+disk_count = 0
+
+[kv_slab]
+capacity_gb = 1
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(cfg.kv_agents[0], "10.0.0.1:9400".parse().unwrap());
+        assert_eq!(cfg.kv_agents[1], "10.0.0.2:9400".parse().unwrap());
     }
 }
