@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { aggregateOpenLakeTokensServed } from "../app/control-plane-data.ts";
+import { aggregateNodeHistory, aggregateOpenLakeTokensServed } from "../app/control-plane-data.ts";
 
 function snapshot(options = {}) {
   const servedBlocks = Object.hasOwn(options, "servedBlocks") ? options.servedBlocks : 5;
@@ -71,4 +71,53 @@ test("does not guess when an engine reports conflicting block sizes", () => {
     aggregateOpenLakeTokensServed(snapshot({ blockSizes: [16, 32] })),
     null,
   );
+});
+
+test("aligns and sums the newest node history buckets as per-minute rates", () => {
+  const fleet = snapshot();
+  fleet.nodes[0].openlake.openlake.history = {
+    interval_seconds: 30,
+    bucket_count: 3,
+    samples_collected: 3,
+    requests_served: [1, 2, 3],
+    cached_tokens_served: [10, 20, 30],
+  };
+  const peer = structuredClone(fleet.nodes[0]);
+  peer.id = 1;
+  peer.openlake.node_id = 1;
+  peer.openlake.openlake.history = {
+    interval_seconds: 30,
+    bucket_count: 2,
+    samples_collected: 2,
+    requests_served: [4, 5],
+    cached_tokens_served: [40, 50],
+  };
+  fleet.nodes.push(peer);
+
+  assert.deepEqual(aggregateNodeHistory(fleet, 1, 0), {
+    cachedTokensPerMinute: [120, 160],
+    intervalSeconds: 30,
+    requestsPerMinute: [12, 16],
+    windowMinutes: 1,
+  });
+});
+
+test("grows the history window from ten minutes to the full retained day", () => {
+  const fleet = snapshot();
+  fleet.nodes[0].openlake.openlake.history = {
+    interval_seconds: 30,
+    bucket_count: 2880,
+    samples_collected: 3,
+    requests_served: Array(2880).fill(0),
+    cached_tokens_served: Array(2880).fill(0),
+  };
+
+  const startup = aggregateNodeHistory(fleet);
+  assert.equal(startup.windowMinutes, 10);
+  assert.equal(startup.requestsPerMinute.length, 20);
+
+  fleet.nodes[0].openlake.openlake.history.samples_collected = 2880;
+  const established = aggregateNodeHistory(fleet);
+  assert.equal(established.windowMinutes, 24 * 60);
+  assert.equal(established.requestsPerMinute.length, 2880);
 });

@@ -1,13 +1,13 @@
 "use client";
 
-import { Fragment, type CSSProperties, type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { activeNodes, formatBytes, type ControlPlaneNode, type HardwareSnapshot, useControlPlaneSnapshot } from "../control-plane-data";
 import { ControlPlaneStatus, TelemetryUnavailable } from "../control-plane-status";
 import { AppShell } from "../shell";
 import { brandFromCpuModel, brandFromVendor } from "./telemetry-brand";
 import { TelemetryMark } from "./telemetry-mark";
-import { buildTopologyGroups, pcieDeviceForAddress, shouldRenderAsHostDeviceRail, type TopologyBridge, type TopologyGpu, type TopologyGroup, type TopologyNic } from "./topology-model";
+import { buildFabricTopology, buildTopologyGroups, pcieDeviceForAddress, shouldRenderAsHostDeviceRail, type FabricBackbone, type TopologyBridge, type TopologyGpu, type TopologyGroup, type TopologyNic } from "./topology-model";
 
 type InspectorRecord = {
   nodeId: number;
@@ -23,6 +23,8 @@ type InspectorAttribute = [string, string | number | null | undefined];
 const BASE_NODE_WIDTH = 1244;
 const NODE_HEIGHT = 850;
 const NODE_GAP = 120;
+const FABRIC_GROUP_GAP = 180;
+const FABRIC_SPINE_HEIGHT = 148;
 const HOST_DEVICE_RAIL_HEIGHT = 64;
 
 function topologyNodeWidth(hardware: HardwareSnapshot) {
@@ -40,8 +42,10 @@ function fitTopology(viewport: HTMLDivElement | null, stageWidth: number, stageH
   updateZoom(next);
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-      viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
-      viewport.scrollTop = Math.max(0, (viewport.scrollHeight - viewport.clientHeight) / 2);
+      const stage = viewport.querySelector<HTMLElement>(".operator-stage-space");
+      if (!stage) return;
+      viewport.scrollLeft = Math.max(0, stage.offsetLeft + (stage.offsetWidth - viewport.clientWidth) / 2);
+      viewport.scrollTop = Math.max(0, stage.offsetTop + (stage.offsetHeight - viewport.clientHeight) / 2);
     });
   });
 }
@@ -139,6 +143,38 @@ function DeviceInspector({ record, close }: { record: InspectorRecord; close: ()
       <dl>{record.attributes.map(([label, entry]) => <div key={label}><dt>{label}</dt><dd>{entry}</dd></div>)}</dl>
     </section>
   </aside>;
+}
+
+function FabricSpine({ backbone, columns, nodeWidth, width }: {
+  backbone: FabricBackbone;
+  columns: number;
+  nodeWidth: number;
+  width: number;
+}) {
+  const title = backbone.kind === "rdma"
+    ? "RDMA FABRIC"
+    : backbone.kind === "tcp" ? "TCP DATA PLANE" : "MULTI-TRANSPORT FABRIC";
+  return <div className={`fabric-spine is-${backbone.kind}`} style={{ width }} aria-label={`${title} connecting nodes ${backbone.nodeIds.join(", ")}`}>
+    <div className="fabric-spine-track"/>
+    {Array.from({ length: columns }, (_, column) => <i
+      className="fabric-spine-port"
+      key={column}
+      style={{ left: column * (nodeWidth + NODE_GAP) + nodeWidth / 2 }}
+    />)}
+    <div className="fabric-spine-identity">
+      <span>OBSERVED BACKBONE</span>
+      <strong>{title}</strong>
+      <small>{backbone.links.length} RECIPROCAL PATH{backbone.links.length === 1 ? "" : "S"} · {backbone.transports.map(transport => transport.toUpperCase()).join(" + ")}</small>
+    </div>
+  </div>;
+}
+
+function UnverifiedFabric({ count }: { count: number }) {
+  return <div className="fabric-unverified" aria-label="No reciprocal fabric path observed">
+    <span>FABRIC DISCOVERY</span>
+    <strong>NO RECIPROCAL DATA PATH OBSERVED</strong>
+    <small>{count ? `${count} ONE-SIDED OBSERVATION${count === 1 ? "" : "S"} HELD OUT OF THE MAP` : "WAITING FOR PEER CAPABILITIES"}</small>
+  </div>;
 }
 
 function NodeDiagram({ node, hardware, select, selected, width, height }: {
@@ -378,7 +414,7 @@ function NodeDiagram({ node, hardware, select, selected, width, height }: {
         <strong>NIC · {network.name}</strong>
       </span>
       <span className="locality-primary-metric nic-primary-metric">
-        <strong>{primaryMetric}</strong>
+        <strong className={bandwidth ? undefined : "is-status"}>{primaryMetric}</strong>
         <em>{bandwidth ? "LINK BANDWIDTH" : "LINK STATE"}</em>
       </span>
       <small>{network.infiniband_device ?? network.driver ?? network.pci_address ?? "HOST INTERFACE"}</small>
@@ -412,7 +448,7 @@ function NodeDiagram({ node, hardware, select, selected, width, height }: {
               </span>
               <span className="locality-device-model">{gpu.name}</span>
               <span className="locality-primary-metric gpu-primary-metric">
-                <strong>{optionalBytes(gpu.memory_total_bytes)}</strong>
+                <strong className={gpu.memory_total_bytes === null ? "is-status" : undefined}>{optionalBytes(gpu.memory_total_bytes)}</strong>
                 <em>{gpu.vendor === "Apple" ? "UNIFIED MEMORY" : "HBM"}</em>
               </span>
               <small>{pciDevice ? pcieCapability(pciDevice, true) : "LINK NOT REPORTED"}</small>
@@ -547,10 +583,46 @@ function HardwareTopology({ nodes }: { nodes: ControlPlaneNode[] }) {
   const [selected, setSelected] = useState<InspectorRecord | null>(null);
   const nodeWidth = Math.max(BASE_NODE_WIDTH, ...available.map(({ hardware }) => topologyNodeWidth(hardware)));
   const nodeHeight = Math.max(NODE_HEIGHT, ...available.map(({ hardware }) => topologyNodeHeight(hardware)));
-  const stageWidth = Math.max(nodeWidth, available.length * nodeWidth + Math.max(0, available.length - 1) * NODE_GAP);
+  const fabric = buildFabricTopology(available.map(({ node }) => node));
+  const availableById = new Map(available.map(entry => [entry.node.id, entry]));
+  const groups: Array<{ id: string; nodeIds: number[]; backbone: FabricBackbone | null }> = [
+    ...fabric.backbones.map(backbone => ({ id: backbone.id, nodeIds: backbone.nodeIds, backbone })),
+    ...(fabric.isolatedNodeIds.length ? [{ id: "fabric-unverified", nodeIds: fabric.isolatedNodeIds, backbone: null }] : []),
+  ];
+  const placements: Array<{
+    id: number;
+    left: number;
+    top: number;
+    side: "above" | "below";
+    backbone: FabricBackbone | null;
+  }> = [];
+  const rails: Array<{ id: string; left: number; width: number; columns: number; backbone: FabricBackbone | null }> = [];
+  let cursor = 0;
+  for (const group of groups) {
+    const columns = Math.max(1, Math.ceil(group.nodeIds.length / 2));
+    const width = columns * nodeWidth + Math.max(0, columns - 1) * NODE_GAP;
+    const splitRows = Boolean(group.backbone) || group.nodeIds.length > 2;
+    group.nodeIds.forEach((id, index) => {
+      const side = splitRows && index % 2 ? "below" : "above";
+      const column = splitRows ? Math.floor(index / 2) : index;
+      placements.push({
+        id,
+        left: cursor + column * (nodeWidth + NODE_GAP),
+        top: side === "below" ? nodeHeight + FABRIC_SPINE_HEIGHT : 0,
+        side,
+        backbone: group.backbone,
+      });
+    });
+    if (group.backbone || splitRows) rails.push({ id: group.id, left: cursor, width, columns, backbone: group.backbone });
+    cursor += width + FABRIC_GROUP_GAP;
+  }
+  const stageWidth = Math.max(nodeWidth, cursor ? cursor - FABRIC_GROUP_GAP : nodeWidth);
+  const stageHeight = placements.some(placement => placement.side === "below")
+    ? nodeHeight * 2 + FABRIC_SPINE_HEIGHT
+    : nodeHeight;
 
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
-  useEffect(() => { fitTopology(canvas.current, stageWidth, nodeHeight, setZoom); }, [stageWidth, nodeHeight]);
+  useEffect(() => { fitTopology(canvas.current, stageWidth, stageHeight, setZoom); }, [stageWidth, stageHeight]);
   useEffect(() => {
     const viewport = canvas.current;
     if (!viewport) return undefined;
@@ -590,14 +662,26 @@ function HardwareTopology({ nodes }: { nodes: ControlPlaneNode[] }) {
   return <div className="node-console-page">
     <div className="signal-canvas" ref={canvas} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}>
       <div className="operator-scroll-pad">
-        <div className="operator-stage-space" style={{ width: stageWidth * zoom, height: nodeHeight * zoom }}>
-          <div className="operator-stage" style={{ width: stageWidth, height: nodeHeight, transform: `scale(${zoom})` }}>
-            <div className="topology-node-row">
-              {available.map(({ node, hardware }, index) => <Fragment key={node.id}>
-                <NodeDiagram node={node} hardware={hardware} select={setSelected} selected={selected} width={nodeWidth} height={nodeHeight}/>
-                {index < available.length - 1 ? <div className="node-interconnect"><span>INFINIBAND FABRIC</span><i/></div> : null}
-              </Fragment>)}
-            </div>
+        <div className="operator-stage-space" style={{ width: stageWidth * zoom, height: stageHeight * zoom }}>
+          <div className="operator-stage" style={{ width: stageWidth, height: stageHeight, transform: `scale(${zoom})` }}>
+            {rails.map(rail => <div className="fabric-spine-slot" style={{ left: rail.left, top: nodeHeight, width: rail.width, height: FABRIC_SPINE_HEIGHT }} key={rail.id}>
+              {rail.backbone
+                ? <FabricSpine backbone={rail.backbone} columns={rail.columns} nodeWidth={nodeWidth} width={rail.width}/>
+                : <UnverifiedFabric count={fabric.unverifiedLinkCount}/>}
+            </div>)}
+            {placements.map(placement => {
+              const entry = availableById.get(placement.id);
+              if (!entry) return null;
+              const devices = placement.backbone?.devicesByNode[placement.id] ?? [];
+              return <div
+                className={`fabric-node-slot is-${placement.side} ${placement.backbone ? "is-connected" : "is-unverified"}`}
+                style={{ left: placement.left, top: placement.top, width: nodeWidth, height: nodeHeight, "--fabric-spine-height": `${FABRIC_SPINE_HEIGHT}px` } as CSSProperties}
+                key={placement.id}
+              >
+                <NodeDiagram node={entry.node} hardware={entry.hardware} select={setSelected} selected={selected} width={nodeWidth} height={nodeHeight}/>
+                {placement.backbone ? <span className="fabric-node-drop"><i/><b>{devices.join(" + ") || "SELECTED UCX LANE"}</b></span> : null}
+              </div>;
+            })}
           </div>
         </div>
       </div>
@@ -606,7 +690,7 @@ function HardwareTopology({ nodes }: { nodes: ControlPlaneNode[] }) {
       <button onClick={() => setZoom(current => Math.max(0.35, current - 0.1))} aria-label="Zoom out">−</button>
       <span className="zoom-value">{Math.round(zoom * 100)}%</span>
       <button onClick={() => setZoom(current => Math.min(1.4, current + 0.1))} aria-label="Zoom in">+</button>
-      <button className="zoom-fit" onClick={() => fitTopology(canvas.current, stageWidth, nodeHeight, setZoom)}>FIT</button>
+      <button className="zoom-fit" onClick={() => fitTopology(canvas.current, stageWidth, stageHeight, setZoom)}>FIT</button>
     </div>
     {selected ? <DeviceInspector record={selected} close={() => setSelected(null)}/> : null}
   </div>;

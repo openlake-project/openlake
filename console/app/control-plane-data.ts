@@ -18,6 +18,33 @@ export type KvCacheSnapshot = {
   served_blocks?: number;
 };
 
+export type NodeTelemetryHistory = {
+  interval_seconds: number;
+  bucket_count: number;
+  samples_collected?: number;
+  requests_served: number[];
+  cached_tokens_served: number[];
+};
+
+export type PeerDiscoverySnapshot = {
+  node_id: number;
+  rpc_addr: string;
+  status: string;
+  latency_ms: number | null;
+  complete?: boolean | null;
+  is_connected?: boolean;
+  capabilities?: Array<{ transport: string; device: string }>;
+  rdma_endpoints?: Array<{
+    runtime_id: number;
+    gid: string;
+    lid: number;
+    dct_number: number;
+    kv_slab_ready: boolean;
+    slot_bytes: number | null;
+  }>;
+  error: string | null;
+};
+
 export type HardwareSnapshot = {
   schema_version: string;
   collected_at_unix_ms: number;
@@ -153,6 +180,8 @@ export type ControlPlaneNode = {
       transport: string;
       data_paths: string[];
       kv_cache: KvCacheSnapshot | null;
+      history?: NodeTelemetryHistory;
+      peers?: PeerDiscoverySnapshot[];
     };
     hardware?: HardwareSnapshot;
   };
@@ -295,7 +324,7 @@ export function histogramMetric(snapshot: ControlPlaneSnapshot | null, bases: st
 }
 
 export function kvUtilization(node: ControlPlaneNode | undefined) {
-  const cache = !node?.errors.openlake ? node.openlake?.openlake.kv_cache : null;
+  const cache = node && !node.errors.openlake ? node.openlake?.openlake.kv_cache : null;
   if (!cache) return null;
   const capacityBytes = cache.slot_count && cache.slot_bytes
     ? cache.slot_count * cache.slot_bytes
@@ -349,6 +378,45 @@ export function aggregateOpenLakeTokensServed(snapshot: ControlPlaneSnapshot | n
   }
 
   return { blocks, tokens, blockSizes: [...blockSizes].sort((left, right) => left - right) };
+}
+
+export function aggregateNodeHistory(snapshot: ControlPlaneSnapshot | null, maximumMinutes = 24 * 60, minimumMinutes = 10) {
+  const histories = activeNodes(snapshot)
+    .filter(node => !node.errors.openlake)
+    .map(node => node.openlake?.openlake.history)
+    .filter(history => history !== undefined && history.interval_seconds > 0);
+  if (!histories.length) return null;
+
+  const intervalSeconds = histories[0].interval_seconds;
+  const compatible = histories.filter(history => history.interval_seconds === intervalSeconds);
+  const maximumBuckets = Math.max(1, Math.floor((maximumMinutes * 60) / intervalSeconds));
+  const minimumBuckets = Math.min(maximumBuckets, Math.max(1, Math.ceil((minimumMinutes * 60) / intervalSeconds)));
+  const availableBuckets = compatible.reduce((maximum, history) => {
+    const reported = history.samples_collected ?? history.bucket_count;
+    const samples = Number.isFinite(reported) ? Math.max(0, Math.floor(reported)) : 0;
+    return Math.max(maximum, Math.min(samples, history.bucket_count, history.requests_served.length, history.cached_tokens_served.length));
+  }, 0);
+  const bucketCount = Math.min(maximumBuckets, Math.max(minimumBuckets, availableBuckets));
+  const requestsPerMinute = Array<number>(bucketCount).fill(0);
+  const cachedTokensPerMinute = Array<number>(bucketCount).fill(0);
+  const rateScale = 60 / intervalSeconds;
+
+  for (const history of compatible) {
+    for (let offset = 0; offset < bucketCount; offset += 1) {
+      const target = bucketCount - offset - 1;
+      const requestSource = history.requests_served.length - offset - 1;
+      const cacheSource = history.cached_tokens_served.length - offset - 1;
+      if (requestSource >= 0) requestsPerMinute[target] += Math.max(0, history.requests_served[requestSource] ?? 0) * rateScale;
+      if (cacheSource >= 0) cachedTokensPerMinute[target] += Math.max(0, history.cached_tokens_served[cacheSource] ?? 0) * rateScale;
+    }
+  }
+
+  return {
+    cachedTokensPerMinute,
+    intervalSeconds,
+    requestsPerMinute,
+    windowMinutes: (bucketCount * intervalSeconds) / 60,
+  };
 }
 
 export function formatBytes(bytes: number) {

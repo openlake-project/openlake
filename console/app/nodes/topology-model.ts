@@ -1,4 +1,4 @@
-import type { HardwareSnapshot } from "../control-plane-data";
+import type { ControlPlaneNode, HardwareSnapshot, PeerDiscoverySnapshot } from "../control-plane-data";
 
 export type TopologyGpu = HardwareSnapshot["gpus"][number];
 export type TopologyNic = HardwareSnapshot["network_interfaces"][number];
@@ -17,6 +17,164 @@ export type TopologyGroup = {
   nics: TopologyNic[];
   bridges: TopologyBridge[];
 };
+
+export type FabricLink = {
+  nodeIds: [number, number];
+  kind: "rdma" | "tcp";
+  transports: string[];
+  devicesByNode: Record<number, string[]>;
+};
+
+export type FabricBackbone = {
+  id: string;
+  kind: "rdma" | "tcp" | "mixed";
+  nodeIds: number[];
+  links: FabricLink[];
+  transports: string[];
+  devicesByNode: Record<number, string[]>;
+};
+
+export type FabricTopology = {
+  backbones: FabricBackbone[];
+  isolatedNodeIds: number[];
+  unverifiedLinkCount: number;
+};
+
+type PeerPath = {
+  kind: "rdma" | "tcp";
+  capabilities: Array<{ transport: string; device: string }>;
+};
+
+function transportKind(transport: string): "rdma" | "tcp" | null {
+  const normalized = transport.toLowerCase();
+  if (normalized.includes("tcp")) return "tcp";
+  if (/^(?:rc|dc|ud)(?:_|$)/.test(normalized) || normalized.includes("rdma") || normalized.includes("roce") || normalized.includes("ib")) return "rdma";
+  return null;
+}
+
+function peerPath(peer: PeerDiscoverySnapshot): PeerPath | null {
+  if (peer.is_connected === false) return null;
+  const capabilities = (peer.capabilities ?? [])
+    .filter(capability => transportKind(capability.transport));
+  const strongest = capabilities.some(capability => transportKind(capability.transport) === "rdma")
+    ? "rdma"
+    : capabilities.some(capability => transportKind(capability.transport) === "tcp") ? "tcp" : null;
+  if (strongest) {
+    return {
+      kind: strongest,
+      capabilities: capabilities.filter(capability => transportKind(capability.transport) === strongest),
+    };
+  }
+  if (peer.status === "rdma_metadata_available" && (peer.rdma_endpoints?.length ?? 0) > 0) {
+    return {
+      kind: "rdma",
+      capabilities: (peer.rdma_endpoints ?? []).map(endpoint => ({
+        transport: "dct",
+        device: endpoint.gid,
+      })),
+    };
+  }
+  return null;
+}
+
+function unique(values: string[]) {
+  return [...new Set(values.filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * Build logical fabric components only from reciprocal peer observations.
+ * A configured address, reachable RPC endpoint, or one-sided probe is not
+ * enough to claim that two nodes share a data plane.
+ */
+export function buildFabricTopology(nodes: ControlPlaneNode[]): FabricTopology {
+  const nodeIds = new Set(nodes.map(node => node.id));
+  const pairs = new Map<string, Map<number, PeerPath>>();
+  for (const node of nodes) {
+    for (const peer of node.openlake?.openlake.peers ?? []) {
+      if (!nodeIds.has(peer.node_id) || peer.node_id === node.id) continue;
+      const path = peerPath(peer);
+      if (!path) continue;
+      const ordered = [node.id, peer.node_id].sort((left, right) => left - right) as [number, number];
+      const key = `${ordered[0]}:${ordered[1]}`;
+      const observations = pairs.get(key) ?? new Map<number, PeerPath>();
+      observations.set(node.id, path);
+      pairs.set(key, observations);
+    }
+  }
+
+  const links: FabricLink[] = [];
+  let unverifiedLinkCount = 0;
+  for (const [key, observations] of pairs) {
+    const [left, right] = key.split(":").map(Number) as [number, number];
+    const leftToRight = observations.get(left);
+    const rightToLeft = observations.get(right);
+    if (!leftToRight || !rightToLeft || leftToRight.kind !== rightToLeft.kind) {
+      unverifiedLinkCount += 1;
+      continue;
+    }
+    // A→B reports B's selected server-side device; B→A reports A's.
+    links.push({
+      nodeIds: [left, right],
+      kind: leftToRight.kind,
+      transports: unique([...leftToRight.capabilities, ...rightToLeft.capabilities].map(capability => capability.transport)),
+      devicesByNode: {
+        [left]: unique(rightToLeft.capabilities.map(capability => capability.device)),
+        [right]: unique(leftToRight.capabilities.map(capability => capability.device)),
+      },
+    });
+  }
+
+  const parent = new Map([...nodeIds].map(nodeId => [nodeId, nodeId]));
+  const find = (nodeId: number): number => {
+    const current = parent.get(nodeId) ?? nodeId;
+    if (current === nodeId) return nodeId;
+    const root = find(current);
+    parent.set(nodeId, root);
+    return root;
+  };
+  for (const link of links) {
+    const leftRoot = find(link.nodeIds[0]);
+    const rightRoot = find(link.nodeIds[1]);
+    if (leftRoot !== rightRoot) parent.set(rightRoot, leftRoot);
+  }
+
+  const grouped = new Map<number, number[]>();
+  for (const nodeId of nodeIds) {
+    const root = find(nodeId);
+    const members = grouped.get(root) ?? [];
+    members.push(nodeId);
+    grouped.set(root, members);
+  }
+
+  const backbones: FabricBackbone[] = [];
+  const isolatedNodeIds: number[] = [];
+  for (const members of grouped.values()) {
+    members.sort((left, right) => left - right);
+    const memberSet = new Set(members);
+    const componentLinks = links.filter(link => link.nodeIds.every(nodeId => memberSet.has(nodeId)));
+    if (!componentLinks.length) {
+      isolatedNodeIds.push(...members);
+      continue;
+    }
+    const kinds = new Set(componentLinks.map(link => link.kind));
+    const devicesByNode = Object.fromEntries(members.map(nodeId => [
+      nodeId,
+      unique(componentLinks.flatMap(link => link.devicesByNode[nodeId] ?? [])),
+    ]));
+    backbones.push({
+      id: `fabric-${members.join("-")}`,
+      kind: kinds.size === 1 ? [...kinds][0] : "mixed",
+      nodeIds: members,
+      links: componentLinks,
+      transports: unique(componentLinks.flatMap(link => link.transports)),
+      devicesByNode,
+    });
+  }
+
+  backbones.sort((left, right) => left.nodeIds[0] - right.nodeIds[0]);
+  isolatedNodeIds.sort((left, right) => left - right);
+  return { backbones, isolatedNodeIds, unverifiedLinkCount };
+}
 
 function isPhysicalNic(network: TopologyNic) {
   return network.name !== "lo" && Boolean(

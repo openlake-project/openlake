@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildTopologyGroups, shouldRenderAsHostDeviceRail } from "../app/nodes/topology-model.ts";
+import { buildFabricTopology, buildTopologyGroups, shouldRenderAsHostDeviceRail } from "../app/nodes/topology-model.ts";
 
 function hardware(overrides = {}) {
   return {
@@ -139,4 +139,81 @@ test("keeps an unassigned GPU as a full visible locality group", () => {
   }));
 
   assert.equal(shouldRenderAsHostDeviceRail(groups.at(-1)), false);
+});
+
+function node(id, peers = []) {
+  return {
+    id,
+    openlake: { openlake: { peers } },
+  };
+}
+
+function ucxPeer(node_id, transport, device, is_connected = true) {
+  return {
+    node_id,
+    rpc_addr: `10.0.0.${node_id + 1}:9400`,
+    status: is_connected ? "connected" : "disconnected",
+    latency_ms: 2,
+    is_connected,
+    capabilities: is_connected ? [{ transport, device }] : [],
+    error: null,
+  };
+}
+
+test("builds an RDMA backbone only from reciprocal UCX observations", () => {
+  const topology = buildFabricTopology([
+    node(0, [ucxPeer(1, "rc_mlx5", "mlx5_ib1:1")]),
+    node(1, [ucxPeer(0, "rc_mlx5", "mlx5_ib0:1")]),
+  ]);
+
+  assert.equal(topology.backbones.length, 1);
+  assert.equal(topology.backbones[0].kind, "rdma");
+  assert.deepEqual(topology.backbones[0].nodeIds, [0, 1]);
+  assert.deepEqual(topology.backbones[0].transports, ["rc_mlx5"]);
+  assert.deepEqual(topology.backbones[0].devicesByNode, {
+    0: ["mlx5_ib0:1"],
+    1: ["mlx5_ib1:1"],
+  });
+  assert.deepEqual(topology.isolatedNodeIds, []);
+});
+
+test("does not invent a backbone from a one-sided or failed probe", () => {
+  const topology = buildFabricTopology([
+    node(0, [ucxPeer(1, "rc_mlx5", "mlx5_ib1:1")]),
+    node(1, [ucxPeer(0, "rc_mlx5", "mlx5_ib0:1", false)]),
+    node(2),
+  ]);
+
+  assert.deepEqual(topology.backbones, []);
+  assert.deepEqual(topology.isolatedNodeIds, [0, 1, 2]);
+  assert.equal(topology.unverifiedLinkCount, 1);
+});
+
+test("labels a reciprocal TCP path as TCP rather than InfiniBand", () => {
+  const topology = buildFabricTopology([
+    node(0, [ucxPeer(1, "tcp", "eth1")]),
+    node(1, [ucxPeer(0, "tcp", "eth0")]),
+  ]);
+
+  assert.equal(topology.backbones[0].kind, "tcp");
+  assert.deepEqual(topology.backbones[0].devicesByNode, { 0: ["eth0"], 1: ["eth1"] });
+});
+
+test("uses reciprocal DCT endpoint metadata as a verified RDMA path", () => {
+  const dctPeer = (node_id, gid) => ({
+    node_id,
+    rpc_addr: `10.0.0.${node_id + 1}:9400`,
+    status: "rdma_metadata_available",
+    latency_ms: 2,
+    complete: true,
+    rdma_endpoints: [{ runtime_id: 0, gid, lid: 1, dct_number: 7, kv_slab_ready: true, slot_bytes: 4096 }],
+    error: null,
+  });
+  const topology = buildFabricTopology([
+    node(0, [dctPeer(1, "fe80::1")]),
+    node(1, [dctPeer(0, "fe80::0")]),
+  ]);
+
+  assert.equal(topology.backbones[0].kind, "rdma");
+  assert.deepEqual(topology.backbones[0].transports, ["dct"]);
 });
