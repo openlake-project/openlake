@@ -4,7 +4,13 @@ set -euo pipefail
 
 WHEEL_DIR="${1:?usage: $0 WHEEL_DIR EXPECTED_VERSION}"
 EXPECTED_VERSION="${2:?usage: $0 WHEEL_DIR EXPECTED_VERSION}"
+MODE="${3:-full}"
 WHEELS=("$WHEEL_DIR"/*.whl)
+
+case "$MODE" in
+  dependencies-only|full) ;;
+  *) echo "mode must be dependencies-only or full" >&2; exit 2 ;;
+esac
 
 if [ "${#WHEELS[@]}" -ne 1 ] || [ ! -f "${WHEELS[0]}" ]; then
   echo "expected exactly one wheel in $WHEEL_DIR" >&2
@@ -51,6 +57,10 @@ print(package / "_native.abi3.so")
 print(package / "openlaked")
 PY
 )
+
+if [ "$MODE" = "dependencies-only" ]; then
+  exit 0
+fi
 
 SMOKE_DIR="$(mktemp -d)"
 cat > "$SMOKE_DIR/kv.toml" <<'TOML'

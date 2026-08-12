@@ -182,18 +182,31 @@ jobs:
           name: openlake-vllm-${{ github.run_id }}
           path: release
 
-      - name: Exercise wheel in a pinned minimal Linux image
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+
+      - name: Verify dependencies in a pinned minimal Linux image
         shell: bash
         run: |
           set -euo pipefail
           docker run --rm \
-            --shm-size 2g \
             --volume "$PWD:/workspace:ro" \
             --volume "$PWD/release:/release:ro" \
             python:3.10-slim-bookworm@sha256:6dafe336b64dbf76f7ec872d07e58b5c7de0e2ea5d4c0853a05c3b6be3278b00 \
             bash /workspace/crates/openlake_kv_client/smoke-wheel.sh \
               /release/packages \
-              "${{ needs.build.outputs.version }}"
+              "${{ needs.build.outputs.version }}" \
+              dependencies-only
+
+      - name: Exercise the packaged daemon and local data plane
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash crates/openlake_kv_client/smoke-wheel.sh \
+            "$PWD/release/packages" \
+            "${{ needs.build.outputs.version }}" \
+            full
 
   approve-staging-validation:
     needs: [build, smoke-supported-python, smoke-clean-linux]

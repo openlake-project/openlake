@@ -52,9 +52,10 @@ No long-lived PyPI token is required by the workflow.
    ```
 
 4. The tag workflow builds one wheel, audits both ELF files, validates package
-   contents and versions, installs on CPython 3.10 and 3.14, and runs a local
-   KV put/get round trip in a pinned minimal Debian image with no build-time
-   system packages available to hide a missing runtime dependency.
+   contents and versions, and installs on CPython 3.10 and 3.14. A pinned
+   minimal Debian image checks imports and ELF dependencies with no build-time
+   packages available to hide a missing runtime library; the Linux host then
+   runs the packaged daemon and a local KV put/get round trip with `io_uring`.
 5. Download that run's `openlake-vllm-*` artifact. On the staging H100, install
    the wheel by file path and run the local-mode CUDA/vLLM miss → store → hit
    test. Verify its SHA-256 against the included `SHA256SUMS`. In the protected
