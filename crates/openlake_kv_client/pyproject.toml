@@ -6,6 +6,7 @@ build-backend = "maturin"
 name = "openlake-vllm"
 dynamic = ["version"]
 description = "OpenLake high performance KV cache client and server for vLLM."
+readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 
