@@ -39,7 +39,6 @@ _FLCH_RETURNS_LENGTH = str(
 
 KEY_BYTES = 16
 SLOT_HEADER_BYTES = 54
-DEFAULT_MIN_EXTERNAL_LOOKUP_TOKENS = 1000
 
 _HASH_SEED_HELP = (
     "OpenLake external KV offloading requires PYTHONHASHSEED to be set for "
@@ -1043,21 +1042,9 @@ class OpenLakeScheduler:
         nodes = extra.get("openlake_nodes")
         if not nodes:
             raise ValueError("kv_connector_extra_config.openlake_nodes required")
-        try:
-            self._min_external_lookup_tokens = int(
-                extra.get(
-                    "openlake_min_external_lookup_tokens",
-                    DEFAULT_MIN_EXTERNAL_LOOKUP_TOKENS,
-                )
-            )
-        except (TypeError, ValueError) as err:
-            raise ValueError(
-                "openlake_min_external_lookup_tokens must be a non-negative integer"
-            ) from err
-        if self._min_external_lookup_tokens < 0:
-            raise ValueError(
-                "openlake_min_external_lookup_tokens must be a non-negative integer"
-            )
+        self._min_external_lookup_tokens = extra.get(
+            "openlake_min_external_lookup_tokens", 1000
+        )
         self._client = openlake_client.Client(
             device=extra.get("openlake_device", "mlx5_ib0"),
             client_id=int(extra.get("openlake_client_id", 2048)),
