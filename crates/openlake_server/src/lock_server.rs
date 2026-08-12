@@ -207,15 +207,31 @@ mod tests {
 
     #[test]
     fn refresh_matches_uid_and_extends_lease() {
-        let s = short();
+        let validity = Duration::from_secs(60);
+        let s = LockServer::with_validity(validity);
         assert!(s.acquire("k", "u1", NO_TTL));
-        // Mid lease refresh keeps the entry alive past what would
-        // otherwise be expiry.
-        std::thread::sleep(Duration::from_millis(20));
+
+        // Put the initial lease 40 seconds into its 60-second validity window.
+        // Mutating the test-only state avoids scheduler-sensitive sleeps.
+        {
+            let mut map = s.locks.lock().unwrap();
+            map.get_mut("k").unwrap().last_refresh =
+                Instant::now().checked_sub(Duration::from_secs(40)).unwrap();
+        }
+
         assert!(s.refresh("k", "u1"));
-        std::thread::sleep(Duration::from_millis(20));
-        // 40 ms since acquire but only 20 ms since the last refresh,
-        // so the entry is still live and u2 cannot take it.
+
+        // Simulate another 30 seconds after the refresh. Without the refresh,
+        // the original lease would now be 70 seconds old and expired; with the
+        // refresh it is only 30 seconds old and remains held by u1.
+        {
+            let mut map = s.locks.lock().unwrap();
+            let entry = map.get_mut("k").unwrap();
+            entry.last_refresh = entry
+                .last_refresh
+                .checked_sub(Duration::from_secs(30))
+                .unwrap();
+        }
         assert!(!s.acquire("k", "u2", NO_TTL));
     }
 

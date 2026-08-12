@@ -1,0 +1,321 @@
+name: release Python package
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/release-python.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/openlake_io/**"
+      - "crates/openlake_kv_client/**"
+      - "crates/openlake_server/**"
+      - "crates/openlake_storage/**"
+      - "external/connectors/vllm/**"
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-python-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'openlake-project/openlake'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "$cargo_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            release_version="${GITHUB_REF_NAME#v}"
+            test "$GITHUB_REF_NAME" = "v$release_version"
+            test "$cargo_version" = "$release_version"
+            test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = "tag"
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          fi
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+
+      - name: Reject an existing package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version="${GITHUB_REF_NAME#v}"
+          pypi_status="$(curl --silent --show-error --location --retry 3 \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/openlake-vllm/$release_version/json")"
+          testpypi_status="$(curl --silent --show-error --location --retry 3 \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://test.pypi.org/pypi/openlake-vllm/$release_version/json")"
+          test "$pypi_status" = "404"
+          test "$testpypi_status" = "404"
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+        with:
+          toolchain: "1.91.1"
+          components: rustfmt, clippy
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            clang cmake libhwloc-dev libudev-dev pkg-config
+
+      - name: Cargo preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          # The PyO3 crate is linked as a Python extension and is exercised from
+          # the built wheel below; linking it as a standalone Rust test binary
+          # is not supported by extension-module builds.
+          cargo test --locked --workspace --exclude openlake_kv_client
+
+      - name: Build the manylinux wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: build
+          maturin-version: v1.14.1
+          rust-toolchain: "1.91.1"
+          target: x86_64-unknown-linux-gnu
+          manylinux: "2_28"
+          container: quay.io/pypa/manylinux_2_28_x86_64@sha256:f854c50adf7b7a325bc4794316f3758d387a41d61f9e2ebca0f26c7dc8f761d4
+          working-directory: crates/openlake_kv_client
+          before-script-linux: bash ./prepare-wheel.sh cpu x86_64-unknown-linux-gnu
+          args: >-
+            --release
+            --locked
+            --compatibility pypi
+            --auditwheel repair
+            --out dist
+
+      - name: Validate wheel structure and clean install
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check \
+            auditwheel==6.8.0 twine==7.0.0
+          chmod +x crates/openlake_kv_client/verify-wheel.sh
+          crates/openlake_kv_client/verify-wheel.sh \
+            "${{ steps.version.outputs.version }}" \
+            crates/openlake_kv_client/dist
+
+      - name: Record artifact digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release/packages
+          cp crates/openlake_kv_client/dist/*.whl release/packages/
+          (cd release/packages && sha256sum *.whl) > release/SHA256SUMS
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: openlake-vllm-${{ github.run_id }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 30
+
+  smoke-supported-python:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: openlake-vllm-${{ github.run_id }}
+          path: release
+
+      - name: Install and import the abi3 wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release/packages && sha256sum --check ../SHA256SUMS)
+          python -m pip install --disable-pip-version-check \
+            --no-deps --no-index release/packages/*.whl
+          python - <<'PY'
+          import importlib.metadata
+          import openlake_client
+
+          expected = "${{ needs.build.outputs.version }}"
+          assert importlib.metadata.version("openlake-vllm") == expected
+          assert openlake_client.__version__ == expected
+          PY
+          openlaked --version | grep -Fx "openlaked ${{ needs.build.outputs.version }}"
+
+  smoke-clean-linux:
+    needs: [build, smoke-supported-python]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: openlake-vllm-${{ github.run_id }}
+          path: release
+
+      - name: Exercise wheel in a pinned minimal Linux image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --shm-size 2g \
+            --volume "$PWD:/workspace:ro" \
+            --volume "$PWD/release:/release:ro" \
+            python:3.10-slim-bookworm@sha256:6dafe336b64dbf76f7ec872d07e58b5c7de0e2ea5d4c0853a05c3b6be3278b00 \
+            bash /workspace/crates/openlake_kv_client/smoke-wheel.sh \
+              /release/packages \
+              "${{ needs.build.outputs.version }}"
+
+  approve-staging-validation:
+    needs: [build, smoke-supported-python, smoke-clean-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release-staging
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: openlake-vllm-${{ github.run_id }}
+          path: release
+
+      - name: Confirm the approved staging artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release/packages && sha256sum --check ../SHA256SUMS)
+          echo "The release-staging approver confirms that this exact wheel"
+          cat release/SHA256SUMS
+          echo "passed the OpenLake local-mode CUDA/vLLM miss-store-hit test on staging."
+
+  publish-testpypi:
+    needs: approve-staging-validation
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: openlake-vllm-${{ github.run_id }}
+          path: dist
+
+      - name: Final immutable-artifact check
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist/packages && sha256sum --check ../SHA256SUMS)
+          test "$(find dist/packages -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          version="${GITHUB_REF_NAME#v}"
+          pypi_status="$(curl --silent --show-error --location --retry 3 \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/openlake-vllm/$version/json")"
+          testpypi_status="$(curl --silent --show-error --location --retry 3 \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://test.pypi.org/pypi/openlake-vllm/$version/json")"
+          test "$pypi_status" = "404"
+          test "$testpypi_status" = "404"
+
+      - name: Publish exact wheel to TestPyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/packages/
+          verbose: true
+          attestations: true
+
+  verify-testpypi:
+    needs: publish-testpypi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.10"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: openlake-vllm-${{ github.run_id }}
+          path: release
+
+      - name: Fetch the exact TestPyPI wheel and compare it byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir fetched
+          for attempt in {1..12}; do
+            if python -m pip download \
+              --disable-pip-version-check \
+              --no-cache-dir \
+              --no-deps \
+              --only-binary=:all: \
+              --index-url https://test.pypi.org/simple/ \
+              --dest fetched \
+              "openlake-vllm==$version"; then
+              break
+            fi
+            test "$attempt" -lt 12
+            sleep 10
+          done
+          cmp release/packages/*.whl fetched/*.whl
+          python -m pip install --disable-pip-version-check --no-deps fetched/*.whl
+          python -c 'import openlake_client; assert openlake_client.__version__ == "'"$version"'"'
+
+  publish-pypi:
+    needs: verify-testpypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: openlake-vllm-${{ github.run_id }}
+          path: dist
+
+      - name: Final immutable-artifact check
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist/packages && sha256sum --check ../SHA256SUMS)
+          test "$(find dist/packages -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          version="${GITHUB_REF_NAME#v}"
+          status="$(curl --silent --show-error --location --retry 3 \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/openlake-vllm/$version/json")"
+          test "$status" = "404"
+
+      - name: Publish exact wheel to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/packages/
+          verbose: true
+          attestations: true

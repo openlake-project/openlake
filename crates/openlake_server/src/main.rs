@@ -30,7 +30,11 @@ use crate::lock_server::{LocalLockPeer, LockServer};
 use crate::tls_material::TlsMaterial;
 
 #[derive(Parser)]
-#[command(about = "openlaked: distributed object storage node")]
+#[command(
+    name = "openlaked",
+    version,
+    about = "openlaked: distributed object storage node"
+)]
 struct Args {
     /// Path to the TOML config file describing this node and its peers.
     #[arg(long)]
