@@ -49,6 +49,10 @@ struct PeerDiscoverySnapshot {
     status: &'static str,
     latency_ms: Option<u64>,
     complete: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_connected: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    capabilities: Vec<openlake_io::rpc::UcxTransport>,
     rdma_endpoints: Vec<PeerRdmaEndpointSnapshot>,
     error: Option<String>,
 }
@@ -67,6 +71,7 @@ struct PeerRdmaEndpointSnapshot {
 enum PeerDiscoveryStrategy {
     None,
     DctEndpointMetadata,
+    UcxEndpointCapabilities,
 }
 
 fn pending_peer(node_id: u16, rpc_addr: SocketAddr) -> PeerDiscoverySnapshot {
@@ -76,6 +81,8 @@ fn pending_peer(node_id: u16, rpc_addr: SocketAddr) -> PeerDiscoverySnapshot {
         status: "pending",
         latency_ms: None,
         complete: None,
+        is_connected: None,
+        capabilities: Vec::new(),
         rdma_endpoints: Vec::new(),
         error: None,
     }
@@ -100,6 +107,8 @@ fn peer_from_reply(
         status,
         latency_ms: Some(latency_ms),
         complete: Some(reply.complete),
+        is_connected: None,
+        capabilities: Vec::new(),
         rdma_endpoints: reply
             .endpoints
             .into_iter()
@@ -112,6 +121,29 @@ fn peer_from_reply(
                 slot_bytes: endpoint.kv_slab.map(|slab| slab.slot_bytes),
             })
             .collect(),
+        error: None,
+    }
+}
+
+fn peer_from_ucx_reply(
+    node_id: u16,
+    rpc_addr: SocketAddr,
+    latency_ms: u64,
+    reply: openlake_io::rpc::UcxEndpointReply,
+) -> PeerDiscoverySnapshot {
+    PeerDiscoverySnapshot {
+        node_id,
+        rpc_addr,
+        status: if reply.is_connected {
+            "connected"
+        } else {
+            "disconnected"
+        },
+        latency_ms: Some(latency_ms),
+        complete: None,
+        is_connected: Some(reply.is_connected),
+        capabilities: reply.capabilities,
+        rdma_endpoints: Vec::new(),
         error: None,
     }
 }
@@ -129,9 +161,23 @@ fn peer_failure(
         status,
         latency_ms: Some(latency_ms),
         complete: None,
+        is_connected: None,
+        capabilities: Vec::new(),
         rdma_endpoints: Vec::new(),
         error: Some(error),
     }
+}
+
+fn ucx_peer_failure(
+    node_id: u16,
+    rpc_addr: SocketAddr,
+    status: &'static str,
+    latency_ms: u64,
+    error: String,
+) -> PeerDiscoverySnapshot {
+    let mut snapshot = peer_failure(node_id, rpc_addr, status, latency_ms, error);
+    snapshot.is_connected = Some(false);
+    snapshot
 }
 
 fn elapsed_millis(started: Instant) -> u64 {
@@ -139,7 +185,7 @@ fn elapsed_millis(started: Instant) -> u64 {
 }
 
 fn configured_peer_targets(cfg: &Config) -> Vec<(u16, SocketAddr)> {
-    if cfg.mode == Mode::Kv && !cfg.kv_agents.is_empty() {
+    if cfg.mode == Mode::Kv {
         return cfg
             .kv_agents
             .iter()
@@ -163,6 +209,9 @@ fn peer_discovery_strategy(cfg: &Config) -> PeerDiscoveryStrategy {
     ) {
         (_, TransportMode::Rdma, Some(RdmaBackend::Dct)) => {
             PeerDiscoveryStrategy::DctEndpointMetadata
+        }
+        (Mode::Kv, TransportMode::Rdma, Some(RdmaBackend::Ucx)) => {
+            PeerDiscoveryStrategy::UcxEndpointCapabilities
         }
         _ => PeerDiscoveryStrategy::None,
     }
@@ -247,7 +296,7 @@ fn counter_delta(current: Option<u64>, previous: &mut Option<u64>) -> u64 {
     }
 }
 
-async fn discover_peer_once(
+async fn discover_dct_peer_once(
     node_id: u16,
     rpc_addr: SocketAddr,
     rpc_connector: Option<Arc<rustls::ClientConfig>>,
@@ -291,15 +340,76 @@ async fn discover_peer_once(
     last
 }
 
-async fn discover_peers_once(
-    targets: Vec<(u16, SocketAddr)>,
+async fn discover_ucx_peer_once(
+    node_id: u16,
+    rpc_addr: SocketAddr,
     rpc_connector: Option<Arc<rustls::ClientConfig>>,
-    snapshots: Arc<Mutex<Vec<PeerDiscoverySnapshot>>>,
-) {
-    let mut pending = futures_util::stream::FuturesUnordered::new();
-    for (node_id, rpc_addr) in targets {
-        pending.push(discover_peer_once(node_id, rpc_addr, rpc_connector.clone()));
+    source_node_id: u16,
+    worker_address: Vec<u8>,
+) -> PeerDiscoverySnapshot {
+    let peer = Rc::new(PeerClient::new(rpc_addr, rpc_connector));
+    let backend = RemoteBackend::new(peer, 0);
+    let mut last = pending_peer(node_id, rpc_addr);
+    last.is_connected = Some(false);
+
+    for attempt in 0..PEER_DISCOVERY_ATTEMPTS {
+        let started = Instant::now();
+        last = match compio::time::timeout(
+            PEER_DISCOVERY_TIMEOUT,
+            backend.ucx_dry_attach(source_node_id, 0, worker_address.clone()),
+        )
+        .await
+        {
+            Ok(Ok(reply)) if reply.protocol_version != openlake_io::rpc::UCX_PROTOCOL_VERSION => {
+                ucx_peer_failure(
+                    node_id,
+                    rpc_addr,
+                    "protocol_mismatch",
+                    elapsed_millis(started),
+                    format!(
+                        "peer UCX protocol version {} does not match {}",
+                        reply.protocol_version,
+                        openlake_io::rpc::UCX_PROTOCOL_VERSION,
+                    ),
+                )
+            }
+            Ok(Ok(reply)) => {
+                let connected = reply.is_connected;
+                let snapshot =
+                    peer_from_ucx_reply(node_id, rpc_addr, elapsed_millis(started), reply);
+                if connected {
+                    return snapshot;
+                }
+                snapshot
+            }
+            Ok(Err(error)) => ucx_peer_failure(
+                node_id,
+                rpc_addr,
+                "unreachable",
+                elapsed_millis(started),
+                error.to_string(),
+            ),
+            Err(_) => ucx_peer_failure(
+                node_id,
+                rpc_addr,
+                "timed_out",
+                elapsed_millis(started),
+                format!("UCX peer probe exceeded {PEER_DISCOVERY_TIMEOUT:?}"),
+            ),
+        };
+        if attempt + 1 < PEER_DISCOVERY_ATTEMPTS {
+            compio::time::sleep(PEER_DISCOVERY_RETRY_INTERVAL).await;
+        }
     }
+    last
+}
+
+async fn record_peer_discoveries<F>(
+    mut pending: futures_util::stream::FuturesUnordered<F>,
+    snapshots: Arc<Mutex<Vec<PeerDiscoverySnapshot>>>,
+) where
+    F: std::future::Future<Output = PeerDiscoverySnapshot>,
+{
     while let Some(discovered) = pending.next().await {
         if let Ok(mut peers) = snapshots.lock() {
             if let Some(peer) = peers
@@ -312,17 +422,60 @@ async fn discover_peers_once(
     }
 }
 
+async fn discover_dct_peers_once(
+    targets: Vec<(u16, SocketAddr)>,
+    rpc_connector: Option<Arc<rustls::ClientConfig>>,
+    snapshots: Arc<Mutex<Vec<PeerDiscoverySnapshot>>>,
+) {
+    let pending = futures_util::stream::FuturesUnordered::new();
+    for (node_id, rpc_addr) in targets {
+        pending.push(discover_dct_peer_once(
+            node_id,
+            rpc_addr,
+            rpc_connector.clone(),
+        ));
+    }
+    record_peer_discoveries(pending, snapshots).await;
+}
+
+async fn discover_ucx_peers_once(
+    targets: Vec<(u16, SocketAddr)>,
+    rpc_connector: Option<Arc<rustls::ClientConfig>>,
+    snapshots: Arc<Mutex<Vec<PeerDiscoverySnapshot>>>,
+    source_node_id: u16,
+    worker_address: Vec<u8>,
+) {
+    let pending = futures_util::stream::FuturesUnordered::new();
+    for (node_id, rpc_addr) in targets {
+        pending.push(discover_ucx_peer_once(
+            node_id,
+            rpc_addr,
+            rpc_connector.clone(),
+            source_node_id,
+            worker_address.clone(),
+        ));
+    }
+    record_peer_discoveries(pending, snapshots).await;
+}
+
 pub fn spawn(
     cfg: Arc<Config>,
     tls: TlsMaterial,
     kv: Option<Arc<KvEngineMetrics>>,
+    ucx_worker_address: Option<Vec<u8>>,
 ) -> anyhow::Result<()> {
+    if peer_discovery_strategy(&cfg) == PeerDiscoveryStrategy::UcxEndpointCapabilities
+        && ucx_worker_address.is_none()
+    {
+        anyhow::bail!("UCX peer discovery requires the local UCX worker address");
+    }
     let addr = telemetry_addr(cfg.rpc_addr)?;
     thread::Builder::new()
         .name("node-agent".into())
         .spawn(move || {
-            let result = crate::create_runtime()
-                .and_then(|runtime| runtime.block_on(serve(addr, cfg, tls, kv)));
+            let result = crate::create_runtime().and_then(|runtime| {
+                runtime.block_on(serve(addr, cfg, tls, kv, ucx_worker_address))
+            });
             if let Err(error) = result {
                 tracing::error!("node agent exited: {error:#}");
             }
@@ -335,6 +488,7 @@ async fn serve(
     cfg: Arc<Config>,
     tls: TlsMaterial,
     kv: Option<Arc<KvEngineMetrics>>,
+    ucx_worker_address: Option<Vec<u8>>,
 ) -> anyhow::Result<()> {
     let listener = compio::net::TcpListener::bind(addr).await?;
     let kv_cache_capacity_bytes = kv
@@ -345,16 +499,14 @@ async fn serve(
     let history = Arc::new(Mutex::new(TelemetryHistory::new()));
     let discovery_strategy = peer_discovery_strategy(&cfg);
     let configured_peers = match discovery_strategy {
-        PeerDiscoveryStrategy::DctEndpointMetadata => configured_peer_targets(&cfg),
-        PeerDiscoveryStrategy::None => Vec::new(),
-    };
-    let peer_targets = match discovery_strategy {
-        PeerDiscoveryStrategy::DctEndpointMetadata => configured_peers.clone(),
+        PeerDiscoveryStrategy::DctEndpointMetadata
+        | PeerDiscoveryStrategy::UcxEndpointCapabilities => configured_peer_targets(&cfg),
         PeerDiscoveryStrategy::None => Vec::new(),
     };
     let peers = Arc::new(Mutex::new(match discovery_strategy {
         PeerDiscoveryStrategy::None => Vec::new(),
-        PeerDiscoveryStrategy::DctEndpointMetadata => configured_peers
+        PeerDiscoveryStrategy::DctEndpointMetadata
+        | PeerDiscoveryStrategy::UcxEndpointCapabilities => configured_peers
             .iter()
             .map(|(node_id, rpc_addr)| pending_peer(*node_id, *rpc_addr))
             .collect(),
@@ -389,12 +541,29 @@ async fn serve(
         peers,
     };
     compio::runtime::spawn(sample_history(state.clone())).detach();
-    compio::runtime::spawn(discover_peers_once(
-        peer_targets,
-        tls.rpc_connector(),
-        state.peers.clone(),
-    ))
-    .detach();
+    match discovery_strategy {
+        PeerDiscoveryStrategy::None => {}
+        PeerDiscoveryStrategy::DctEndpointMetadata => {
+            compio::runtime::spawn(discover_dct_peers_once(
+                configured_peers,
+                tls.rpc_connector(),
+                state.peers.clone(),
+            ))
+            .detach();
+        }
+        PeerDiscoveryStrategy::UcxEndpointCapabilities => {
+            let worker_address = ucx_worker_address
+                .expect("UCX worker address validated before node-agent thread startup");
+            compio::runtime::spawn(discover_ucx_peers_once(
+                configured_peers,
+                tls.rpc_connector(),
+                state.peers.clone(),
+                cfg.self_id,
+                worker_address,
+            ))
+            .detach();
+        }
+    }
     let app = Router::new()
         .route("/v1/telemetry/vllm", get(vllm))
         .route("/v1/telemetry/openlake", get(openlake))
@@ -598,6 +767,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ucx_config_selects_endpoint_capability_discovery() {
+        let cfg: Config = toml::from_str(include_str!("../configs/kv_ucx.toml")).unwrap();
+        assert_eq!(
+            peer_discovery_strategy(&cfg),
+            PeerDiscoveryStrategy::UcxEndpointCapabilities
+        );
+    }
+
+    #[test]
+    fn ucx_peer_telemetry_exposes_only_connection_capabilities() {
+        let snapshot = peer_from_ucx_reply(
+            1,
+            "10.0.0.2:9400".parse().unwrap(),
+            4,
+            openlake_io::rpc::UcxEndpointReply {
+                protocol_version: openlake_io::rpc::UCX_PROTOCOL_VERSION,
+                is_connected: true,
+                worker_address: vec![17, 18, 19],
+                slab_base: 0xfeed,
+                packed_rkey: vec![29, 30, 31],
+                slot_bytes: 4096,
+                slot_count: 512,
+                capabilities: vec![openlake_io::rpc::UcxTransport {
+                    transport: "rc_mlx5".into(),
+                    device: "mlx5_1:1".into(),
+                }],
+            },
+        );
+
+        assert_eq!(snapshot.status, "connected");
+        assert_eq!(snapshot.is_connected, Some(true));
+        assert_eq!(snapshot.capabilities[0].transport, "rc_mlx5");
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("rc_mlx5"));
+        assert!(!json.contains("worker_address"));
+        assert!(!json.contains("packed_rkey"));
+        assert!(!json.contains("slab_base"));
+    }
+
+    #[test]
     fn history_records_deltas_and_rebases_reset_counters() {
         let mut history = TelemetryHistory::new();
         history.record(Some(100), Some(50), Some(16));
@@ -648,6 +857,8 @@ mod tests {
         assert!(!json.contains("slab_base"));
         assert!(!json.contains("4919"));
         assert!(!json.contains("48879"));
+        assert!(!json.contains("is_connected"));
+        assert!(!json.contains("capabilities"));
     }
 
     #[test]

@@ -365,13 +365,16 @@ impl Config {
             if cfg.nodes.len() != 1 {
                 anyhow::bail!("mode = \"kv\" nodes are standalone; list only this node");
             }
+            if cfg.kv_agents.is_empty() {
+                anyhow::bail!("mode = \"kv\" requires a non-empty kv_agents list");
+            }
             if cfg.kv_agents.len() > u16::MAX as usize + 1 {
                 anyhow::bail!(
                     "kv_agents contains more than {} addressable nodes",
                     u16::MAX as usize + 1
                 );
             }
-            if !cfg.kv_agents.is_empty() && cfg.self_id as usize >= cfg.kv_agents.len() {
+            if cfg.self_id as usize >= cfg.kv_agents.len() {
                 anyhow::bail!(
                     "self_id {} is outside the ordered kv_agents list ({} entries)",
                     cfg.self_id,
@@ -630,5 +633,20 @@ capacity_gb = 1
 
         assert_eq!(cfg.kv_agents[0], "10.0.0.1:9400".parse().unwrap());
         assert_eq!(cfg.kv_agents[1], "10.0.0.2:9400".parse().unwrap());
+    }
+
+    #[test]
+    fn kv_mode_requires_an_agent_for_a_single_node() {
+        let text = include_str!("../configs/kv_local.toml");
+        let without_agents = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("kv_agents"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let error = Config::from_toml(&without_agents).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("mode = \"kv\" requires a non-empty kv_agents list"));
     }
 }

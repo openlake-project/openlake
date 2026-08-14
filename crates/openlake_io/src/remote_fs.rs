@@ -281,14 +281,14 @@ impl RemoteBackend {
     /// The server does not allocate a slab, register memory, or retain the peer.
     pub async fn ucx_dry_attach(
         &self,
-        client_node_id: u16,
+        source_node_id: u16,
         epoch: u64,
         worker_address: Vec<u8>,
     ) -> IoResult<rpc::UcxEndpointReply> {
         match self
             .unary(Request::UcxAttach {
                 protocol_version: rpc::UCX_PROTOCOL_VERSION,
-                client_node_id,
+                client_node_id: source_node_id,
                 epoch,
                 worker_address,
                 slot_bytes: 0,

@@ -274,7 +274,7 @@ async fn run_storage_runtime(
     store: in_memory_store::InMemoryStore,
 ) -> anyhow::Result<()> {
     if runtime_id == 0 {
-        node_agent::spawn(cfg.clone(), tls.clone(), None)?;
+        node_agent::spawn(cfg.clone(), tls.clone(), None, None)?;
     }
 
     let s3_acceptor: Option<Rc<TlsAcceptor>> = tls.s3_acceptor().map(Rc::new);

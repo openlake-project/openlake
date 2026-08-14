@@ -23,7 +23,7 @@ pub async fn run_tcp(
         slab_cfg.capacity_bytes()?,
         Duration::from_secs(slab_cfg.reserve_ttl_secs),
     ));
-    node_agent::spawn(cfg.clone(), tls.clone(), Some(engine.metrics()))?;
+    node_agent::spawn(cfg.clone(), tls.clone(), Some(engine.metrics()), None)?;
 
     let listener = rpc_server::bind_reuseport(cfg.rpc_addr)
         .with_context(|| format!("kv-tcp: bind rpc on {}", cfg.rpc_addr))?;
@@ -54,13 +54,19 @@ pub async fn run_ucx(
     tls: TlsMaterial,
 ) -> anyhow::Result<()> {
     let worker = openlake_io::ucx::UcxWorker::new().map_err(anyhow::Error::msg)?;
+    let worker_address = worker.address().map_err(anyhow::Error::msg)?;
     let slab_cfg = cfg.kv_slab.expect("validated: kv mode has [kv_slab]");
     let engine = Rc::new(KvEngine::new_ucx(
         worker.clone(),
         slab_cfg.capacity_bytes()?,
         Duration::from_secs(slab_cfg.reserve_ttl_secs),
     ));
-    node_agent::spawn(cfg.clone(), tls.clone(), Some(engine.metrics()))?;
+    node_agent::spawn(
+        cfg.clone(),
+        tls.clone(),
+        Some(engine.metrics()),
+        Some(worker_address),
+    )?;
 
     let listener = rpc_server::bind_reuseport(cfg.rpc_addr)
         .with_context(|| format!("kv-ucx: bind rpc on {}", cfg.rpc_addr))?;
@@ -205,7 +211,7 @@ pub async fn run(
         max_clients,
         endpoint_registry.clone(),
     ));
-    node_agent::spawn(cfg.clone(), tls.clone(), Some(kv.metrics()))?;
+    node_agent::spawn(cfg.clone(), tls.clone(), Some(kv.metrics()), None)?;
 
     let routing = Arc::new(openlake_io::rdma::ClusterRoutingTable::new(cfg.self_id));
     let rpc_listener = rpc_server::bind_reuseport(cfg.rpc_addr)
