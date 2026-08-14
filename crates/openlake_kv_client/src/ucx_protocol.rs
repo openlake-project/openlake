@@ -19,7 +19,8 @@ use openlake_io::ucx::{UcxEndpoint, UcxMemory, UcxRequest, UcxRkey, UcxWorker};
 use crate::transport::{Protocol, Scatter, Waiter};
 
 const KEY_BYTES: usize = 54;
-const ATTACH_TIMEOUT: Duration = Duration::from_secs(60);
+// The first attach may synchronously register a very large host slab with UCX.
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const RPC_PATH: &str = "/v1/rpc";
 

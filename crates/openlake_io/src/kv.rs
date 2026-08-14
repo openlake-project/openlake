@@ -381,6 +381,21 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_namespace_bytes_are_part_of_the_storage_key() {
+        let mut pool = new_pool(2);
+        let slots = pool.reserve(2);
+        let mut pp0 = k(0xA5);
+        let mut pp1 = pp0;
+        pp0[52..54].copy_from_slice(&0u16.to_le_bytes());
+        pp1[52..54].copy_from_slice(&1u16.to_le_bytes());
+
+        assert!(pool.commit(slots[0], pp0));
+        assert!(pool.commit(slots[1], pp1));
+        assert_eq!(pool.lookup(pp0), Some(slots[0]));
+        assert_eq!(pool.lookup(pp1), Some(slots[1]));
+    }
+
+    #[test]
     fn release_returns_slot_to_free_list() {
         let mut pool = new_pool(2);
         let slots = pool.reserve(2);
