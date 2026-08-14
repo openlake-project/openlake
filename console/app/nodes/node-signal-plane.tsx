@@ -1,13 +1,13 @@
 "use client";
 
-import { type CSSProperties, type PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { type CSSProperties, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
+import { CircuitBoard, X } from "lucide-react";
 import { activeNodes, formatBytes, type ControlPlaneNode, type HardwareSnapshot, useControlPlaneSnapshot } from "../control-plane-data";
 import { ControlPlaneStatus, TelemetryUnavailable } from "../control-plane-status";
 import { AppShell } from "../shell";
 import { brandFromCpuModel, brandFromVendor } from "./telemetry-brand";
 import { TelemetryMark } from "./telemetry-mark";
-import { buildFabricTopology, buildTopologyGroups, pcieDeviceForAddress, shouldRenderAsHostDeviceRail, type FabricBackbone, type TopologyBridge, type TopologyGpu, type TopologyGroup, type TopologyNic } from "./topology-model";
+import { buildFabricLayoutGroups, buildFabricTopology, buildTopologyGroups, pcieDeviceForAddress, shouldRenderAsHostDeviceRail, type FabricBackbone, type TopologyBridge, type TopologyGpu, type TopologyGroup, type TopologyNic } from "./topology-model";
 
 type InspectorRecord = {
   nodeId: number;
@@ -21,25 +21,21 @@ type InspectorRecord = {
 type InspectorAttribute = [string, string | number | null | undefined];
 
 const BASE_NODE_WIDTH = 1244;
-const NODE_HEIGHT = 850;
 const NODE_GAP = 120;
-const FABRIC_GROUP_GAP = 180;
 const FABRIC_SPINE_HEIGHT = 148;
-const HOST_DEVICE_RAIL_HEIGHT = 64;
+const MIN_ZOOM = 0.12;
+const MAX_ZOOM = 1.4;
+const INITIAL_ZOOM = 0.72;
 
 function topologyNodeWidth(hardware: HardwareSnapshot) {
   const localityCount = buildTopologyGroups(hardware).filter(group => !shouldRenderAsHostDeviceRail(group)).length;
   return Math.max(BASE_NODE_WIDTH, Math.max(1, localityCount) * 570 + 70);
 }
 
-function topologyNodeHeight(hardware: HardwareSnapshot) {
-  return NODE_HEIGHT + (buildTopologyGroups(hardware).some(shouldRenderAsHostDeviceRail) ? HOST_DEVICE_RAIL_HEIGHT : 0);
-}
-
-function fitTopology(viewport: HTMLDivElement | null, stageWidth: number, stageHeight: number, updateZoom: (zoom: number) => void) {
-  if (!viewport) return;
-  const next = Math.max(0.35, Math.min(1, (viewport.clientWidth - 80) / stageWidth, (viewport.clientHeight - 80) / stageHeight));
-  updateZoom(next);
+function fitTopology(viewport: HTMLDivElement | null, stageWidth: number, stageHeight: number, applyZoom: (zoom: number) => void) {
+  if (!viewport || !stageWidth || !stageHeight) return;
+  const next = Math.max(MIN_ZOOM, Math.min(1, (viewport.clientWidth - 80) / stageWidth, (viewport.clientHeight - 80) / stageHeight));
+  applyZoom(next);
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       const stage = viewport.querySelector<HTMLElement>(".operator-stage-space");
@@ -169,21 +165,12 @@ function FabricSpine({ backbone, columns, nodeWidth, width }: {
   </div>;
 }
 
-function UnverifiedFabric({ count }: { count: number }) {
-  return <div className="fabric-unverified" aria-label="No reciprocal fabric path observed">
-    <span>FABRIC DISCOVERY</span>
-    <strong>NO RECIPROCAL DATA PATH OBSERVED</strong>
-    <small>{count ? `${count} ONE-SIDED OBSERVATION${count === 1 ? "" : "S"} HELD OUT OF THE MAP` : "WAITING FOR PEER CAPABILITIES"}</small>
-  </div>;
-}
-
-function NodeDiagram({ node, hardware, select, selected, width, height }: {
+function NodeDiagram({ node, hardware, select, selected, width }: {
   node: ControlPlaneNode;
   hardware: HardwareSnapshot;
   select: (record: InspectorRecord) => void;
   selected: InspectorRecord | null;
   width: number;
-  height: number;
 }) {
   const gpus = hardware.gpus;
   const reportedNics = hardware.network_interfaces.filter(network => network.name !== "lo");
@@ -283,6 +270,11 @@ function NodeDiagram({ node, hardware, select, selected, width, height }: {
     ["Slot count", kv?.slot_count],
     ["Committed slots", kv?.used_slots],
   ];
+  const isSelected = (kind: string, identifier: string) => (
+    selected?.nodeId === node.id &&
+    selected.kind === kind &&
+    selected.identifier === identifier
+  );
 
   const selectSystem = () => select(inspector(
     node.id,
@@ -404,13 +396,11 @@ function NodeDiagram({ node, hardware, select, selected, width, height }: {
   ));
 
   const nicModule = (network: TopologyNic, compact = false) => {
-    const nicPci = pcieDeviceForAddress(hardware, network.pci_address);
-    const nicBrand = brandFromVendor(nicPci?.vendor_name);
     const bandwidth = nicCapability(network, hardware);
     const primaryMetric = bandwidth ?? network.operational_state?.toUpperCase() ?? "UNREPORTED";
-    return <button className={`operator-module locality-nic ${compact ? "host-device-nic" : ""} ${selected?.identifier === (network.pci_address ?? network.mac_address ?? network.name) ? "is-selected" : ""}`} key={network.name} onClick={() => selectNic(network)}>
+    const identifier = network.pci_address ?? network.mac_address ?? network.name;
+    return <button className={`operator-module locality-nic ${compact ? "host-device-nic" : ""} ${isSelected("nic", identifier) ? "is-selected" : ""}`} key={network.name} onClick={() => selectNic(network)}>
       <span className="locality-device-title">
-        {nicBrand ? <TelemetryMark brand={nicBrand} matchedFrom="NIC PCI vendor"/> : null}
         <strong>NIC · {network.name}</strong>
       </span>
       <span className="locality-primary-metric nic-primary-metric">
@@ -421,7 +411,7 @@ function NodeDiagram({ node, hardware, select, selected, width, height }: {
     </button>;
   };
 
-  return <section className="operator-node" style={{ "--node-width": `${width}px`, "--node-height": `${height}px` } as CSSProperties} aria-label={`Hardware topology for node-${node.id}`}>
+  return <section className="operator-node" style={{ "--node-width": `${width}px` } as CSSProperties} aria-label={`Hardware topology for node-${node.id}`}>
     <div className="operator-node-meta">
       <button className="node-identity-button" onClick={selectSystem}><span>NODE-{node.id}</span><b>{systemName}</b></button>
       <span>{topologyGroups.some(group => group.locality === "numa") ? "NUMA LOCALITY REPORTED" : "HOST LOCALITY"} · {hardware.collection_status.toUpperCase()} · {hardware.system.architecture.toUpperCase()}</span>
@@ -436,12 +426,28 @@ function NodeDiagram({ node, hardware, select, selected, width, height }: {
           <span>{group.gpus.length} GPU · {group.nics.length} NIC{group.memoryTotalBytes ? ` · ${optionalBytes(group.memoryTotalBytes)}` : ""}</span>
         </header>
 
+        {group.cpuAffinityReported ? <button className={`operator-module locality-cpu ${isSelected("cpu", group.numaNode === null ? `node-${node.id}-cpu` : `node-${node.id}-numa-${group.numaNode}`) ? "is-selected" : ""}`} onClick={() => selectCpuGroup(group)}>
+          <span className="locality-device-title">
+            {cpuBrand ? <TelemetryMark brand={cpuBrand} matchedFrom="CPU model signature"/> : null}
+            <strong>{group.locality === "numa" ? `CPU AFFINITY / NUMA ${group.numaNode}` : "CPU"}</strong>
+          </span>
+          <span className="locality-device-model">{hardware.cpu.model ?? hardware.cpu.architecture}</span>
+          <div className="locality-cpu-facts">
+            <span><b>PACKAGE ID</b><strong>{group.cpuPackageIds.length ? group.cpuPackageIds.join(", ") : "UNREPORTED"}</strong></span>
+            <span><b>LOGICAL CPU</b><strong>{group.logicalCpuCount ?? hardware.cpu.logical_cpu_count}</strong></span>
+            <span><b>MEMORY</b><strong>{optionalBytes(group.memoryTotalBytes ?? hardware.memory.total_bytes)}</strong></span>
+          </div>
+        </button> : <div className="locality-cpu-unreported">
+          <strong>CPU LOCALITY NOT REPORTED</strong>
+          <span>No CPU package or memory affinity is inferred for these devices.</span>
+        </div>}
+
         {group.gpus.length ? <div className="locality-gpu-grid" style={{ "--locality-gpu-columns": Math.min(group.gpus.length, 4) } as CSSProperties}>
           {group.gpus.map((gpu, position) => {
             const recordIdentifier = gpu.uuid ?? gpu.pci_address ?? `gpu-${position}`;
             const gpuBrand = brandFromVendor(gpu.vendor);
             const pciDevice = pcieDeviceForAddress(hardware, gpu.pci_address);
-            return <button className={`operator-module locality-gpu ${selected?.identifier === recordIdentifier ? "is-selected" : ""}`} key={recordIdentifier} onClick={() => selectGpu(gpu, position)}>
+            return <button className={`operator-module locality-gpu ${isSelected("gpu", recordIdentifier) ? "is-selected" : ""}`} key={recordIdentifier} onClick={() => selectGpu(gpu, position)}>
               <span className="locality-device-title">
                 {gpuBrand && gpuBrand !== "apple" ? <TelemetryMark brand={gpuBrand} matchedFrom="GPU vendor"/> : null}
                 <strong>GPU {gpu.index ?? position}</strong>
@@ -461,32 +467,14 @@ function NodeDiagram({ node, hardware, select, selected, width, height }: {
           <span>{group.bridges.length ? `${group.bridges.length} BRIDGE${group.bridges.length === 1 ? "" : "S"} IN REPORTED PARENT CHAIN` : pciSubsystem?.status?.toUpperCase() ?? "UNAVAILABLE"}</span>
         </div> : null}
 
-        <div className="locality-host-grid">
-          <div className="locality-io-bank">
-            {group.bridges.map(bridge => <button className={`operator-module locality-bridge ${selected?.identifier === bridge.address ? "is-selected" : ""}`} key={bridge.address} onClick={() => selectBridge(bridge)}>
-              <span><strong>PCI BRIDGE</strong><b>{pcieCapability(bridge)}</b></span>
-              <code>{bridge.address}</code>
-              <small>{bridge.vendor_name ?? bridge.vendor_id ?? "VENDOR UNREPORTED"}</small>
-            </button>)}
-            {group.nics.map(network => nicModule(network))}
-            {!group.bridges.length && !group.nics.length ? <span className="locality-io-empty">NO LOCAL PCI BRIDGE OR NIC RELATIONSHIP REPORTED</span> : null}
-          </div>
-
-          {group.cpuAffinityReported ? <button className={`operator-module locality-cpu ${selected?.identifier === (group.numaNode === null ? `node-${node.id}-cpu` : `node-${node.id}-numa-${group.numaNode}`) ? "is-selected" : ""}`} onClick={() => selectCpuGroup(group)}>
-            <span className="locality-device-title">
-              {cpuBrand ? <TelemetryMark brand={cpuBrand} matchedFrom="CPU model signature"/> : null}
-              <strong>{group.locality === "numa" ? `CPU AFFINITY / NUMA ${group.numaNode}` : "CPU"}</strong>
-            </span>
-            <span className="locality-device-model">{hardware.cpu.model ?? hardware.cpu.architecture}</span>
-            <div className="locality-cpu-facts">
-              <span><b>PACKAGE ID</b><strong>{group.cpuPackageIds.length ? group.cpuPackageIds.join(", ") : "UNREPORTED"}</strong></span>
-              <span><b>LOGICAL CPU</b><strong>{group.logicalCpuCount ?? hardware.cpu.logical_cpu_count}</strong></span>
-              <span><b>MEMORY</b><strong>{optionalBytes(group.memoryTotalBytes ?? hardware.memory.total_bytes)}</strong></span>
-            </div>
-          </button> : <div className="locality-cpu-unreported">
-            <strong>CPU LOCALITY NOT REPORTED</strong>
-            <span>No CPU package or memory affinity is inferred for these devices.</span>
-          </div>}
+        <div className="locality-io-bank">
+          {group.bridges.map(bridge => <button className={`operator-module locality-bridge ${isSelected("pcie", bridge.address) ? "is-selected" : ""}`} key={bridge.address} onClick={() => selectBridge(bridge)}>
+            <span><span className="hardware-class-mark is-pcie" aria-hidden="true"><CircuitBoard/></span><strong>PCI BRIDGE</strong><b>{pcieCapability(bridge)}</b></span>
+            <code>{bridge.address}</code>
+            <small>{bridge.vendor_name ?? bridge.vendor_id ?? "VENDOR UNREPORTED"}</small>
+          </button>)}
+          {group.nics.map(network => nicModule(network))}
+          {!group.bridges.length && !group.nics.length ? <span className="locality-io-empty">NO LOCAL PCI BRIDGE OR NIC RELATIONSHIP REPORTED</span> : null}
         </div>
       </section>)}
     </div>
@@ -577,66 +565,100 @@ function NodeDiagram({ node, hardware, select, selected, width, height }: {
 function HardwareTopology({ nodes }: { nodes: ControlPlaneNode[] }) {
   const available = nodes.flatMap(node => node.openlake?.hardware ? [{ node, hardware: node.openlake.hardware }] : []);
   const canvas = useRef<HTMLDivElement>(null);
+  const stageSpace = useRef<HTMLDivElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
-  const [zoom, setZoom] = useState(0.72);
-  const zoomRef = useRef(zoom);
+  const zoomRef = useRef(INITIAL_ZOOM);
+  const zoomFrame = useRef<number | null>(null);
+  const pendingZoom = useRef<{ zoom: number; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<InspectorRecord | null>(null);
+  const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const nodeWidth = Math.max(BASE_NODE_WIDTH, ...available.map(({ hardware }) => topologyNodeWidth(hardware)));
-  const nodeHeight = Math.max(NODE_HEIGHT, ...available.map(({ hardware }) => topologyNodeHeight(hardware)));
   const fabric = buildFabricTopology(available.map(({ node }) => node));
   const availableById = new Map(available.map(entry => [entry.node.id, entry]));
-  const groups: Array<{ id: string; nodeIds: number[]; backbone: FabricBackbone | null }> = [
-    ...fabric.backbones.map(backbone => ({ id: backbone.id, nodeIds: backbone.nodeIds, backbone })),
-    ...(fabric.isolatedNodeIds.length ? [{ id: "fabric-unverified", nodeIds: fabric.isolatedNodeIds, backbone: null }] : []),
-  ];
-  const placements: Array<{
-    id: number;
-    left: number;
-    top: number;
-    side: "above" | "below";
-    backbone: FabricBackbone | null;
-  }> = [];
-  const rails: Array<{ id: string; left: number; width: number; columns: number; backbone: FabricBackbone | null }> = [];
-  let cursor = 0;
-  for (const group of groups) {
-    const columns = Math.max(1, Math.ceil(group.nodeIds.length / 2));
-    const width = columns * nodeWidth + Math.max(0, columns - 1) * NODE_GAP;
-    const splitRows = Boolean(group.backbone) || group.nodeIds.length > 2;
-    group.nodeIds.forEach((id, index) => {
-      const side = splitRows && index % 2 ? "below" : "above";
-      const column = splitRows ? Math.floor(index / 2) : index;
-      placements.push({
-        id,
-        left: cursor + column * (nodeWidth + NODE_GAP),
-        top: side === "below" ? nodeHeight + FABRIC_SPINE_HEIGHT : 0,
-        side,
-        backbone: group.backbone,
-      });
-    });
-    if (group.backbone || splitRows) rails.push({ id: group.id, left: cursor, width, columns, backbone: group.backbone });
-    cursor += width + FABRIC_GROUP_GAP;
-  }
-  const stageWidth = Math.max(nodeWidth, cursor ? cursor - FABRIC_GROUP_GAP : nodeWidth);
-  const stageHeight = placements.some(placement => placement.side === "below")
-    ? nodeHeight * 2 + FABRIC_SPINE_HEIGHT
-    : nodeHeight;
+  const layoutGroups = buildFabricLayoutGroups(fabric);
 
-  useEffect(() => { zoomRef.current = zoom; }, [zoom]);
-  useEffect(() => { fitTopology(canvas.current, stageWidth, stageHeight, setZoom); }, [stageWidth, stageHeight]);
+  const applyZoom = useCallback((requestedZoom: number, anchor?: { x: number; y: number }) => {
+    const viewport = canvas.current;
+    const space = stageSpace.current;
+    const stageElement = stage.current;
+    const next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, requestedZoom));
+    const current = zoomRef.current;
+    zoomRef.current = next;
+    if (!viewport || !space || !stageElement || !stageSize.width || !stageSize.height) return;
+
+    const viewportRect = viewport.getBoundingClientRect();
+    const spaceRect = space.getBoundingClientRect();
+    const anchorX = anchor?.x ?? viewportRect.left + viewport.clientWidth / 2;
+    const anchorY = anchor?.y ?? viewportRect.top + viewport.clientHeight / 2;
+    const localX = Math.max(0, (anchorX - spaceRect.left) / current);
+    const localY = Math.max(0, (anchorY - spaceRect.top) / current);
+
+    space.style.width = `${stageSize.width * next}px`;
+    space.style.height = `${stageSize.height * next}px`;
+    stageElement.style.transform = `scale(${next})`;
+    viewport.scrollLeft += localX * (next - current);
+    viewport.scrollTop += localY * (next - current);
+  }, [stageSize.height, stageSize.width]);
+
+  useEffect(() => {
+    const element = stage.current;
+    if (!element) return undefined;
+    const measure = () => {
+      const width = Math.ceil(element.scrollWidth);
+      const height = Math.ceil(element.scrollHeight);
+      setStageSize(current => current.width === width && current.height === height
+        ? current
+        : { width, height });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [available.length, nodeWidth]);
+  useEffect(() => {
+    const viewport = canvas.current;
+    if (!viewport || !stageSize.width || !stageSize.height) return undefined;
+    const fit = () => fitTopology(viewport, stageSize.width, stageSize.height, applyZoom);
+    fit();
+    const observer = new ResizeObserver(fit);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [applyZoom, stageSize.height, stageSize.width]);
   useEffect(() => {
     const viewport = canvas.current;
     if (!viewport) return undefined;
     const handleWheel = (event: globalThis.WheelEvent) => {
       event.preventDefault();
       event.stopPropagation();
-      const sensitivity = event.ctrlKey ? 0.006 : 0.001;
-      const next = Math.max(0.35, Math.min(1.4, zoomRef.current - event.deltaY * sensitivity));
-      zoomRef.current = next;
-      setZoom(next);
+      const delta = event.deltaMode === globalThis.WheelEvent.DOM_DELTA_LINE
+        ? event.deltaY * 16
+        : event.deltaMode === globalThis.WheelEvent.DOM_DELTA_PAGE
+          ? event.deltaY * viewport.clientHeight
+          : event.deltaY;
+      const sensitivity = event.ctrlKey || event.metaKey ? 0.01 : 0.0025;
+      const baseZoom = pendingZoom.current?.zoom ?? zoomRef.current;
+      pendingZoom.current = {
+        zoom: baseZoom * Math.exp(-delta * sensitivity),
+        x: event.clientX,
+        y: event.clientY,
+      };
+      if (zoomFrame.current !== null) return;
+      zoomFrame.current = requestAnimationFrame(() => {
+        zoomFrame.current = null;
+        const pending = pendingZoom.current;
+        pendingZoom.current = null;
+        if (pending) applyZoom(pending.zoom, { x: pending.x, y: pending.y });
+      });
     };
     viewport.addEventListener("wheel", handleWheel, { passive: false });
-    return () => viewport.removeEventListener("wheel", handleWheel);
-  }, []);
+    return () => {
+      viewport.removeEventListener("wheel", handleWheel);
+      if (zoomFrame.current !== null) cancelAnimationFrame(zoomFrame.current);
+      zoomFrame.current = null;
+      pendingZoom.current = null;
+    };
+  }, [applyZoom]);
 
   const pointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest("button")) return;
@@ -659,38 +681,42 @@ function HardwareTopology({ nodes }: { nodes: ControlPlaneNode[] }) {
   };
   if (!available.length) return <div className="node-topology-empty"><TelemetryUnavailable title="Host inventory unavailable" detail="The connected OpenLake node has not returned the hardware inventory contract."/></div>;
 
+  const renderedStageWidth = stageSize.width || nodeWidth;
+  const renderedStageHeight = stageSize.height || 1;
+
   return <div className="node-console-page">
     <div className="signal-canvas" ref={canvas} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp}>
       <div className="operator-scroll-pad">
-        <div className="operator-stage-space" style={{ width: stageWidth * zoom, height: stageHeight * zoom }}>
-          <div className="operator-stage" style={{ width: stageWidth, height: stageHeight, transform: `scale(${zoom})` }}>
-            {rails.map(rail => <div className="fabric-spine-slot" style={{ left: rail.left, top: nodeHeight, width: rail.width, height: FABRIC_SPINE_HEIGHT }} key={rail.id}>
-              {rail.backbone
-                ? <FabricSpine backbone={rail.backbone} columns={rail.columns} nodeWidth={nodeWidth} width={rail.width}/>
-                : <UnverifiedFabric count={fabric.unverifiedLinkCount}/>}
-            </div>)}
-            {placements.map(placement => {
-              const entry = availableById.get(placement.id);
-              if (!entry) return null;
-              const devices = placement.backbone?.devicesByNode[placement.id] ?? [];
-              return <div
-                className={`fabric-node-slot is-${placement.side} ${placement.backbone ? "is-connected" : "is-unverified"}`}
-                style={{ left: placement.left, top: placement.top, width: nodeWidth, height: nodeHeight, "--fabric-spine-height": `${FABRIC_SPINE_HEIGHT}px` } as CSSProperties}
-                key={placement.id}
+        <div className="operator-stage-space" ref={stageSpace} style={{ width: renderedStageWidth * INITIAL_ZOOM, height: renderedStageHeight * INITIAL_ZOOM }}>
+          <div className="operator-stage" ref={stage} style={{ transform: `scale(${INITIAL_ZOOM})` }}>
+            {layoutGroups.map(group => {
+              const groupWidth = group.columns * nodeWidth + Math.max(0, group.columns - 1) * NODE_GAP;
+              return <section
+                className={`fabric-layout-group ${group.splitRows ? "is-split" : "is-single-row"} ${group.showRail ? "has-rail" : ""}`}
+                style={{ "--fabric-columns": group.columns, "--node-width": `${nodeWidth}px`, "--node-gap": `${NODE_GAP}px`, "--fabric-spine-height": `${FABRIC_SPINE_HEIGHT}px` } as CSSProperties}
+                key={group.id}
               >
-                <NodeDiagram node={entry.node} hardware={entry.hardware} select={setSelected} selected={selected} width={nodeWidth} height={nodeHeight}/>
-                {placement.backbone ? <span className="fabric-node-drop"><i/><b>{devices.join(" + ") || "SELECTED UCX LANE"}</b></span> : null}
-              </div>;
+                {group.showRail && group.backbone ? <div className="fabric-spine-slot" style={{ gridColumn: `1 / ${group.columns + 1}`, gridRow: 2, width: groupWidth, height: FABRIC_SPINE_HEIGHT }}>
+                  <FabricSpine backbone={group.backbone} columns={group.columns} nodeWidth={nodeWidth} width={groupWidth}/>
+                </div> : null}
+                {group.placements.map(placement => {
+                  const entry = availableById.get(placement.id);
+                  if (!entry) return null;
+                  const devices = group.backbone?.devicesByNode[placement.id] ?? [];
+                  return <div
+                    className={`fabric-node-slot is-${placement.side} ${group.backbone ? "is-connected" : "is-unverified"} ${group.showRail ? "has-fabric-rail" : ""}`}
+                    style={{ gridColumn: placement.column, gridRow: placement.row, width: nodeWidth } as CSSProperties}
+                    key={placement.id}
+                  >
+                    <NodeDiagram node={entry.node} hardware={entry.hardware} select={setSelected} selected={selected} width={nodeWidth}/>
+                    {group.showRail ? <span className={`fabric-node-drop ${group.backbone ? "" : "is-unverified"}`}><i/><b>{group.backbone ? devices.join(" + ") || "SELECTED UCX LANE" : "UNVERIFIED"}</b></span> : null}
+                  </div>;
+                })}
+              </section>;
             })}
           </div>
         </div>
       </div>
-    </div>
-    <div className="operator-zoom" aria-label="Topology zoom controls">
-      <button onClick={() => setZoom(current => Math.max(0.35, current - 0.1))} aria-label="Zoom out">−</button>
-      <span className="zoom-value">{Math.round(zoom * 100)}%</span>
-      <button onClick={() => setZoom(current => Math.min(1.4, current + 0.1))} aria-label="Zoom in">+</button>
-      <button className="zoom-fit" onClick={() => fitTopology(canvas.current, stageWidth, stageHeight, setZoom)}>FIT</button>
     </div>
     {selected ? <DeviceInspector record={selected} close={() => setSelected(null)}/> : null}
   </div>;

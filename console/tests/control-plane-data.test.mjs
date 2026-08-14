@@ -73,6 +73,12 @@ test("does not guess when an engine reports conflicting block sizes", () => {
   );
 });
 
+test("treats a null history payload as unavailable telemetry", () => {
+  const fleet = snapshot();
+  fleet.nodes[0].openlake.openlake.history = null;
+  assert.equal(aggregateNodeHistory(fleet), null);
+});
+
 test("aligns and sums the newest node history buckets as per-minute rates", () => {
   const fleet = snapshot();
   fleet.nodes[0].openlake.openlake.history = {

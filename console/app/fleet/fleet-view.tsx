@@ -35,7 +35,7 @@ function FleetSummary({ snapshot }: { snapshot: ControlPlaneSnapshot }) {
   const openlakeReporting = active.filter(node => node.openlake && !node.errors.openlake).length;
   const vllmReporting = active.filter(node => node.vllm && !node.errors.vllm).length;
   const cards = [
-    ["Configured nodes", String(snapshot.totals.configured), "Read from [[nodes]]"],
+    ["Configured nodes", String(snapshot.totals.configured), "Total nodes in this fleet"],
     ["Active nodes", String(active.length), `${snapshot.totals.unreachable} unreachable`],
     ["OpenLake reporting", String(openlakeReporting), "Runtime telemetry available"],
     ["vLLM reporting", String(vllmReporting), "Metrics endpoint available"],

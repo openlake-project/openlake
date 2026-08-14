@@ -36,8 +36,12 @@ function urlHost(host) {
 export async function loadControlPlaneConfig(configPath) {
   const absolutePath = resolve(configPath);
   const document = parseToml(await readFile(absolutePath, "utf8"));
-  if (!Array.isArray(document.nodes) || document.nodes.length === 0) {
-    throw new Error(`${absolutePath} does not contain any [[nodes]] entries`);
+
+  if (document.mode !== "kv") {
+    throw new Error(`${absolutePath} console requires mode = "kv"`);
+  }
+  if (!Array.isArray(document.kv_agents) || document.kv_agents.length === 0) {
+    throw new Error(`${absolutePath} requires a non-empty kv_agents array`);
   }
 
   const tls = document.rpc_tls && typeof document.rpc_tls === "object" ? document.rpc_tls : null;
@@ -47,17 +51,16 @@ export async function loadControlPlaneConfig(configPath) {
   const ca = caPath ? await readFile(caPath) : undefined;
   const scheme = tls ? "https" : "http";
 
-  const nodes = document.nodes.map((node, index) => {
-    const id = Number(node.id);
-    if (!Number.isInteger(id) || id < 0) throw new Error(`nodes[${index}].id must be a non-negative integer`);
-    const rpc = parseSocketAddress(node.rpc_addr, `nodes[${index}].rpc_addr`);
-    if (rpc.port === 65535) throw new Error(`nodes[${index}].rpc_addr cannot derive a telemetry port from 65535`);
+  const nodes = document.kv_agents.map((rpcAddress, id) => {
+    const field = `kv_agents[${id}]`;
+    const rpc = parseSocketAddress(rpcAddress, field);
+    if (rpc.port === 65535) throw new Error(`${field} cannot derive a telemetry port from 65535`);
     const host = dialHost(rpc.host);
     const telemetryPort = rpc.port + 1;
     return {
       id,
-      diskCount: Number(node.disk_count ?? 1),
-      rpcAddress: node.rpc_addr,
+      diskCount: 0,
+      rpcAddress,
       telemetryAddress: `${host}:${telemetryPort}`,
       telemetryOrigin: `${scheme}://${urlHost(host)}:${telemetryPort}`,
       rpcOrigin: `${scheme}://${urlHost(host)}:${rpc.port}`,

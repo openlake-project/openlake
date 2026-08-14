@@ -6,7 +6,6 @@ import {
   activeNodes,
   aggregateNodeHistory,
   aggregateOpenLakeTokensServed,
-  averageMetric,
   formatBytes,
   formatCount,
   formatDuration,
@@ -24,7 +23,6 @@ import { AppShell } from "./shell";
 
 const metricNames = {
   completed: ["vllm:request_success_total", "vllm:request_success"],
-  gpuKv: ["vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc"],
   running: ["vllm:num_requests_running"],
   waiting: ["vllm:num_requests_waiting"],
 };
@@ -254,8 +252,6 @@ function LiveDashboard({ snapshot }: { snapshot: ControlPlaneSnapshot }) {
   const running = sumMetric(snapshot, metricNames.running);
   const waiting = sumMetric(snapshot, metricNames.waiting);
   const completed = sumMetric(snapshot, metricNames.completed);
-  const gpuKvRaw = averageMetric(snapshot, metricNames.gpuKv);
-  const gpuKvPercent = gpuKvRaw === null ? null : gpuKvRaw > 1 ? gpuKvRaw : gpuKvRaw * 100;
   const finishReasons = groupMetricByLabel(snapshot, metricNames.completed, "finished_reason");
   const finishTotal = finishReasons.reduce((total, reason) => total + reason.value, 0);
   const vllm = vllmSamples(snapshot);
@@ -287,13 +283,14 @@ function LiveDashboard({ snapshot }: { snapshot: ControlPlaneSnapshot }) {
     { label: "Active nodes", value: String(nodes.length), detail: `${snapshot.totals.configured} configured`, subdetail: `${snapshot.totals.unreachable} unreachable` },
     ...(completed === null ? [] : [{ label: "Completed requests", value: formatCount(completed), detail: "vLLM process lifetime", subdetail: "Cumulative successful requests" }]),
     ...(running === null ? [] : [{ label: "Running requests", value: formatCount(running), detail: "Currently executing", subdetail: waiting === null ? "Queue metric not reported" : `${formatCount(waiting)} waiting` }]),
-    ...(openLakeServed ? [{
+    {
       label: "Tokens served by OpenLake",
-      value: formatCount(openLakeServed.tokens),
-      detail: `${formatCount(openLakeServed.blocks)} confirmed KV blocks`,
-      subdetail: `${openLakeServed.blockSizes.join(" / ")} tokens per block · server GET hits`,
-    }] : []),
-    ...(!openLakeServed && gpuKvPercent !== null ? [{ label: "vLLM GPU KV cache", value: `${gpuKvPercent.toFixed(1)}%`, detail: "Current engine utilization", subdetail: "Reported by vLLM" }] : []),
+      value: formatCount(openLakeServed?.tokens ?? 0),
+      detail: `${formatCount(openLakeServed?.blocks ?? 0)} KV blocks served`,
+      subdetail: openLakeServed
+        ? `Block size: ${openLakeServed.blockSizes.join(" / ")} tokens`
+        : "No KV blocks served",
+    },
   ];
 
   const finishAvailable = finishTotal > 0;

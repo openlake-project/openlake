@@ -18,6 +18,57 @@ test("parses Prometheus samples without forwarding comments", () => {
   ]);
 });
 
+test("uses the ordered KV agent list as the fleet inventory on every KV host", async context => {
+  const directory = await mkdtemp(join(tmpdir(), "openlake-kv-agent-inventory-"));
+  context.after(() => rm(directory, { force: true, recursive: true }));
+  const agents = ["10.0.0.10:9400", "10.0.0.11:9400"];
+  const configs = await Promise.all([0, 1].map(async selfId => {
+    const configPath = join(directory, `node-${selfId}.toml`);
+    await writeFile(configPath, `
+self_id = ${selfId}
+mode = "kv"
+kv_agents = ["${agents[0]}", "${agents[1]}"]
+
+[[nodes]]
+id = ${selfId}
+rpc_addr = "${agents[selfId]}"
+disk_count = 0
+`);
+    return loadControlPlaneConfig(configPath);
+  }));
+
+  for (const config of configs) {
+    assert.deepEqual(config.nodes.map(node => ({
+      id: node.id,
+      rpcAddress: node.rpcAddress,
+      telemetryAddress: node.telemetryAddress,
+    })), [
+      { id: 0, rpcAddress: agents[0], telemetryAddress: "10.0.0.10:9401" },
+      { id: 1, rpcAddress: agents[1], telemetryAddress: "10.0.0.11:9401" },
+    ]);
+  }
+});
+
+test("rejects a console configuration without KV agents", async context => {
+  const directory = await mkdtemp(join(tmpdir(), "openlake-missing-kv-agents-"));
+  context.after(() => rm(directory, { force: true, recursive: true }));
+  const configPath = join(directory, "openlake.toml");
+  await writeFile(configPath, `
+self_id = 0
+mode = "kv"
+
+[[nodes]]
+id = 0
+rpc_addr = "127.0.0.1:9400"
+disk_count = 0
+`);
+
+  await assert.rejects(
+    loadControlPlaneConfig(configPath),
+    /requires a non-empty kv_agents array/,
+  );
+});
+
 test("loads the existing OpenLake TOML and polls both node-agent routes", async context => {
   const telemetry = createServer((request, response) => {
     if (request.url === "/v1/telemetry/openlake") {
@@ -67,7 +118,9 @@ test("loads the existing OpenLake TOML and polls both node-agent routes", async 
   const configPath = join(directory, "openlake.toml");
   await writeFile(configPath, `
 self_id = 7
+mode = "kv"
 rpc_addr = "127.0.0.1:${address.port - 1}"
+kv_agents = ["127.0.0.1:${address.port - 1}"]
 
 [[credentials]]
 access_key = "must-not-leak"
@@ -119,8 +172,12 @@ test("falls back to the real OpenLake RPC listener when the dedicated telemetry 
   context.after(() => rm(directory, { force: true, recursive: true }));
   const configPath = join(directory, "openlake.toml");
   await writeFile(configPath, `
+self_id = 0
+mode = "kv"
+kv_agents = ["127.0.0.1:${address.port}"]
+
 [[nodes]]
-id = 4
+id = 0
 rpc_addr = "127.0.0.1:${address.port}"
 disk_count = 0
 `);
@@ -149,6 +206,10 @@ test("serves nested RSC routes through the application worker", async context =>
   context.after(() => rm(directory, { force: true, recursive: true }));
   const configPath = join(directory, "openlake.toml");
   await writeFile(configPath, `
+self_id = 0
+mode = "kv"
+kv_agents = ["127.0.0.1:${telemetryAddress.port - 1}"]
+
 [[nodes]]
 id = 0
 rpc_addr = "127.0.0.1:${telemetryAddress.port - 1}"

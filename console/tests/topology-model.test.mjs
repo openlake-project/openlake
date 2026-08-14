@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildFabricTopology, buildTopologyGroups, shouldRenderAsHostDeviceRail } from "../app/nodes/topology-model.ts";
+import { buildFabricLayoutGroups, buildFabricTopology, buildTopologyGroups, shouldRenderAsHostDeviceRail } from "../app/nodes/topology-model.ts";
 
 function hardware(overrides = {}) {
   return {
@@ -187,6 +187,54 @@ test("does not invent a backbone from a one-sided or failed probe", () => {
   assert.deepEqual(topology.backbones, []);
   assert.deepEqual(topology.isolatedNodeIds, [0, 1, 2]);
   assert.equal(topology.unverifiedLinkCount, 1);
+});
+
+test("places two unverified nodes without inventing a fabric rail", () => {
+  const topology = buildFabricTopology([
+    node(0, [ucxPeer(1, "rc_mlx5", "mlx5_ib1:1")]),
+    node(1, [ucxPeer(0, "rc_mlx5", "mlx5_ib0:1", false)]),
+  ]);
+  const [layout] = buildFabricLayoutGroups(topology);
+
+  assert.equal(layout.columns, 2);
+  assert.equal(layout.splitRows, false);
+  assert.equal(layout.showRail, false);
+  assert.deepEqual(layout.placements, [
+    { id: 0, column: 1, row: 1, side: "above" },
+    { id: 1, column: 2, row: 1, side: "above" },
+  ]);
+});
+
+test("keeps two-node placement stable when a fabric becomes reciprocal", () => {
+  const unverified = buildFabricLayoutGroups(buildFabricTopology([
+    node(0, [ucxPeer(1, "rc_mlx5", "mlx5_ib1:1")]),
+    node(1, [ucxPeer(0, "rc_mlx5", "mlx5_ib0:1", false)]),
+  ]))[0];
+  const verified = buildFabricLayoutGroups(buildFabricTopology([
+    node(0, [ucxPeer(1, "rc_mlx5", "mlx5_ib1:1")]),
+    node(1, [ucxPeer(0, "rc_mlx5", "mlx5_ib0:1")]),
+  ]))[0];
+
+  assert.deepEqual(verified.placements, unverified.placements);
+  assert.equal(verified.columns, unverified.columns);
+});
+
+test("packs larger fabric groups into stable rows around the rail", () => {
+  const [layout] = buildFabricLayoutGroups({
+    backbones: [],
+    isolatedNodeIds: [0, 1, 2, 3, 4],
+    unverifiedLinkCount: 0,
+  });
+
+  assert.equal(layout.columns, 3);
+  assert.equal(layout.splitRows, true);
+  assert.deepEqual(layout.placements, [
+    { id: 0, column: 1, row: 1, side: "above" },
+    { id: 1, column: 1, row: 3, side: "below" },
+    { id: 2, column: 2, row: 1, side: "above" },
+    { id: 3, column: 2, row: 3, side: "below" },
+    { id: 4, column: 3, row: 1, side: "above" },
+  ]);
 });
 
 test("labels a reciprocal TCP path as TCP rather than InfiniBand", () => {
