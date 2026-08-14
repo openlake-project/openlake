@@ -23,7 +23,14 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
-from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    MambaSpec,
+    SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 logger = init_logger(__name__)
@@ -37,8 +44,10 @@ _FLCH_RETURNS_LENGTH = str(
     inspect.signature(FullAttentionManager.find_longest_cache_hit).return_annotation
 ).endswith(", int]")
 
-KEY_BYTES = 16
 SLOT_HEADER_BYTES = 54
+MAX_SLOT_BYTES = (1 << 32) - 1
+CLIENT_NODE_ID_BASE = 2_048
+CLIENT_NODE_ID_MAX = 0xFFF
 
 _HASH_SEED_HELP = (
     "OpenLake external KV offloading requires PYTHONHASHSEED to be set for "
@@ -56,18 +65,6 @@ def _unwrap(spec):
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
-
-
-def _num_kv_head(model_config) -> int:
-    if getattr(model_config, "use_mla", False):
-        return 1
-    return model_config.get_total_num_kv_heads()
-
-
-def _fold_tp_rank(tp_rank: int, tp_size: int, num_kv_head: int) -> int:
-    if 0 < num_kv_head < tp_size:
-        return tp_rank // (tp_size // num_kv_head)
-    return tp_rank
 
 
 class ChunkHashes(BlockHashListWithBlockSize):
@@ -459,10 +456,16 @@ def _group_key_spaces(vllm_config, kv_cache_config):
     speculative = vllm_config.speculative_config
     use_eagle = bool(speculative and speculative.use_eagle())
     model_name = getattr(vllm_config.model_config, "model", "") or ""
-    model_tag = (
-        hashlib.blake2b(model_name.encode(), digest_size=12).digest()
-        if model_name else bytes(12)
+    extra = (
+        vllm_config.kv_transfer_config.kv_connector_extra_config
+        if vllm_config.kv_transfer_config is not None else {}
     )
+    cache_prefix = str(extra.get("cache_prefix", ""))
+    if model_name or cache_prefix:
+        tag_source = model_name if not cache_prefix else f"{cache_prefix}\0{model_name}"
+        model_tag = hashlib.blake2b(tag_source.encode(), digest_size=12).digest()
+    else:
+        model_tag = bytes(12)
     group_keys = [
         GroupKeys(i, _unwrap(g.kv_cache_spec), hash_bs, model_tag)
         for i, g in enumerate(groups)
@@ -470,9 +473,38 @@ def _group_key_spaces(vllm_config, kv_cache_config):
     return groups, group_keys, sched_bs, hash_bs, use_eagle
 
 
+def _group_tp_replication_factors(
+    kv_cache_groups,
+    *,
+    tp_size: int,
+    dcp_size: int,
+    num_kv_heads: int,
+) -> tuple[int, ...]:
+    """Return the number of byte-identical TP replicas per cache group."""
+
+    def factor_for(spec: KVCacheSpec) -> int:
+        if dcp_size > 1:
+            return 1
+        inner_specs = (
+            tuple(spec.kv_cache_specs.values())
+            if isinstance(spec, UniformTypeKVCacheSpecs)
+            else (spec,)
+        )
+        if any(isinstance(inner, MambaSpec) for inner in inner_specs):
+            return 1
+        if all(
+            isinstance(inner, (MLAAttentionSpec, SlidingWindowMLASpec))
+            for inner in inner_specs
+        ):
+            return tp_size
+        return max(1, tp_size // num_kv_heads)
+
+    return tuple(factor_for(group.kv_cache_spec) for group in kv_cache_groups)
+
+
 class KVTransferThread(threading.Thread):
 
-    def __init__(self, client, group_keys, block_size, tp_rank, ns, layout,
+    def __init__(self, client, group_keys, block_size, tp_rank, namespaces, layout,
                  coord, ready_event, name, request_queue=None,
                  record_operation=None):
         super().__init__(daemon=True, name=name)
@@ -482,7 +514,7 @@ class KVTransferThread(threading.Thread):
         self.group_keys = group_keys
         self.block_size = block_size
         self.tp_rank = tp_rank
-        self.ns = ns
+        self.namespaces = namespaces
         self.layout = layout
         self.ready_event = ready_event
         self.done_task_lock = threading.Lock()
@@ -545,13 +577,13 @@ class KVTransferThread(threading.Thread):
 
 class KVCacheSendingThread(KVTransferThread):
 
-    def __init__(self, client, group_keys, block_size, tp_rank, ns, layout,
-                 coord, ready_event, put_step: int = 1,
+    def __init__(self, client, group_keys, block_size, tp_rank, namespaces, layout,
+                 coord, ready_event, replication_factors,
                  enable_kv_event: bool = False, record_operation=None):
-        super().__init__(client, group_keys, block_size, tp_rank, ns, layout,
+        super().__init__(client, group_keys, block_size, tp_rank, namespaces, layout,
                          coord, ready_event, name="KVCacheSendingThread",
                          record_operation=record_operation)
-        self.put_step = put_step
+        self.replication_factors = replication_factors
         self.stored_requests: dict[str, int] = {}
         self.enable_kv_event = enable_kv_event
         self._store_pressure_active = False
@@ -626,17 +658,20 @@ class KVCacheSendingThread(KVTransferThread):
             entries: list[tuple] = []
             keys: list[bytes] = []
             for group in self.group_keys:
-                put_step_rank = (self.tp_rank + group.g_idx) % self.put_step
+                put_step = self.replication_factors[group.g_idx]
+                put_step_rank = (self.tp_rank + group.g_idx) % put_step
                 for start, end, block_hash in group.process_tokens(
                     token_len,
                     req_meta.block_hashes,
                     mask_num=save_start,
                     chunk_mask=store_masks[group.g_idx],
-                    put_step=self.put_step,
+                    put_step=put_step,
                     put_step_rank=put_step_rank,
                 ):
                     entries.append((group, start // group.block_size, block_hash))
-                    keys.append(group.key_for(block_hash, self.ns))
+                    keys.append(
+                        group.key_for(block_hash, self.namespaces[group.g_idx])
+                    )
             if not keys:
                 self._record_saved(req_id, token_len)
                 return
@@ -688,7 +723,7 @@ class KVCacheSendingThread(KVTransferThread):
                                        num_failed_keys=len(keys))
                 logger.error("put_batch failed (req=%s): %s", req_id, err)
                 return
-            failed = [i for i, v in enumerate(res) if v < 0]
+            failed = [i for i, value in enumerate(res) if value < 0]
             self._record_operation(
                 "save_put", put_start, len(keys), num_bytes=batch_bytes,
                 status="partial_failure" if failed else "ok",
@@ -716,9 +751,9 @@ class KVCacheSendingThread(KVTransferThread):
 
 class KVCacheRecvingThread(KVTransferThread):
 
-    def __init__(self, client, group_keys, block_size, tp_rank, ns, layout,
+    def __init__(self, client, group_keys, block_size, tp_rank, namespaces, layout,
                  coord, ready_event, request_queue=None, record_operation=None):
-        super().__init__(client, group_keys, block_size, tp_rank, ns, layout,
+        super().__init__(client, group_keys, block_size, tp_rank, namespaces, layout,
                          coord, ready_event, name="KVCacheRecvingThread",
                          request_queue=request_queue,
                          record_operation=record_operation)
@@ -753,7 +788,9 @@ class KVCacheRecvingThread(KVTransferThread):
                 if chunk_idx >= len(mask) or not mask[chunk_idx]:
                     continue
                 entries.append((req_meta.block_ids[group.g_idx][chunk_idx],
-                                group.key_for(block_hash, self.ns)))
+                                group.key_for(
+                                    block_hash, self.namespaces[group.g_idx]
+                                )))
         if not entries:
             self.set_finished_request(req_id)
             self.request_queue.task_done()
@@ -809,40 +846,96 @@ class KVCacheRecvingThread(KVTransferThread):
 
 
 class OpenLakeWorker:
+    @staticmethod
+    def _client_id(base_id: int, parallel_config) -> int:
+        if (getattr(parallel_config, "distributed_executor_backend", None)
+                == "external_launcher"):
+            client_id = base_id + 2 * int(parallel_config.rank) + 1
+        else:
+            model_world_size = (
+                parallel_config.pipeline_parallel_size
+                * parallel_config.prefill_context_parallel_size
+                * parallel_config.tensor_parallel_size
+            )
+            dp_rank = int(getattr(parallel_config, "data_parallel_index", 0))
+            scheduler_id = base_id + dp_rank * (model_world_size + 1)
+            model_rank = int(parallel_config.rank) % model_world_size
+            client_id = scheduler_id + 1 + model_rank
+        if not CLIENT_NODE_ID_BASE <= client_id <= CLIENT_NODE_ID_MAX:
+            raise ValueError(
+                f"OpenLake worker client_id {client_id} outside "
+                f"[{CLIENT_NODE_ID_BASE}, {CLIENT_NODE_ID_MAX}]"
+            )
+        return client_id
+
     def __init__(self, vllm_config, kv_cache_config):
         _require_fixed_hash_seed()
         import openlake_client
-        from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+        from vllm.distributed.parallel_state import (
+            get_dcp_group,
+            get_pcp_group,
+            get_tensor_model_parallel_rank,
+            get_tensor_model_parallel_world_size,
+        )
+
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.pp_size = parallel_config.pipeline_parallel_size
+        self.pp_rank = (parallel_config.rank // self.tp_size) % self.pp_size
+        self.pcp_size = get_pcp_group().world_size
+        self.pcp_rank = (
+            get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        )
+        self.dcp_size = get_dcp_group().world_size
+        self.dcp_rank = (
+            get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
+        )
+        self.num_kv_head = model_config.get_total_num_kv_heads()
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         nodes = extra.get("openlake_nodes")
         if not nodes:
             raise ValueError("kv_connector_extra_config.openlake_nodes required")
-        self.tp_rank = get_tensor_model_parallel_rank()
         base_id = int(extra.get("openlake_client_id", 2048))
         self._client = openlake_client.Client(
             device=extra.get("openlake_device", "mlx5_ib0"),
-            client_id=base_id + 1 + self.tp_rank,
+            client_id=self._client_id(base_id, parallel_config),
         )
         self._nodes = nodes
         self._num_blocks = vllm_config.cache_config.num_gpu_blocks
         groups, self.group_keys, self.block_size, hash_bs, use_eagle = (
             _group_key_spaces(vllm_config, kv_cache_config)
         )
-        parallel = vllm_config.parallel_config
-        dcp = parallel.decode_context_parallel_size
-        head = _fold_tp_rank(
-            self.tp_rank, parallel.tensor_parallel_size,
-            _num_kv_head(vllm_config.model_config),
+        self._kv_cache_groups = groups
+        self._group_tp_replication_factors = _group_tp_replication_factors(
+            self._kv_cache_groups,
+            tp_size=self.tp_size,
+            dcp_size=self.dcp_size,
+            num_kv_heads=self.num_kv_head,
         )
-        self.ns = (head, 0, self.tp_rank % dcp if dcp > 1 else 0, 0)
+        self.namespaces = tuple(
+            (
+                self.tp_rank // self._group_tp_replication_factors[g_idx],
+                self.pcp_rank,
+                self.dcp_rank,
+                self.pp_rank,
+            )
+            for g_idx in range(len(self._kv_cache_groups))
+        )
         self.coord = Coordinator(
             groups, self.group_keys, self.block_size, hash_bs, use_eagle,
             getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None),
         )
         self.load_async = extra.get("load_async", True)
-        self.put_step = max(1, int(extra.get("openlake_put_step", 1)))
+        if "openlake_put_step" in extra:
+            logger.warning(
+                "openlake_put_step is ignored; TP store striping is derived "
+                "from each KV cache group's byte replication"
+            )
         self.num_recv_threads = max(1, int(extra.get("openlake_recv_threads", 1)))
         self.enable_kv_events = bool(extra.get("openlake_kv_events", False))
         self.layout = GroupLayout()
@@ -857,10 +950,45 @@ class OpenLakeWorker:
         self.kv_connector_stats = OpenLakeConnectorStats()
         self._kv_connector_stats_lock = threading.Lock()
 
+    @staticmethod
+    def _sync_max_slot_bytes(local_slot_bytes: int) -> int:
+        """Use one fixed OpenLake slab slot size across all model workers."""
+        local_slot_bytes = int(local_slot_bytes)
+        if local_slot_bytes < 0 or local_slot_bytes > MAX_SLOT_BYTES:
+            raise ValueError(
+                f"OpenLake local slot size {local_slot_bytes} is outside the "
+                f"u32 range [0, {MAX_SLOT_BYTES}]"
+            )
+        if 0 < local_slot_bytes <= SLOT_HEADER_BYTES:
+            raise ValueError(
+                f"OpenLake local slot size {local_slot_bytes} must exceed the "
+                f"{SLOT_HEADER_BYTES}-byte key header"
+            )
+
+        from vllm.distributed.parallel_state import get_world_group
+
+        world = get_world_group()
+        if world.world_size == 1:
+            return local_slot_bytes
+
+        value = torch.tensor(local_slot_bytes, dtype=torch.int64, device="cpu")
+        torch.distributed.all_reduce(
+            value,
+            op=torch.distributed.ReduceOp.MAX,
+            group=world.cpu_group,
+        )
+        global_slot_bytes = int(value.item())
+        if not local_slot_bytes <= global_slot_bytes <= MAX_SLOT_BYTES:
+            raise RuntimeError(
+                "OpenLake slot-size MAX reduction returned invalid value "
+                f"{global_slot_bytes} for local value {local_slot_bytes}"
+            )
+        return global_slot_bytes
+
+    def register_cross_layers_kv_caches(self, kv_cache) -> None:
+        self.register_kv_caches({"__cross_layer__": kv_cache})
+
     def register_kv_caches(self, kv_caches) -> None:
-        if not kv_caches:
-            logger.warning("openlake: no kv caches to register")
-            return
         seen_ptrs: set[int] = set()
         addrs: list[int] = []
         block_lens: list[int] = []
@@ -888,12 +1016,21 @@ class OpenLakeWorker:
                     addrs.append(base_addr + idx * seg_stride)
                     block_lens.append(seg_stride // self._num_blocks)
         self.layout.set(addrs, block_lens)
-        slot_bytes = SLOT_HEADER_BYTES + sum(block_lens)
+        local_slot_bytes = SLOT_HEADER_BYTES + sum(block_lens) if addrs else 0
+        slot_bytes = self._sync_max_slot_bytes(local_slot_bytes)
+        if not addrs:
+            logger.warning(
+                "openlake: no local kv caches to register; synchronized "
+                "%d B/slot across model workers",
+                slot_bytes,
+            )
+            return
         for node_id, addr in enumerate(self._nodes):
             self._client.attach(addr, node_id, slot_bytes)
         logger.info(
-            "openlake: registered %d segments over %d blocks, %d B/slot",
-            len(addrs), self._num_blocks, slot_bytes,
+            "openlake: registered %d segments over %d blocks, "
+            "%d B local payload slot, %d B server slot",
+            len(addrs), self._num_blocks, local_slot_bytes, slot_bytes,
         )
 
         if self.kv_role in ("kv_producer", "kv_both"):
@@ -903,11 +1040,11 @@ class OpenLakeWorker:
                 self.group_keys,
                 self.block_size,
                 self.tp_rank,
-                self.ns,
+                self.namespaces,
                 self.layout,
                 self.coord,
                 ready_event_sending,
-                self.put_step,
+                self._group_tp_replication_factors,
                 self.enable_kv_events,
                 record_operation=self._record_kv_connector_operation,
             )
@@ -922,7 +1059,7 @@ class OpenLakeWorker:
                 self.group_keys,
                 self.block_size,
                 self.tp_rank,
-                self.ns,
+                self.namespaces,
                 self.layout,
                 self.coord,
                 ready_event_recving,
@@ -1033,6 +1170,26 @@ class OpenLakeWorker:
 
 
 class OpenLakeScheduler:
+    @staticmethod
+    def _client_id(base_id: int, parallel_config) -> int:
+        if (getattr(parallel_config, "distributed_executor_backend", None)
+                == "external_launcher"):
+            client_id = base_id + 2 * int(parallel_config.rank)
+        else:
+            model_world_size = (
+                parallel_config.pipeline_parallel_size
+                * parallel_config.prefill_context_parallel_size
+                * parallel_config.tensor_parallel_size
+            )
+            dp_rank = int(getattr(parallel_config, "data_parallel_index", 0))
+            client_id = base_id + dp_rank * (model_world_size + 1)
+        if not CLIENT_NODE_ID_BASE <= client_id <= CLIENT_NODE_ID_MAX:
+            raise ValueError(
+                f"OpenLake scheduler client_id {client_id} outside "
+                f"[{CLIENT_NODE_ID_BASE}, {CLIENT_NODE_ID_MAX}]"
+            )
+        return client_id
+
     def __init__(self, vllm_config, kv_cache_config):
         _require_fixed_hash_seed()
         import openlake_client
@@ -1045,9 +1202,11 @@ class OpenLakeScheduler:
         self._min_external_lookup_tokens = extra.get(
             "openlake_min_external_lookup_tokens", 1000
         )
+        parallel = vllm_config.parallel_config
+        base_id = int(extra.get("openlake_client_id", 2048))
         self._client = openlake_client.Client(
             device=extra.get("openlake_device", "mlx5_ib0"),
-            client_id=int(extra.get("openlake_client_id", 2048)),
+            client_id=self._client_id(base_id, parallel),
         )
         for node_id, addr in enumerate(nodes):
             self._client.attach(addr, node_id)
@@ -1055,39 +1214,49 @@ class OpenLakeScheduler:
         groups, self._group_keys, self._sched_bs, self._hash_bs, use_eagle = (
             _group_key_spaces(vllm_config, kv_cache_config)
         )
-        parallel = vllm_config.parallel_config
-        self._dcp = parallel.decode_context_parallel_size
-        self._pcp = parallel.prefill_context_parallel_size
+        self._kv_cache_groups = groups
+        self.tp_size = parallel.tensor_parallel_size
+        self.pp_size = parallel.pipeline_parallel_size
+        self.pcp_size = parallel.prefill_context_parallel_size
+        self.dcp_size = parallel.decode_context_parallel_size
+        self.num_kv_head = vllm_config.model_config.get_total_num_kv_heads()
         self.load_async = extra.get("load_async", True)
         self._coord = Coordinator(
             groups, self._group_keys, self._sched_bs, self._hash_bs, use_eagle,
             getattr(envs, "VLLM_PREFIX_CACHE_RETENTION_INTERVAL", None),
         )
 
-        tp, pp = parallel.tensor_parallel_size, parallel.pipeline_parallel_size
-        heads = _num_kv_head(vllm_config.model_config)
-        if self._dcp > 1:
-            self._namespaces = [
-                (t, c, t % self._dcp, q)
-                for c in range(self._pcp)
-                for t in range(tp)
-                for q in range(pp)
-            ]
-        else:
-            self._namespaces = [
-                (t, c, 0, q)
-                for c in range(self._pcp)
-                for t in range(min(tp, heads))
-                for q in range(pp)
-            ]
+        self._group_tp_replication_factors = _group_tp_replication_factors(
+            self._kv_cache_groups,
+            tp_size=self.tp_size,
+            dcp_size=self.dcp_size,
+            num_kv_heads=self.num_kv_head,
+        )
+        self._init_lookup_key_prefixes()
         logger.info(
-            "openlake: %d nodes, %d groups, %d rank namespaces",
-            len(nodes), len(self._group_keys), len(self._namespaces),
+            "openlake: %d nodes, %d groups, rank namespaces=%s",
+            len(nodes), len(self._group_keys),
+            [len(value) for value in self._namespaces_by_group],
         )
         self._loads: dict[str, PendingLoad] = {}
         self._request_trackers: dict[str, RequestTracker] = {}
         self._unfinished_requests: dict[str, tuple[object, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
+
+    def _init_lookup_key_prefixes(self) -> None:
+        def rank_namespaces(factor: int) -> tuple[tuple[int, int, int, int], ...]:
+            assert self.dcp_size == 1 or factor == 1
+            return tuple(
+                (shard_rank, pcp_rank, shard_rank % self.dcp_size, pp_rank)
+                for pcp_rank in range(self.pcp_size)
+                for shard_rank in range(self.tp_size // factor)
+                for pp_rank in range(self.pp_size)
+            )
+
+        self._namespaces_by_group = tuple(
+            rank_namespaces(self._group_tp_replication_factors[g_idx])
+            for g_idx in range(len(self._kv_cache_groups))
+        )
 
     def _contains(self, keys: list[bytes]) -> list[bool]:
         try:
@@ -1098,7 +1267,7 @@ class OpenLakeScheduler:
             return [False] * len(keys)
 
     def _gather_exists(self, block_hashes, token_len: int) -> set[tuple[int, bytes]]:
-        candidates: list[tuple[int, bytes]] = []
+        candidates: list[tuple[int, bytes, int]] = []
         candidate_keys: list[bytes] = []
         lookup_masks = self._coord.lookup_mask(token_len)
         for group in self._group_keys:
@@ -1110,9 +1279,10 @@ class OpenLakeScheduler:
                 if mask is not None and not mask[chunk_id]:
                     continue
                 chunk_hash = bytes(chunk_hashes[chunk_id])
-                candidates.append((group.g_idx, chunk_hash))
+                namespaces = self._namespaces_by_group[group.g_idx]
+                candidates.append((group.g_idx, chunk_hash, len(namespaces)))
                 candidate_keys.extend(
-                    group.key_for(chunk_hash, ns) for ns in self._namespaces
+                    group.key_for(chunk_hash, ns) for ns in namespaces
                 )
         if not candidate_keys:
             return set()
@@ -1122,12 +1292,13 @@ class OpenLakeScheduler:
             "openlake: %d keys in %.0f us", len(candidate_keys),
             (time.perf_counter() - lookup_start) * 1e6,
         )
-        per_candidate = len(self._namespaces)
-        return {
-            candidate
-            for i, candidate in enumerate(candidates)
-            if all(hits[i * per_candidate : (i + 1) * per_candidate])
-        }
+        exists: set[tuple[int, bytes]] = set()
+        offset = 0
+        for group_idx, chunk_hash, namespace_count in candidates:
+            if all(hits[offset : offset + namespace_count]):
+                exists.add((group_idx, chunk_hash))
+            offset += namespace_count
+        return exists
 
 
     def get_num_new_matched_tokens(

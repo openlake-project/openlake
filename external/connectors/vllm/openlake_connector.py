@@ -59,6 +59,11 @@ class OpenLakeKVEvents(KVConnectorKVEvents):
 
 
 class OpenLakeConnector(KVConnectorBase_V1, SupportsHMA):
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        extra = self._kv_transfer_config.kv_connector_extra_config
+        return str(extra.get("enable_cross_layers_blocks", "False")).lower() == "true"
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -85,23 +90,30 @@ class OpenLakeConnector(KVConnectorBase_V1, SupportsHMA):
 
     @staticmethod
     def _validate(vllm_config: VllmConfig, kv_cache_config: KVCacheConfig) -> None:
-        from vllm.v1.kv_cache_interface import CrossAttentionSpec
+        from vllm.v1.kv_cache_interface import CrossAttentionSpec, MambaSpec
 
-        p = vllm_config.parallel_config
-        bad: list[str] = []
+        unsupported: list[str] = []
+        cache_block_size = vllm_config.cache_config.block_size
         for g_idx, g in enumerate(kv_cache_config.kv_cache_groups):
-            if isinstance(g.kv_cache_spec, CrossAttentionSpec):
-                bad.append(f"group {g_idx}: CrossAttentionSpec")
-        pcp = p.prefill_context_parallel_size
-        dcp = p.decode_context_parallel_size
+            spec = g.kv_cache_spec
+            if isinstance(spec, CrossAttentionSpec):
+                unsupported.append(f"group {g_idx}: CrossAttentionSpec")
+            if isinstance(spec, MambaSpec) and spec.block_size != cache_block_size:
+                unsupported.append(
+                    f"group {g_idx}: MambaSpec with block_size="
+                    f"{spec.block_size} != cache_config.block_size="
+                    f"{cache_block_size} (mamba_cache_mode != 'align')"
+                )
+        pcp = vllm_config.parallel_config.prefill_context_parallel_size
+        dcp = vllm_config.parallel_config.decode_context_parallel_size
         if len(kv_cache_config.kv_cache_groups) > 1 and pcp * dcp > 1:
-            bad.append(f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention")
-        if (len(kv_cache_config.kv_cache_groups) > 255
-                or p.tensor_parallel_size > 255
-                or p.pipeline_parallel_size > 255 or pcp > 15 or dcp > 15):
-            bad.append("parallel/group sizes exceed the key namespace bytes")
-        if bad:
-            raise ValueError("OpenLakeConnector does not support: " + "; ".join(bad))
+            unsupported.append(
+                f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
+            )
+        if unsupported:
+            raise ValueError(
+                "OpenLakeConnector does not support: " + "; ".join(unsupported)
+            )
 
 
     def get_num_new_matched_tokens(
@@ -157,6 +169,16 @@ class OpenLakeConnector(KVConnectorBase_V1, SupportsHMA):
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         self._worker.register_kv_caches(kv_caches)
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type
+    ) -> None:
+        assert self._worker is not None
+        assert (
+            self._kv_cache_config is not None
+            and len(self._kv_cache_config.kv_cache_groups) == 1
+        ), "Cross-layer KV cache is not supported with hybrid models"
+        self._worker.register_cross_layers_kv_caches(kv_cache)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         pass

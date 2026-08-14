@@ -36,3 +36,6 @@
 
         - name: test
           run: cargo test --workspace
+
+        - name: Connector regression tests
+          run: python3 external/connectors/vllm/tests/test_openlake_adapter.py

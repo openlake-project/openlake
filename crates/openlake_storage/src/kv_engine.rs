@@ -9,6 +9,7 @@ use openlake_io::kv::{self, HostSlab, KvRequest, KvResponse, KvSlab};
 use serde::Serialize;
 
 const BLOCK_HASH_BYTES: usize = 32;
+const KEY_HEADER_BYTES: usize = std::mem::size_of::<openlake_io::kv::KeyHash>();
 
 fn logical_block_ids(keys: &[Vec<u8>]) -> Option<Vec<[u8; BLOCK_HASH_BYTES]>> {
     keys.iter()
@@ -218,6 +219,22 @@ impl KvEngine {
         let host_backed = true;
 
         if let KvRequest::Attach { slot_bytes } = &req {
+            if *slot_bytes != 0 && *slot_bytes <= KEY_HEADER_BYTES as u32 {
+                return KvResponse::Err(format!(
+                    "slot_bytes {slot_bytes} must exceed the {KEY_HEADER_BYTES}-byte key header"
+                ));
+            }
+            if *slot_bytes != 0 {
+                let slab = self.slab.borrow();
+                if let Some(slab) = slab.as_ref() {
+                    if slab.slot_bytes() != *slot_bytes {
+                        return KvResponse::Err(format!(
+                            "slot size mismatch: slab uses {}, client requested {slot_bytes}",
+                            slab.slot_bytes()
+                        ));
+                    }
+                }
+            }
             if host_backed && *slot_bytes > 0 && self.slab.borrow().is_none() {
                 let slot_count = (self.capacity_bytes / *slot_bytes as u64).max(1) as u32;
                 match HostSlab::new(*slot_bytes, slot_count, self.reserve_ttl) {
@@ -315,9 +332,9 @@ impl KvEngine {
         slot_bytes: u32,
         dry_run: bool,
     ) -> Result<openlake_io::rpc::UcxEndpointReply, String> {
-        if slot_bytes != 0 && slot_bytes <= BLOCK_HASH_BYTES as u32 {
+        if slot_bytes != 0 && slot_bytes <= KEY_HEADER_BYTES as u32 {
             return Err(format!(
-                "slot_bytes {slot_bytes} must exceed the {BLOCK_HASH_BYTES}-byte key header"
+                "slot_bytes {slot_bytes} must exceed the {KEY_HEADER_BYTES}-byte key header"
             ));
         }
 
@@ -432,6 +449,22 @@ impl KvEngine {
         epoch: u64,
         slot_bytes: u32,
     ) -> Result<(), String> {
+        if slot_bytes != 0 && slot_bytes <= KEY_HEADER_BYTES as u32 {
+            return Err(format!(
+                "slot_bytes {slot_bytes} must exceed the {KEY_HEADER_BYTES}-byte key header"
+            ));
+        }
+        if slot_bytes != 0 {
+            let slab = self.slab.borrow();
+            if let Some(slab) = slab.as_ref() {
+                if slab.slot_bytes() != slot_bytes {
+                    return Err(format!(
+                        "slot size mismatch: slab uses {}, client requested {slot_bytes}",
+                        slab.slot_bytes()
+                    ));
+                }
+            }
+        }
         eps.iter().try_for_each(|ep| -> Result<(), String> {
             self.backend.attach(client, ep, epoch)?;
             if let Some(f) = &*self.on_attach.borrow() {
@@ -599,12 +632,16 @@ mod tests {
     }
 
     #[test]
-    fn re_attach_returns_the_existing_slab() {
+    fn re_attach_requires_the_existing_slab_geometry() {
         let e = KvEngine::new_tcp(64 * 1024, Duration::from_secs(60));
         let (first, _, _) = attach(&e, 4096);
-        let (again, sb, sc) = attach(&e, 8192);
+        let (again, sb, sc) = attach(&e, 4096);
         assert_eq!(again, first);
         assert_eq!((sb, sc), (4096, 16));
+        assert!(matches!(
+            e.serve_tcp(KvRequest::Attach { slot_bytes: 8192 }),
+            KvResponse::Err(message) if message.contains("slot size mismatch")
+        ));
     }
 
     #[test]
