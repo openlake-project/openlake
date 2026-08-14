@@ -2160,7 +2160,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openlake_cli"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "aws-credential-types",
@@ -2191,7 +2191,7 @@ dependencies = [
 
 [[package]]
 name = "openlake_io"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -2229,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "openlake_kv_client"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "compio",
  "futures",
@@ -2242,7 +2242,7 @@ dependencies = [
 
 [[package]]
 name = "openlake_server"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2292,7 +2292,7 @@ dependencies = [
 
 [[package]]
 name = "openlake_storage"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
