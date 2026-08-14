@@ -870,7 +870,12 @@ pub(crate) async fn dispatch(
                     _ if protocol_version != UCX_PROTOCOL_VERSION => Err(format!(
                         "UCX protocol version {protocol_version} is unsupported; expected {UCX_PROTOCOL_VERSION}"
                     )),
-                    _ if !(CLIENT_NODE_ID_BASE..=CLIENT_NODE_ID_MAX).contains(&client_node_id) => {
+                    // Agent discovery probes carry the source server's node ID and
+                    // never retain the endpoint in the KV client map.
+                    _ if !dry_run
+                        && !(CLIENT_NODE_ID_BASE..=CLIENT_NODE_ID_MAX)
+                            .contains(&client_node_id) =>
+                    {
                         Err(format!(
                             "client id {client_node_id} outside [{CLIENT_NODE_ID_BASE}, {CLIENT_NODE_ID_MAX}]"
                         ))
