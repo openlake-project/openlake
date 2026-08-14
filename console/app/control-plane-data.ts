@@ -384,7 +384,7 @@ export function aggregateNodeHistory(snapshot: ControlPlaneSnapshot | null, maxi
   const histories = activeNodes(snapshot)
     .filter(node => !node.errors.openlake)
     .map(node => node.openlake?.openlake.history)
-    .filter(history => history !== undefined && history.interval_seconds > 0);
+    .filter(history => history != null && history.interval_seconds > 0);
   if (!histories.length) return null;
 
   const intervalSeconds = histories[0].interval_seconds;

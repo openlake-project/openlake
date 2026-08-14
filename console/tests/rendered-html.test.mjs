@@ -62,8 +62,9 @@ test("ships Dashboard, Topology, and Fleet as the only product routes", async ()
 });
 
 test("ships no demo telemetry path", async () => {
-  const [dataSource, packageJson, layout, styles, shell, gitignore] = await Promise.all([
+  const [dataSource, dashboardSource, packageJson, layout, styles, shell, gitignore] = await Promise.all([
     readFile(new URL("app/control-plane-data.ts", projectRoot), "utf8"),
+    readFile(new URL("app/control-plane.tsx", projectRoot), "utf8"),
     readFile(new URL("package.json", projectRoot), "utf8"),
     readFile(new URL("app/layout.tsx", projectRoot), "utf8"),
     readFile(new URL("app/globals.css", projectRoot), "utf8"),
@@ -74,6 +75,8 @@ test("ships no demo telemetry path", async () => {
   assert.doesNotMatch(dataSource, /demoControlPlane|DEMO_MODE|demo-control-plane/);
   assert.match(dataSource, /snapshot: null,[\s\S]*loading: true,[\s\S]*error: null/);
   assert.match(dataSource, /fetch\("\/api\/control-plane\/snapshot"/);
+  assert.match(dashboardSource, /value: formatCount\(openLakeServed\?\.tokens \?\? 0\)/);
+  assert.doesNotMatch(dashboardSource, /vLLM GPU KV cache|Current engine utilization/);
   assert.match(gitignore, /\/app\/demo\/\*\.json/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   assert.doesNotMatch(layout, /og\.png|summary_large_image/);

@@ -2,6 +2,7 @@ self_id              = 0
 mode                 = "kv"
 transport            = "h2"
 rpc_addr             = "127.0.0.1:9400"
+kv_agents            = ["127.0.0.1:9400"]
 s3_addr              = "127.0.0.1:9000"
 region               = "us-east-1"
 data_dirs            = []

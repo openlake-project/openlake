@@ -40,6 +40,23 @@ export type FabricTopology = {
   unverifiedLinkCount: number;
 };
 
+export type FabricNodePlacement = {
+  id: number;
+  column: number;
+  row: 1 | 3;
+  side: "above" | "below";
+};
+
+export type FabricLayoutGroup = {
+  id: string;
+  nodeIds: number[];
+  backbone: FabricBackbone | null;
+  columns: number;
+  splitRows: boolean;
+  showRail: boolean;
+  placements: FabricNodePlacement[];
+};
+
 type PeerPath = {
   kind: "rdma" | "tcp";
   capabilities: Array<{ transport: string; device: string }>;
@@ -174,6 +191,51 @@ export function buildFabricTopology(nodes: ControlPlaneNode[]): FabricTopology {
   backbones.sort((left, right) => left.nodeIds[0] - right.nodeIds[0]);
   isolatedNodeIds.sort((left, right) => left - right);
   return { backbones, isolatedNodeIds, unverifiedLinkCount };
+}
+
+/**
+ * Produce stable grid coordinates for every fabric component. Connection
+ * health changes the rail treatment, not the host positions.
+ */
+export function buildFabricLayoutGroups(fabric: FabricTopology): FabricLayoutGroup[] {
+  const groups: Array<{
+    id: string;
+    nodeIds: number[];
+    backbone: FabricBackbone | null;
+  }> = [
+    ...fabric.backbones.map(backbone => ({
+      id: backbone.id,
+      nodeIds: backbone.nodeIds,
+      backbone,
+    })),
+    ...(fabric.isolatedNodeIds.length ? [{
+      id: "fabric-unverified",
+      nodeIds: fabric.isolatedNodeIds,
+      backbone: null,
+    }] : []),
+  ];
+
+  return groups.map(group => {
+    const splitRows = group.nodeIds.length > 2;
+    const columns = Math.max(1, splitRows
+      ? Math.ceil(group.nodeIds.length / 2)
+      : group.nodeIds.length);
+    return {
+      ...group,
+      columns,
+      splitRows,
+      showRail: Boolean(group.backbone),
+      placements: group.nodeIds.map((id, index) => {
+        const below = splitRows && index % 2 === 1;
+        return {
+          id,
+          column: splitRows ? Math.floor(index / 2) + 1 : index + 1,
+          row: below ? 3 : 1,
+          side: below ? "below" : "above",
+        };
+      }),
+    };
+  });
 }
 
 function isPhysicalNic(network: TopologyNic) {
