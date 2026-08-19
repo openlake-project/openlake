@@ -3,6 +3,8 @@ image:
   tag: "0.8.0"
   pullPolicy: IfNotPresent
 
+imagePullSecrets: []
+
 mode: tls
 
 replicaCount: 2
@@ -58,6 +60,12 @@ kv:
     capacityGB: 1
     reserveTtlSeconds: 60
 
+  sharedMemory:
+    # emptyDir isolates the slab inside the OpenLake pod. hostPath is intended
+    # only for the one-node H2/vLLM smoke test, where both pods must see it.
+    type: emptyDir
+    hostPath: /dev/shm
+
   # List order is the stable OpenLake node ID. nodeName controls Kubernetes
   # placement; ip is the address advertised to OpenLake and vLLM peers.
   targets: []
@@ -87,4 +95,21 @@ kv:
     # DCT. Set this explicitly when the connector uses another observed device.
     device: ""
 
+  tolerations: []
+  resources: {}
+
+# Optional `helm test` Job. It proves that a CPU vLLM process can consume the
+# generated connector JSON and initialize against one same-host H2 KV server.
+vllmSmokeTest:
+  enabled: false
+  image:
+    repository: registry.example.com/openlake/vllm-openlake-cpu
+    tag: "0.26.0-openlake-0.8.0"
+    pullPolicy: IfNotPresent
+  model: facebook/opt-125m
+  port: 8000
+  maxModelLen: 512
+  startupTimeoutSeconds: 900
+  hfTokenSecretName: ""
+  env: {}
   resources: {}

@@ -30,6 +30,10 @@ app.kubernetes.io/name: {{ include "openlake.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{- define "openlake.vllmSmokeTest.fullname" -}}
+{{- printf "%s-vllm-smoke" (include "openlake.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
 {{- define "openlake.kv.connectorDevice" -}}
 {{- if .Values.kv.connector.device -}}
 {{- .Values.kv.connector.device -}}
@@ -39,6 +43,27 @@ local
 ucx
 {{- else -}}
 {{- .Values.kv.rdma.devName -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "openlake.vllmSmokeTest.validate" -}}
+{{- if .Values.vllmSmokeTest.enabled -}}
+  {{- if not .Values.kv.enabled -}}
+    {{- fail "vllmSmokeTest.enabled=true requires kv.enabled=true" -}}
+  {{- end -}}
+  {{- include "openlake.kv.validate" . -}}
+  {{- if ne .Values.kv.transport "h2" -}}
+    {{- fail "the CPU vLLM smoke test requires kv.transport=h2" -}}
+  {{- end -}}
+  {{- if ne (len .Values.kv.targets) 1 -}}
+    {{- fail "the H2/local vLLM smoke test requires exactly one kv.targets entry" -}}
+  {{- end -}}
+  {{- if not .Values.kv.connector.enabled -}}
+    {{- fail "the vLLM smoke test requires kv.connector.enabled=true" -}}
+  {{- end -}}
+  {{- if ne .Values.kv.sharedMemory.type "hostPath" -}}
+    {{- fail "the H2/local vLLM smoke test requires kv.sharedMemory.type=hostPath" -}}
+  {{- end -}}
 {{- end -}}
 {{- end -}}
 

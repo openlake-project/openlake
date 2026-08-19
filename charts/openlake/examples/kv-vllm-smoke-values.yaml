@@ -1,0 +1,52 @@
+# One-node, CPU-only integration test. Replace the node, IP, and both image
+# repositories before installing. This is not a production P2P deployment.
+image:
+  repository: registry.example.com/openlake/openlaked
+  tag: "0.8.0"
+
+kv:
+  enabled: true
+  transport: h2
+  targets:
+    - nodeName: gpu-worker-0
+      ip: 10.0.0.11
+  slab:
+    capacityGB: 1
+    reserveTtlSeconds: 60
+  sharedMemory:
+    # The OpenLake and vLLM test pods must see the same POSIX shared memory.
+    # Never use this to imply that H2 works between different hosts.
+    type: hostPath
+    hostPath: /dev/shm
+  connector:
+    enabled: true
+    device: ""
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+vllmSmokeTest:
+  enabled: true
+  image:
+    repository: registry.example.com/openlake/vllm-openlake-cpu
+    tag: "0.26.0-openlake-0.8.0"
+    pullPolicy: IfNotPresent
+  # This public 125M-parameter model keeps a startup-only CPU test small. It
+  # can be replaced with meta-llama/Llama-3.2-1B-Instruct or the agreed model.
+  model: facebook/opt-125m
+  port: 8000
+  maxModelLen: 512
+  startupTimeoutSeconds: 900
+  hfTokenSecretName: ""
+  env: {}
+  resources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi

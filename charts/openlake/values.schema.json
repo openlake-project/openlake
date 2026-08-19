@@ -2,6 +2,19 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "imagePullSecrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
     "kv": {
       "type": "object",
       "required": [
@@ -9,6 +22,7 @@
         "transport",
         "ports",
         "slab",
+        "sharedMemory",
         "targets",
         "rdma",
         "connector"
@@ -48,6 +62,20 @@
             "reserveTtlSeconds": {
               "type": "integer",
               "minimum": 1
+            }
+          }
+        },
+        "sharedMemory": {
+          "type": "object",
+          "required": ["type", "hostPath"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["emptyDir", "hostPath"]
+            },
+            "hostPath": {
+              "type": "string",
+              "pattern": "^/"
             }
           }
         },
@@ -149,6 +177,81 @@
             "device": {
               "type": "string"
             }
+          }
+        },
+        "resources": {
+          "type": "object"
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "vllmSmokeTest": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "image",
+        "model",
+        "port",
+        "maxModelLen",
+        "startupTimeoutSeconds",
+        "hfTokenSecretName",
+        "env",
+        "resources"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "type": "object",
+          "required": ["repository", "tag", "pullPolicy"],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            },
+            "pullPolicy": {
+              "type": "string",
+              "enum": ["Always", "IfNotPresent", "Never"]
+            }
+          }
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "maxModelLen": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "startupTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 60
+        },
+        "hfTokenSecretName": {
+          "type": "string"
+        },
+        "env": {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": ["string", "number", "boolean"]
           }
         },
         "resources": {

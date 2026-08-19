@@ -1,0 +1,141 @@
+{{- if .Values.vllmSmokeTest.enabled }}
+{{- include "openlake.vllmSmokeTest.validate" . }}
+{{- $target := first .Values.kv.targets }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "openlake.vllmSmokeTest.fullname" . }}
+  labels:
+    {{- include "openlake.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add (int .Values.vllmSmokeTest.startupTimeoutSeconds) 120 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openlake.selectorLabels" . | nindent 8 }}
+        openlake.dev/workload: vllm-smoke-test
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchFields:
+                  - key: metadata.name
+                    operator: In
+                    values:
+                      - {{ $target.nodeName | quote }}
+      {{- with .Values.kv.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: vllm
+          image: "{{ .Values.vllmSmokeTest.image.repository }}:{{ .Values.vllmSmokeTest.image.tag }}"
+          imagePullPolicy: {{ .Values.vllmSmokeTest.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+
+              cleanup() {
+                kill "${server_pid}" 2>/dev/null || true
+                wait "${server_pid}" 2>/dev/null || true
+              }
+
+              healthcheck() {
+                python3 -c \
+                  'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=5).close()' \
+                  "$1" 2>/dev/null
+              }
+
+              deadline=$(( $(date +%s) + STARTUP_TIMEOUT_SECONDS ))
+              until healthcheck "${OPENLAKE_HEALTH_URL}"; do
+                if [ "$(date +%s)" -ge "${deadline}" ]; then
+                  echo "OpenLake did not become healthy within ${STARTUP_TIMEOUT_SECONDS}s" >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+
+              vllm serve "${MODEL_ID}" \
+                --host 127.0.0.1 \
+                --port "${VLLM_PORT}" \
+                --dtype bfloat16 \
+                --max-model-len "${MAX_MODEL_LEN}" \
+                --max-num-seqs 1 \
+                --kv-transfer-config "$(cat /etc/openlake/vllm-kv-transfer-config.json)" &
+              server_pid=$!
+              trap cleanup EXIT HUP INT TERM
+
+              until healthcheck "http://127.0.0.1:${VLLM_PORT}/health"; do
+                if ! kill -0 "${server_pid}" 2>/dev/null; then
+                  echo "vLLM exited before becoming healthy" >&2
+                  wait "${server_pid}"
+                fi
+                if [ "$(date +%s)" -ge "${deadline}" ]; then
+                  echo "vLLM did not become healthy within ${STARTUP_TIMEOUT_SECONDS}s" >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+
+              echo "vLLM accepted the generated OpenLake connector configuration and became healthy"
+          env:
+            - name: MODEL_ID
+              value: {{ .Values.vllmSmokeTest.model | quote }}
+            - name: VLLM_PORT
+              value: {{ .Values.vllmSmokeTest.port | quote }}
+            - name: MAX_MODEL_LEN
+              value: {{ .Values.vllmSmokeTest.maxModelLen | quote }}
+            - name: STARTUP_TIMEOUT_SECONDS
+              value: {{ .Values.vllmSmokeTest.startupTimeoutSeconds | quote }}
+            - name: OPENLAKE_HEALTH_URL
+              value: {{ printf "http://%s:%v/v1/telemetry/openlake" $target.ip .Values.kv.ports.telemetry | quote }}
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: VLLM_CPU_KVCACHE_SPACE
+              value: "1"
+            - name: VLLM_CPU_OMP_THREADS_BIND
+              value: nobind
+            {{- if .Values.vllmSmokeTest.hfTokenSecretName }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.vllmSmokeTest.hfTokenSecretName | quote }}
+                  key: token
+            {{- end }}
+            {{- range $name, $value := .Values.vllmSmokeTest.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: connector-config
+              mountPath: /etc/openlake
+              readOnly: true
+            - name: host-shm
+              mountPath: /dev/shm
+          resources:
+            {{- toYaml .Values.vllmSmokeTest.resources | nindent 12 }}
+      volumes:
+        - name: connector-config
+          configMap:
+            name: {{ include "openlake.fullname" . }}-kv-config
+            items:
+              - key: vllm-kv-transfer-config.json
+                path: vllm-kv-transfer-config.json
+        - name: host-shm
+          hostPath:
+            path: {{ .Values.kv.sharedMemory.hostPath | quote }}
+            type: Directory
+{{- end }}

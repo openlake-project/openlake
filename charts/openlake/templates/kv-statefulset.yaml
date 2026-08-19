@@ -23,6 +23,10 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -42,6 +46,10 @@ spec:
                   openlake.dev/workload: kv
               topologyKey: kubernetes.io/hostname
       terminationGracePeriodSeconds: 30
+      {{- with .Values.kv.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         fsGroup: 10001
       containers:
@@ -131,9 +139,15 @@ spec:
             name: {{ include "openlake.fullname" . }}-kv-config
             defaultMode: 0555
         - name: kv-slab
+          {{- if eq .Values.kv.sharedMemory.type "hostPath" }}
+          hostPath:
+            path: {{ .Values.kv.sharedMemory.hostPath | quote }}
+            type: Directory
+          {{- else }}
           emptyDir:
             medium: Memory
             sizeLimit: {{ printf "%dGi" (int .Values.kv.slab.capacityGB) | quote }}
+          {{- end }}
         {{- if eq .Values.kv.transport "rdma" }}
         - name: infiniband
           hostPath:
