@@ -84,6 +84,10 @@ vllm serve <model_name> --kv-transfer-config '{"kv_connector":"OpenLakeConnector
 
 Note: By default OpenLake offloads to the same host. To enable OpenLake across your GPU fleet, please start `openlaked` with a `--config`.
 
+For Kubernetes clusters, use the [Helm KV deployment guide](charts/openlake/README.md)
+to place one OpenLake instance on each selected node and generate the ordered
+vLLM peer configuration.
+
 OpenLake enabled vs disabled:
 
 <img width="1914" height="720" alt="openlake-video" src="https://raw.githubusercontent.com/openlake-project/openlake/main/assets/openlake-perf.gif" />
