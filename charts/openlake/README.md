@@ -151,11 +151,15 @@ helm upgrade --install openlake charts/openlake \
 kubectl --namespace openlake rollout status statefulset/openlake-openlake
 ```
 
-Run the test and stream its logs:
+Run the test, then read the retained Job logs:
 
 ```bash
-helm test openlake --namespace openlake --logs --timeout 20m
+helm test openlake --namespace openlake --timeout 20m
+kubectl --namespace openlake logs job/openlake-openlake-vllm-smoke
 ```
+
+The completed Job and its logs are retained for 10 minutes. The next test run
+also removes the previous Job before creating its replacement.
 
 The default `facebook/opt-125m` model is intentionally small and public because
 this test checks startup and connector configuration, not model quality. Set

@@ -16,7 +16,9 @@ Read the generated vLLM connector configuration:
 
 After the OpenLake StatefulSet is ready, run the one-time CPU vLLM test:
   helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }} \
-    --logs --timeout 20m
+    --timeout 20m
+  kubectl --namespace {{ .Release.Namespace }} logs \
+    job/{{ include "openlake.vllmSmokeTest.fullname" . }}
 {{- end }}
 {{- else }}
 The vLLM connector output is disabled. Multi-node H2 validates orchestration
