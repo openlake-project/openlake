@@ -51,7 +51,8 @@ that exact order, so every vLLM instance can attach the same peer IDs.
 - A unique, stable IPv4 address for each target. It must be reachable by every vLLM
   instance and must belong to the intended host/fabric; the chart deliberately
   does not guess which of a node's addresses is the data-plane address.
-- An OpenLake image matching the chosen transport.
+- An OpenLake image matching the chosen transport, pushed to a registry that
+  every selected node can pull from.
 - Enough allocatable RAM for `kv.slab.capacityGB` plus process and operating
   system overhead. Set a memory request/limit above the slab size.
 
@@ -78,7 +79,16 @@ ucx_info -d
 ## H2 orchestration smoke test
 
 Start with [`examples/kv-h2-values.yaml`](examples/kv-h2-values.yaml). Replace
-the sample node names and IPs, then render it before installation:
+the placeholder image repository, sample node names, and IPs. An H2 image can
+be built from this repository and pushed to your registry with:
+
+```bash
+docker build --file docker/openlaked.Dockerfile \
+  --tag registry.example.com/openlake/openlaked:0.8.0 .
+docker push registry.example.com/openlake/openlaked:0.8.0
+```
+
+Then render it before installation:
 
 ```bash
 helm lint charts/openlake -f charts/openlake/examples/kv-h2-values.yaml

@@ -3,7 +3,7 @@
 # the H2 client uses same-host POSIX shared memory and cannot move KV data
 # between Kubernetes nodes.
 image:
-  repository: openlake/openlaked
+  repository: registry.example.com/openlake/openlaked
   tag: "0.8.0"
 
 kv:
