@@ -12,6 +12,12 @@ Read the generated vLLM connector configuration:
   kubectl --namespace {{ .Release.Namespace }} get configmap \
     {{ include "openlake.fullname" . }}-kv-config \
     --output jsonpath='{.data.vllm-kv-transfer-config\.json}'
+{{- if .Values.vllmSmokeTest.enabled }}
+
+After the OpenLake StatefulSet is ready, run the one-time CPU vLLM test:
+  helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }} \
+    --logs --timeout 20m
+{{- end }}
 {{- else }}
 The vLLM connector output is disabled. Multi-node H2 validates orchestration
 and server health only; use an RDMA backend for cross-node KV-cache traffic.

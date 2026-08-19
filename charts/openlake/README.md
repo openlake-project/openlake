@@ -56,9 +56,11 @@ that exact order, so every vLLM instance can attach the same peer IDs.
 - Enough allocatable RAM for `kv.slab.capacityGB` plus process and operating
   system overhead. Set a memory request/limit above the slab size.
 
-The chart mounts a memory-backed `emptyDir` of `kv.slab.capacityGB` at
-`/dev/shm`, where host-backed H2 and UCX slabs are created. This memory counts
-against pod/node memory; it is not persistent storage.
+By default, the chart mounts a memory-backed `emptyDir` of
+`kv.slab.capacityGB` at `/dev/shm`, where host-backed H2 and UCX slabs are
+created. This memory counts against pod/node memory; it is not persistent
+storage. The opt-in vLLM smoke test is the sole example that selects a host
+`/dev/shm` mount so its two co-located pods can see the same POSIX object.
 
 Inspect the node names and Kubernetes InternalIPs with:
 
@@ -115,6 +117,56 @@ A one-target H2 connector is valid only when vLLM and OpenLake share the host
 and compatible IPC/shared-memory access. Kubernetes pod co-location by itself
 does not create shared IPC namespaces.
 
+## One-time vLLM CPU startup test
+
+The optional [`vllm-smoke-test.yaml`](templates/vllm-smoke-test.yaml) Helm test
+checks the maintainer-facing integration point that static rendering cannot:
+a real vLLM process reads the generated connector JSON, initializes against a
+running OpenLake H2 server, and reaches its health endpoint. The test Job exits
+after success and is not a production vLLM Deployment.
+
+The test uses one target node and mounts that host's `/dev/shm` into both pods.
+This is deliberately limited to the H2 smoke test. It does not make H2 a
+cross-node transport and should not be copied into the RDMA deployment.
+
+Build and push the OpenLake server image as described above. Then build the
+CPU vLLM test image, which adds the locally built `openlake-vllm` wheel to the
+[official vLLM CPU image](https://docs.vllm.ai/en/stable/getting_started/installation/cpu/):
+
+```bash
+docker build --file docker/vllm-openlake-cpu.Dockerfile \
+  --tag registry.example.com/openlake/vllm-openlake-cpu:0.26.0-openlake-0.8.0 .
+docker push registry.example.com/openlake/vllm-openlake-cpu:0.26.0-openlake-0.8.0
+```
+
+Copy [`examples/kv-vllm-smoke-values.yaml`](examples/kv-vllm-smoke-values.yaml)
+and replace its node name, node IP, and two image repositories. If the registry
+is private, configure `imagePullSecrets`. Install the single-node H2 release:
+
+```bash
+helm upgrade --install openlake charts/openlake \
+  --namespace openlake \
+  --create-namespace \
+  -f charts/openlake/examples/kv-vllm-smoke-values.yaml
+kubectl --namespace openlake rollout status statefulset/openlake-openlake
+```
+
+Run the test and stream its logs:
+
+```bash
+helm test openlake --namespace openlake --logs --timeout 20m
+```
+
+The default `facebook/opt-125m` model is intentionally small and public because
+this test checks startup and connector configuration, not model quality. Set
+`vllmSmokeTest.model` to the agreed Llama or Mistral model for a larger test. If
+that model needs a Hugging Face token, create a Secret whose `token` key holds
+it and set `vllmSmokeTest.hfTokenSecretName` to the Secret name.
+
+The Job passing proves that the command accepts `openlake_nodes` and that the
+H2 connector can attach on the same node. It does not validate multi-node KV
+transfer, GPU memory registration, RDMA, DCT, or UCX.
+
 ## Production P2P transport
 
 Use [`examples/kv-ucx-values.yaml`](examples/kv-ucx-values.yaml) for UCX or
@@ -165,9 +217,10 @@ kubectl --namespace openlake get configmap openlake-openlake-kv-config \
 ```
 
 The value can be passed to `vllm serve --kv-transfer-config` or mounted from
-the ConfigMap by a separately managed vLLM Deployment. This chart does not
-install or restart vLLM. Every vLLM instance must receive the same rendered
-JSON; in particular, do not reorder `openlake_nodes` in a second manifest.
+the ConfigMap by a separately managed vLLM Deployment. Apart from the optional,
+short-lived smoke-test Job, this chart does not install or restart vLLM. Every
+vLLM instance must receive the same rendered JSON; in particular, do not
+reorder `openlake_nodes` in a second manifest.
 
 Example output for UCX is:
 
@@ -237,8 +290,11 @@ retrieved bytes.
 | `kv.ports.rpc` | Host-networked OpenLake RPC port | `9400` |
 | `kv.ports.telemetry` | Host-networked health/telemetry port | `9401` |
 | `kv.slab.capacityGB` | Explicit per-node in-memory slab capacity | `1` |
+| `kv.sharedMemory.type` | `emptyDir`, or test-only shared `hostPath` | `emptyDir` |
 | `kv.rdma.backend` | RDMA backend: `ucx` or `dct` | `ucx` |
 | `kv.rdma.devName` | Observed device required by DCT | `""` |
 | `kv.rdma.env` | Environment-specific UCX/RDMA variables | `{}` |
 | `kv.connector.enabled` | Include vLLM connector JSON in the ConfigMap | `true` |
 | `kv.connector.device` | Explicit connector device; empty selects by backend | `""` |
+| `vllmSmokeTest.enabled` | Render the optional CPU `helm test` Job | `false` |
+| `vllmSmokeTest.model` | Model used for startup validation | `facebook/opt-125m` |

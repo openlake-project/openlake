@@ -80,6 +80,7 @@ else:
 validate_connector() {
   render_file=$1
   expected_device=$2
+  expected_nodes=${3:-"10.0.0.11:9400,10.0.0.12:9400"}
   connector_file="${test_tmp}/connector-${expected_device}.json"
 
   sed -n '
@@ -100,9 +101,23 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 
 assert connector["kv_connector"] == "OpenLakeConnector"
 extra = connector["kv_connector_extra_config"]
-assert extra["openlake_nodes"] == ["10.0.0.11:9400", "10.0.0.12:9400"]
+assert extra["openlake_nodes"] == sys.argv[3].split(",")
 assert extra["openlake_device"] == sys.argv[2]
-' "${connector_file}" "${expected_device}"
+' "${connector_file}" "${expected_device}" "${expected_nodes}"
+}
+
+validate_smoke_script() {
+  render_file=$1
+  smoke_script="${test_tmp}/vllm-smoke.sh"
+  sed -n '
+    /^            - |$/,/^          env:$/ {
+      /^            - |$/d
+      /^          env:$/d
+      s/^              //
+      p
+    }
+  ' "${render_file}" >"${smoke_script}"
+  sh -n "${smoke_script}"
 }
 
 command -v "${helm_bin}" >/dev/null 2>&1 || fail "Helm is not installed"
@@ -162,6 +177,23 @@ assert_contains "${dct_render}" '"openlake_device": "mlx5_0"'
 validate_toml "${dct_render}" rdma dct
 validate_connector "${dct_render}" mlx5_0
 
+smoke_values="${chart_dir}/examples/kv-vllm-smoke-values.yaml"
+smoke_render="${test_tmp}/kv-vllm-smoke.yaml"
+"${helm_bin}" lint "${chart_dir}" --values "${smoke_values}"
+"${helm_bin}" template openlake "${chart_dir}" --values "${smoke_values}" >"${smoke_render}"
+assert_contains "${smoke_render}" "kind: Job"
+assert_contains "${smoke_render}" '"helm.sh/hook": test'
+assert_contains "${smoke_render}" 'image: "registry.example.com/openlake/vllm-openlake-cpu:0.26.0-openlake-0.8.0"'
+assert_contains "${smoke_render}" 'vllm serve "${MODEL_ID}"'
+assert_contains "${smoke_render}" 'value: "facebook/opt-125m"'
+assert_contains "${smoke_render}" 'value: "http://10.0.0.11:9401/v1/telemetry/openlake"'
+assert_contains "${smoke_render}" "key: vllm-kv-transfer-config.json"
+assert_contains "${smoke_render}" 'path: "/dev/shm"'
+assert_contains "${smoke_render}" '"openlake_device": "local"'
+assert_contains "${smoke_render}" 'value: nobind'
+validate_connector "${smoke_render}" local "10.0.0.11:9400"
+validate_smoke_script "${smoke_render}"
+
 expect_render_failure \
   "minItems: got 0, want 1" \
   --set kv.enabled=true
@@ -190,5 +222,14 @@ expect_render_failure \
   --set kv.rdma.backend=dct \
   --set 'kv.targets[0].nodeName=gpu-worker-0' \
   --set 'kv.targets[0].ip=10.0.0.11'
+
+expect_render_failure \
+  "vllmSmokeTest.enabled=true requires kv.enabled=true" \
+  --set vllmSmokeTest.enabled=true
+
+expect_render_failure \
+  "the H2/local vLLM smoke test requires kv.sharedMemory.type=hostPath" \
+  --values "${smoke_values}" \
+  --set kv.sharedMemory.type=emptyDir
 
 echo "Helm render tests passed"
