@@ -9,6 +9,20 @@
     cancel-in-progress: true
 
   jobs:
+    helm:
+      name: helm chart
+      runs-on: ubuntu-latest
+      timeout-minutes: 5
+      steps:
+        - uses: actions/checkout@v4
+
+        - uses: azure/setup-helm@v5.0.1
+          with:
+            version: v4.2.0
+
+        - name: lint and render chart
+          run: charts/openlake/tests/render.sh
+
     test:
       name: cargo test
       runs-on: ubuntu-latest
