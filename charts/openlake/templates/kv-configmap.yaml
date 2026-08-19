@@ -1,0 +1,106 @@
+{{- if .Values.kv.enabled }}
+{{- include "openlake.kv.validate" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openlake.fullname" . }}-kv-config
+  labels:
+    {{- include "openlake.labels" . | nindent 4 }}
+data:
+  targets: |
+    {{- range $index, $target := .Values.kv.targets }}
+    {{ $index }}|{{ $target.nodeName }}|{{ $target.ip }}
+    {{- end }}
+
+  openlake.toml.tpl: |
+    self_id              = __SELF_ID__
+    mode                 = "kv"
+    transport            = {{ .Values.kv.transport | quote }}
+    rpc_addr             = "0.0.0.0:{{ .Values.kv.ports.rpc }}"
+    kv_agents            = [
+    {{- range .Values.kv.targets }}
+      "{{ .ip }}:{{ $.Values.kv.ports.rpc }}",
+    {{- end }}
+    ]
+    s3_addr              = "127.0.0.1:9000"
+    region               = "us-east-1"
+    data_dirs            = []
+    set_drive_count      = 1
+    default_parity_count = 1
+
+    # These fields are required by the shared server schema but are unused in
+    # KV mode because the S3 listener is not started.
+    [[credentials]]
+    access_key = "unused-kv-access-key"
+    secret_key = "unused-kv-secret-key"
+
+    # KV engines are standalone. Do not copy the peer list into [[nodes]].
+    [[nodes]]
+    id         = __SELF_ID__
+    rpc_addr   = "0.0.0.0:{{ .Values.kv.ports.rpc }}"
+    disk_count = 0
+
+    [kv_slab]
+    capacity_gb          = {{ .Values.kv.slab.capacityGB }}
+    reserve_ttl_secs     = {{ .Values.kv.slab.reserveTtlSeconds }}
+    {{- if eq .Values.kv.transport "rdma" }}
+
+    [rdma]
+    backend = {{ .Values.kv.rdma.backend | quote }}
+      {{- if eq .Values.kv.rdma.backend "dct" }}
+    self_node_id = __SELF_ID__
+    dev_name     = {{ .Values.kv.rdma.devName | quote }}
+    dc_key       = {{ .Values.kv.rdma.dcKey }}
+    srq_depth    = {{ .Values.kv.rdma.srqDepth }}
+    max_send_wr  = {{ .Values.kv.rdma.maxSendWr }}
+    peer_credit  = {{ .Values.kv.rdma.peerCredit }}
+    max_clients  = {{ .Values.kv.rdma.maxClients }}
+
+    [rdma.qos]
+    traffic_class = {{ .Values.kv.rdma.qos.trafficClass }}
+    service_level = {{ .Values.kv.rdma.qos.serviceLevel }}
+      {{- end }}
+    {{- end }}
+
+  entrypoint.sh: |
+    #!/bin/sh
+    set -eu
+
+    self_id=""
+    target_ip=""
+    while IFS='|' read -r candidate_id candidate_node candidate_ip; do
+      if [ "${candidate_node}" = "${NODE_NAME}" ]; then
+        self_id="${candidate_id}"
+        target_ip="${candidate_ip}"
+        break
+      fi
+    done < /etc/openlake/targets
+
+    if [ -z "${self_id}" ]; then
+      echo "OpenLake target list has no entry for Kubernetes node ${NODE_NAME}" >&2
+      exit 1
+    fi
+
+    sed -e "s/__SELF_ID__/${self_id}/g" \
+      /etc/openlake/openlake.toml.tpl > /tmp/openlake.toml
+    echo "Starting OpenLake KV node ${self_id} on ${NODE_NAME} (${target_ip})"
+    exec /usr/local/bin/openlaked --config /tmp/openlake.toml
+  {{- if .Values.kv.connector.enabled }}
+
+  vllm-kv-transfer-config.json: |
+    {
+      "kv_connector": "OpenLakeConnector",
+      "kv_connector_module_path": "openlake_client.openlake_connector",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": {
+        "openlake_nodes": [
+          {{- range $index, $target := .Values.kv.targets }}
+          {{- if $index }},{{ end }}
+          "{{ $target.ip }}:{{ $.Values.kv.ports.rpc }}"
+          {{- end }}
+        ],
+        "openlake_device": {{ include "openlake.kv.connectorDevice" . | quote }}
+      }
+    }
+  {{- end }}
+{{- end }}

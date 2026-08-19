@@ -1,6 +1,6 @@
 image:
   repository: openlake/openlaked
-  tag: "0.1.0"
+  tag: "0.8.0"
   pullPolicy: IfNotPresent
 
 mode: tls
@@ -42,3 +42,49 @@ resources: {}
 
 s3Service:
   type: ClusterIP
+
+# External KV-cache deployment. This is deliberately separate from the object
+# storage settings above: KV nodes are standalone slabs and use kv_agents for
+# their ordered peer reference list.
+kv:
+  enabled: false
+  transport: h2
+
+  ports:
+    rpc: 9400
+    telemetry: 9401
+
+  slab:
+    capacityGB: 1
+    reserveTtlSeconds: 60
+
+  # List order is the stable OpenLake node ID. nodeName controls Kubernetes
+  # placement; ip is the address advertised to OpenLake and vLLM peers.
+  targets: []
+  # - nodeName: gpu-worker-0
+  #   ip: 10.0.0.11
+  # - nodeName: gpu-worker-1
+  #   ip: 10.0.0.12
+
+  rdma:
+    backend: ucx
+    devName: ""
+    dcKey: "4919"
+    srqDepth: 4096
+    maxSendWr: 256
+    peerCredit: 4
+    maxClients: 512
+    qos:
+      trafficClass: 0
+      serviceLevel: 0
+    # Environment-specific UCX settings can be supplied without teaching the
+    # chart how the cluster's IB/RoCE fabric is provisioned.
+    env: {}
+
+  connector:
+    enabled: true
+    # Empty selects local for h2, ucx for the UCX backend, or rdma.devName for
+    # DCT. Set this explicitly when the connector uses another observed device.
+    device: ""
+
+  resources: {}

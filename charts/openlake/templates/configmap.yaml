@@ -1,3 +1,4 @@
+{{- if not .Values.kv.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -52,3 +53,4 @@ data:
         -e "s|__SECRET_KEY__|${OPENLAKE_SECRET_KEY}|g" \
         /etc/openlake/openlake.toml.tpl > /tmp/openlake.toml
     exec /usr/local/bin/openlaked --config /tmp/openlake.toml
+{{- end }}

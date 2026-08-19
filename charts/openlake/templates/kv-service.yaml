@@ -1,0 +1,23 @@
+{{- if .Values.kv.enabled }}
+{{- include "openlake.kv.validate" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "openlake.fullname" . }}-rpc
+  labels:
+    {{- include "openlake.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "openlake.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: rpc
+      port: {{ .Values.kv.ports.rpc }}
+      targetPort: rpc
+      protocol: TCP
+    - name: telemetry
+      port: {{ .Values.kv.ports.telemetry }}
+      targetPort: telemetry
+      protocol: TCP
+{{- end }}

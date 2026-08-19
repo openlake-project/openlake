@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "kv": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "transport",
+        "ports",
+        "slab",
+        "targets",
+        "rdma",
+        "connector"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["h2", "rdma"]
+        },
+        "ports": {
+          "type": "object",
+          "required": ["rpc", "telemetry"],
+          "properties": {
+            "rpc": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "telemetry": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
+        },
+        "slab": {
+          "type": "object",
+          "required": ["capacityGB", "reserveTtlSeconds"],
+          "properties": {
+            "capacityGB": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "reserveTtlSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["nodeName", "ip"],
+            "properties": {
+              "nodeName": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ip": {
+                "type": "string",
+                "format": "ipv4"
+              }
+            }
+          }
+        },
+        "rdma": {
+          "type": "object",
+          "required": [
+            "backend",
+            "devName",
+            "dcKey",
+            "srqDepth",
+            "maxSendWr",
+            "peerCredit",
+            "maxClients",
+            "qos",
+            "env"
+          ],
+          "properties": {
+            "backend": {
+              "type": "string",
+              "enum": ["dct", "ucx"]
+            },
+            "devName": {
+              "type": "string"
+            },
+            "dcKey": {
+              "type": "string",
+              "pattern": "^(0[xX][0-9a-fA-F]+|[0-9]+)$"
+            },
+            "srqDepth": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxSendWr": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "peerCredit": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxClients": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "qos": {
+              "type": "object",
+              "required": ["trafficClass", "serviceLevel"],
+              "properties": {
+                "trafficClass": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                },
+                "serviceLevel": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 255
+                }
+              }
+            },
+            "env": {
+              "type": "object",
+              "additionalProperties": {
+                "type": ["string", "number", "boolean"]
+              }
+            }
+          }
+        },
+        "connector": {
+          "type": "object",
+          "required": ["enabled", "device"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "device": {
+              "type": "string"
+            }
+          }
+        },
+        "resources": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kv": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "kv": {
+            "properties": {
+              "targets": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

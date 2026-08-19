@@ -1,0 +1,137 @@
+{{- if .Values.kv.enabled }}
+{{- include "openlake.kv.validate" . }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "openlake.fullname" . }}
+  labels:
+    {{- include "openlake.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "openlake.fullname" . }}-rpc
+  replicas: {{ len .Values.kv.targets }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "openlake.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openlake.selectorLabels" . | nindent 8 }}
+        openlake.dev/workload: kv
+      annotations:
+        checksum/kv-config: {{ toJson .Values.kv | sha256sum }}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchFields:
+                  - key: metadata.name
+                    operator: In
+                    values:
+                      {{- range .Values.kv.targets }}
+                      - {{ .nodeName | quote }}
+                      {{- end }}
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "openlake.selectorLabels" . | nindent 18 }}
+                  openlake.dev/workload: kv
+              topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: openlaked
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /usr/bin/tini
+            - --
+            - /bin/sh
+            - /etc/openlake/entrypoint.sh
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OPENLAKE_TELEMETRY_ADDR
+              value: "0.0.0.0:{{ .Values.kv.ports.telemetry }}"
+            - name: RUST_LOG
+              value: info
+            - name: RUST_BACKTRACE
+              value: "1"
+            {{- range $name, $value := .Values.kv.rdma.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          ports:
+            - name: rpc
+              containerPort: {{ .Values.kv.ports.rpc }}
+              hostPort: {{ .Values.kv.ports.rpc }}
+              protocol: TCP
+            - name: telemetry
+              containerPort: {{ .Values.kv.ports.telemetry }}
+              hostPort: {{ .Values.kv.ports.telemetry }}
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /v1/telemetry/openlake
+              port: telemetry
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /v1/telemetry/openlake
+              port: telemetry
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /v1/telemetry/openlake
+              port: telemetry
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              {{- if eq .Values.kv.transport "rdma" }}
+              add: ["IPC_LOCK", "NET_RAW"]
+              {{- end }}
+          volumeMounts:
+            - name: kv-config
+              mountPath: /etc/openlake
+              readOnly: true
+            {{- if eq .Values.kv.transport "rdma" }}
+            - name: infiniband
+              mountPath: /dev/infiniband
+            {{- end }}
+          resources:
+            {{- toYaml .Values.kv.resources | nindent 12 }}
+      volumes:
+        - name: kv-config
+          configMap:
+            name: {{ include "openlake.fullname" . }}-kv-config
+            defaultMode: 0555
+        {{- if eq .Values.kv.transport "rdma" }}
+        - name: infiniband
+          hostPath:
+            path: /dev/infiniband
+            type: Directory
+        {{- end }}
+{{- end }}
