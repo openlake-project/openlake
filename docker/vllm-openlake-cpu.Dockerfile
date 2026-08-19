@@ -33,7 +33,7 @@ FROM ${VLLM_CPU_IMAGE}
 USER root
 
 COPY --from=openlake-wheel /build/crates/openlake_kv_client/dist/*.whl /tmp/openlake-wheels/
-RUN uv pip install --system /tmp/openlake-wheels/*.whl \
+RUN uv pip install --python /opt/venv/bin/python /tmp/openlake-wheels/*.whl \
     && rm -rf /tmp/openlake-wheels
 
 ENTRYPOINT ["vllm", "serve"]
