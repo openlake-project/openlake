@@ -117,6 +117,8 @@ spec:
             - name: kv-config
               mountPath: /etc/openlake
               readOnly: true
+            - name: kv-slab
+              mountPath: /dev/shm
             {{- if eq .Values.kv.transport "rdma" }}
             - name: infiniband
               mountPath: /dev/infiniband
@@ -128,6 +130,10 @@ spec:
           configMap:
             name: {{ include "openlake.fullname" . }}-kv-config
             defaultMode: 0555
+        - name: kv-slab
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ printf "%dGi" (int .Values.kv.slab.capacityGB) | quote }}
         {{- if eq .Values.kv.transport "rdma" }}
         - name: infiniband
           hostPath:

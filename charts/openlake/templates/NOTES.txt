@@ -1,0 +1,25 @@
+{{- if .Values.kv.enabled }}
+OpenLake KV was configured for {{ len .Values.kv.targets }} target node(s).
+
+Check placement and health:
+  kubectl --namespace {{ .Release.Namespace }} get pods \
+    --selector app.kubernetes.io/instance={{ .Release.Name }} --output wide
+  kubectl --namespace {{ .Release.Namespace }} rollout status \
+    statefulset/{{ include "openlake.fullname" . }}
+
+{{- if .Values.kv.connector.enabled }}
+Read the generated vLLM connector configuration:
+  kubectl --namespace {{ .Release.Namespace }} get configmap \
+    {{ include "openlake.fullname" . }}-kv-config \
+    --output jsonpath='{.data.vllm-kv-transfer-config\.json}'
+{{- else }}
+The vLLM connector output is disabled. Multi-node H2 validates orchestration
+and server health only; use an RDMA backend for cross-node KV-cache traffic.
+{{- end }}
+{{- else }}
+OpenLake object storage was installed.
+
+Check the StatefulSet:
+  kubectl --namespace {{ .Release.Namespace }} get pods \
+    --selector app.kubernetes.io/instance={{ .Release.Name }}
+{{- end }}

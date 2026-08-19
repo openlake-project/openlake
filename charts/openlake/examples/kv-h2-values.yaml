@@ -1,0 +1,37 @@
+# H2 starts one OpenLake KV instance on each selected node without requiring
+# IB, RDMA, or UCX. This two-node file is an orchestration/startup example only:
+# the H2 client uses same-host POSIX shared memory and cannot move KV data
+# between Kubernetes nodes.
+image:
+  repository: openlake/openlaked
+  tag: "0.8.0"
+
+kv:
+  enabled: true
+  transport: h2
+
+  # List order defines OpenLake node IDs: gpu-worker-0 is ID 0 and
+  # gpu-worker-1 is ID 1. Use exact values from `kubectl get nodes -o wide`.
+  targets:
+    - nodeName: gpu-worker-0
+      ip: 10.0.0.11
+    - nodeName: gpu-worker-1
+      ip: 10.0.0.12
+
+  slab:
+    capacityGB: 8
+    reserveTtlSeconds: 60
+
+  # Do not publish a multi-node local connector configuration. H2 can validate
+  # this chart and server health, but P2P vLLM traffic requires RDMA/UCX.
+  connector:
+    enabled: false
+    device: ""
+
+  resources:
+    requests:
+      cpu: "1"
+      memory: 10Gi
+    limits:
+      cpu: "2"
+      memory: 10Gi

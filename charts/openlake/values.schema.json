@@ -53,13 +53,16 @@
         },
         "targets": {
           "type": "array",
+          "maxItems": 65536,
           "items": {
             "type": "object",
             "required": ["nodeName", "ip"],
             "properties": {
               "nodeName": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 253,
+                "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
               },
               "ip": {
                 "type": "string",
@@ -127,6 +130,9 @@
             },
             "env": {
               "type": "object",
+              "propertyNames": {
+                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+              },
               "additionalProperties": {
                 "type": ["string", "number", "boolean"]
               }

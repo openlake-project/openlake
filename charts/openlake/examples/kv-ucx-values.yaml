@@ -1,0 +1,45 @@
+# Multi-node P2P KV deployment over UCX. The cluster operator must provision
+# the IB/RoCE fabric, device plugin, UCX runtime, and an RDMA-enabled OpenLake
+# image before using this file.
+image:
+  repository: registry.example.com/openlake/openlaked-rdma
+  tag: "0.8.0"
+
+kv:
+  enabled: true
+  transport: rdma
+
+  # This exact order is copied to every OpenLake config and to the generated
+  # vLLM connector configuration. Reordering changes the node IDs used for key
+  # placement, so treat this as stable cluster identity.
+  targets:
+    - nodeName: gpu-worker-0
+      ip: 10.0.0.11
+    - nodeName: gpu-worker-1
+      ip: 10.0.0.12
+
+  slab:
+    capacityGB: 64
+    reserveTtlSeconds: 60
+
+  rdma:
+    backend: ucx
+    devName: ""
+    # Set only values verified for the target cluster. Examples:
+    # env:
+    #   UCX_NET_DEVICES: mlx5_0:1
+    #   UCX_TLS: rc,cuda_copy,cuda_ipc
+    env: {}
+
+  connector:
+    enabled: true
+    # Empty automatically selects `ucx` for this backend.
+    device: ""
+
+  resources:
+    requests:
+      cpu: "2"
+      memory: 68Gi
+    limits:
+      cpu: "4"
+      memory: 68Gi

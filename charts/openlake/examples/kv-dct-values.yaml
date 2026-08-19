@@ -1,0 +1,45 @@
+# Multi-node P2P KV deployment using the direct-verbs/DCT backend. Use only a
+# DCT-capable RDMA device observed on every selected Kubernetes node.
+image:
+  repository: registry.example.com/openlake/openlaked-rdma
+  tag: "0.8.0"
+
+kv:
+  enabled: true
+  transport: rdma
+
+  targets:
+    - nodeName: gpu-worker-0
+      ip: 10.0.0.11
+    - nodeName: gpu-worker-1
+      ip: 10.0.0.12
+
+  slab:
+    capacityGB: 64
+    reserveTtlSeconds: 60
+
+  rdma:
+    backend: dct
+    devName: mlx5_0
+    dcKey: "4919"
+    srqDepth: 4096
+    maxSendWr: 256
+    peerCredit: 4
+    maxClients: 512
+    qos:
+      trafficClass: 0
+      serviceLevel: 0
+    env: {}
+
+  connector:
+    enabled: true
+    # Empty automatically uses rdma.devName (`mlx5_0`) for the connector.
+    device: ""
+
+  resources:
+    requests:
+      cpu: "2"
+      memory: 68Gi
+    limits:
+      cpu: "4"
+      memory: 68Gi

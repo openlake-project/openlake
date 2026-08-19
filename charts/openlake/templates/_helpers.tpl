@@ -50,6 +50,12 @@ ucx
   {{- if not (has .Values.kv.transport (list "h2" "rdma")) -}}
     {{- fail "kv.transport must be h2 or rdma" -}}
   {{- end -}}
+  {{- if gt (len .Values.kv.targets) 65536 -}}
+    {{- fail "kv.targets cannot contain more than 65536 entries (OpenLake node IDs are u16)" -}}
+  {{- end -}}
+  {{- if and .Values.kv.connector.enabled (eq .Values.kv.transport "h2") (gt (len .Values.kv.targets) 1) -}}
+    {{- fail "the H2/local connector supports one same-host KV target only; disable kv.connector.enabled for a multi-node H2 orchestration smoke test or use the rdma transport" -}}
+  {{- end -}}
   {{- if eq (int .Values.kv.ports.rpc) (int .Values.kv.ports.telemetry) -}}
     {{- fail "kv.ports.rpc and kv.ports.telemetry must be different" -}}
   {{- end -}}
