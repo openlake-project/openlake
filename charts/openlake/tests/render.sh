@@ -183,6 +183,9 @@ smoke_render="${test_tmp}/kv-vllm-smoke.yaml"
 "${helm_bin}" template openlake "${chart_dir}" --values "${smoke_values}" >"${smoke_render}"
 assert_contains "${smoke_render}" "kind: Job"
 assert_contains "${smoke_render}" '"helm.sh/hook": test'
+assert_contains "${smoke_render}" '"helm.sh/hook-delete-policy": before-hook-creation'
+assert_contains "${smoke_render}" "ttlSecondsAfterFinished: 600"
+assert_not_contains "${smoke_render}" "hook-succeeded"
 assert_contains "${smoke_render}" 'image: "registry.example.com/openlake/vllm-openlake-cpu:0.26.0-openlake-0.8.0"'
 assert_contains "${smoke_render}" 'vllm serve "${MODEL_ID}"'
 assert_contains "${smoke_render}" 'value: "facebook/opt-125m"'

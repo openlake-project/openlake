@@ -9,9 +9,10 @@ metadata:
     {{- include "openlake.labels" . | nindent 4 }}
   annotations:
     "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    "helm.sh/hook-delete-policy": before-hook-creation
 spec:
   backoffLimit: 0
+  ttlSecondsAfterFinished: 600
   activeDeadlineSeconds: {{ add (int .Values.vllmSmokeTest.startupTimeoutSeconds) 120 }}
   template:
     metadata:
