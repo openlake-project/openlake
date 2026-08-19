@@ -7,6 +7,13 @@ metadata:
   labels:
     {{- include "openlake.labels" . | nindent 4 }}
 data:
+  # Plain ordered input for cluster-managed IB/UCX handshake setup.
+  target-ips: |
+    {{- range .Values.kv.targets }}
+    {{ .ip }}
+    {{- end }}
+
+  # The entrypoint uses this mapping to derive self_id from its scheduled node.
   targets: |
     {{- range $index, $target := .Values.kv.targets }}
     {{ $index }}|{{ $target.nodeName }}|{{ $target.ip }}

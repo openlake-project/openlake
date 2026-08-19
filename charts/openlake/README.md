@@ -25,8 +25,8 @@ kv:
 
 the chart creates:
 
-- one ConfigMap containing the ordered IP set, an OpenLake TOML template, and
-  optionally the vLLM connector JSON;
+- one ConfigMap containing the ordered IP set (`target-ips`), the node identity
+  mapping, an OpenLake TOML template, and optionally the vLLM connector JSON;
 - one headless Service for RPC and telemetry discovery; and
 - one host-networked StatefulSet replica on each named Kubernetes node.
 
@@ -141,7 +141,8 @@ The RDMA deployment mounts `/dev/infiniband` and grants `IPC_LOCK` and
 `NET_RAW`. It does not install drivers, a Kubernetes device plugin, OFED, UCX,
 or configure the IB/RoCE fabric. Those remain cluster-operator responsibilities.
 `kv.rdma.env` can pass settings such as `UCX_NET_DEVICES` after they have been
-verified on the target hosts.
+verified on the target hosts. The same ordered IP list is available to each KV
+pod at `/etc/openlake/target-ips` for cluster-managed handshake automation.
 
 ## Give every vLLM instance the peer list
 

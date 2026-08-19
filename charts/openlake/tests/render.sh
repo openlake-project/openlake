@@ -121,6 +121,7 @@ h2_render="${test_tmp}/kv-h2.yaml"
 "${helm_bin}" lint "${chart_dir}" --values "${h2_values}"
 "${helm_bin}" template openlake "${chart_dir}" --values "${h2_values}" >"${h2_render}"
 assert_contains "${h2_render}" "name: openlake-openlake-kv-config"
+assert_contains "${h2_render}" "target-ips: |"
 assert_contains "${h2_render}" "0|gpu-worker-0|10.0.0.11"
 assert_contains "${h2_render}" '"10.0.0.11:9400",'
 assert_contains "${h2_render}" '"10.0.0.12:9400",'
