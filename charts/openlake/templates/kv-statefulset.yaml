@@ -19,7 +19,7 @@ spec:
         {{- include "openlake.selectorLabels" . | nindent 8 }}
         openlake.dev/workload: kv
       annotations:
-        checksum/kv-config: {{ toJson .Values.kv | sha256sum }}
+        checksum/kv-config: {{ include (print $.Template.BasePath "/kv-configmap.yaml") . | sha256sum }}
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
