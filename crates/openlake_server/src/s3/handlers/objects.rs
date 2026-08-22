@@ -607,15 +607,22 @@ fn parse_copy_source(value: &HeaderValue) -> Result<(String, String), AppError> 
         .map_err(|_| AppError::Malformed("x-amz-copy-source must be ASCII"))?;
 
     let raw = raw.trim_start_matches('/');
-    let decoded = percent_encoding::percent_decode_str(raw)
+    let encoded_path = match raw.split_once('?') {
+        Some((_, query)) if query.starts_with("versionId=") => {
+            return Err(AppError::NotImplemented(
+                "CopyObject with versionId is not supported",
+            ));
+        }
+        Some(_) => {
+            return Err(AppError::Malformed(
+                "x-amz-copy-source contains unsupported query parameters",
+            ));
+        }
+        None => raw,
+    };
+    let decoded = percent_encoding::percent_decode_str(encoded_path)
         .decode_utf8()
         .map_err(|_| AppError::Malformed("x-amz-copy-source must be valid UTF-8"))?;
-
-    if decoded.contains("?versionId=") {
-        return Err(AppError::NotImplemented(
-            "CopyObject with versionId is not supported",
-        ));
-    }
 
     let (bucket, key) = decoded
         .split_once('/')
@@ -932,6 +939,15 @@ mod tests {
 
         assert_eq!(bucket, "bucket");
         assert_eq!(key, "path with spaces/file.parquet");
+    }
+
+    #[test]
+    fn parse_copy_source_preserves_encoded_question_mark_in_key() {
+        let header = HeaderValue::from_static("/bucket/path%3FversionId%3Dnotes");
+        let (bucket, key) = parse_copy_source(&header).unwrap();
+
+        assert_eq!(bucket, "bucket");
+        assert_eq!(key, "path?versionId=notes");
     }
 
     #[test]
