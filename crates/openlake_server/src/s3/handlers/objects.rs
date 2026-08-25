@@ -218,6 +218,17 @@ pub async fn delete_objects(
             ));
         }
     }
+    if let Some(expected_sha256) = supplied_sha256.as_deref() {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(bytes.as_ref());
+        let actual_sha256 = base64::engine::general_purpose::STANDARD.encode(digest);
+        if actual_sha256 != expected_sha256 {
+            return Err(AppError::Malformed(
+                "x-amz-checksum-sha256 does not match request body",
+            ));
+        }
+    }
 
     let request: DeleteRequest = quick_xml::de::from_reader(bytes.as_ref())
         .map_err(|_| AppError::Malformed("invalid <Delete> XML"))?;
