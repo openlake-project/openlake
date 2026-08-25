@@ -1282,7 +1282,8 @@ impl Engine {
     }
 
     // todo: @arnav check why were not checking any querym on the delete, and surfacing the error accordingly, check parity against other s3 impls
-    /// DELETE. Fan out to every disk in the set.
+    /// DELETE. Fan out to every disk in the set. Missing objects are treated
+    /// as successfully deleted so callers retain S3's idempotent semantics.
     pub async fn delete(&self, bucket: &str, key: &str) -> StorageResult<()> {
         let _lock = self
             .dsync_for_obj(bucket, key)
@@ -1324,10 +1325,10 @@ impl Engine {
         } else if let Some(e) = real_err {
             Err(map_object_missing(bucket, key)(e))
         } else {
-            Err(StorageError::ObjectNotFound {
-                bucket: bucket.into(),
-                key: key.into(),
-            })
+            // Every backend confirmed that the object is already absent.
+            // This is a successful DELETE; bucket and genuine storage errors
+            // are captured in `real_err` above and continue to propagate.
+            Ok(())
         }
     }
 
@@ -3083,6 +3084,24 @@ mod tests {
         assert!(matches!(
             e.get("buk", "k").await,
             Err(StorageError::ObjectNotFound { .. })
+        ));
+    }
+
+    #[compio::test]
+    async fn delete_missing_object_is_idempotent() {
+        let (_dirs, e) = eng(3, 3).await;
+
+        e.delete("buk", "never-created").await.unwrap();
+        e.delete("buk", "never-created").await.unwrap();
+    }
+
+    #[compio::test]
+    async fn delete_missing_bucket_still_errors() {
+        let (_dirs, e) = eng(3, 3).await;
+
+        assert!(matches!(
+            e.delete("missing-bucket", "key").await,
+            Err(StorageError::BucketNotFound(bucket)) if bucket == "missing-bucket"
         ));
     }
 
