@@ -357,6 +357,17 @@ impl Config {
         if !cfg.nodes.iter().any(|n| n.id == cfg.self_id) {
             anyhow::bail!("self_id {} not present in nodes table", cfg.self_id);
         }
+        {
+            let mut seen_ids: std::collections::HashSet<u16> = std::collections::HashSet::new();
+            for n in &cfg.nodes {
+                if !seen_ids.insert(n.id) {
+                    anyhow::bail!(
+                        "duplicate node id {} in nodes table; each node must have a unique id",
+                        n.id,
+                    );
+                }
+            }
+        }
 
         if cfg.mode == Mode::Kv {
             if cfg.kv_slab.is_none() {
