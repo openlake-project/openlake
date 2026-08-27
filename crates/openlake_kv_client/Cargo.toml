@@ -14,6 +14,10 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 rdma = ["openlake_io/rdma"]
+# On-GPU int8 group-quantization codec for the vLLM connector's optional
+# low-bandwidth KV transfer path (see cuda/src/kv_compression.cu). Off by
+# default: it requires nvcc and a CUDA 12+ toolkit at build time.
+cuda = ["dep:cc"]
 
 [dependencies]
 openlake_io = { path = "../openlake_io" }
@@ -24,3 +28,6 @@ futures = { workspace = true }
 pyo3    = { version = "0.29", features = ["abi3-py310", "extension-module"] }
 tracing = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+[build-dependencies]
+cc = { version = "1", optional = true }

@@ -502,6 +502,141 @@ def _group_tp_replication_factors(
     return tuple(factor_for(group.kv_cache_spec) for group in kv_cache_groups)
 
 
+class GpuBlockCompressor:
+    """Optional on-GPU int8 group-quantization codec for the KV transfer
+    path (see crates/openlake_kv_client/cuda/src/kv_compression.cu).
+
+    The codec is fixed-ratio: a block's compressed byte size depends only
+    on its element count and ``group_size``, never on its contents, so the
+    staging layout below can be sized once, at registration time, and every
+    (addr, size) pair handed to put_batch/get_batch stays constant for the
+    lifetime of the worker.
+
+    This is **not** a bit-exact codec -- each ``group_size``-element chunk
+    is rescaled to a shared int8 range, which loses precision. Only enable
+    it (``openlake_gpu_compression``) when that KV-cache precision loss is
+    an acceptable trade for a smaller wire payload on a bandwidth-limited
+    link (e.g. cross-node RDMA/UCX).
+    """
+
+    _TORCH_DTYPE_NAMES = {
+        "torch.float16": "fp16",
+        "torch.bfloat16": "bf16",
+    }
+
+    def __init__(self, group_size: int):
+        import openlake_client
+
+        if not openlake_client.cuda_compression_available():
+            raise RuntimeError(
+                "openlake_gpu_compression requires the CUDA-enabled "
+                "openlake_client build (built with `--features cuda`)"
+            )
+        self._native = openlake_client
+        self.group_size = group_size
+        # Parallel per-segment metadata: (dtype_name, element_count,
+        # compressed_block_bytes, raw_block_bytes, raw_base_addr,
+        # staging_base_addr).
+        self._segments: list[tuple[str, int, int, int, int, int]] = []
+        # Keeps the staging tensors alive for the compressor's lifetime.
+        self._staging_tensors: list[torch.Tensor] = []
+        self._stream = torch.cuda.Stream()
+
+    def add_segment(self, cache, base_addr: int, block_bytes: int, num_blocks: int,
+                    register_memory) -> int:
+        """Registers one raw KV-cache segment (as produced by
+        OpenLakeWorker.register_kv_caches) and allocates its compressed
+        staging buffer. Returns the fixed per-block compressed byte size.
+        """
+        dtype_name = self._TORCH_DTYPE_NAMES.get(str(cache.dtype))
+        if dtype_name is None:
+            raise ValueError(
+                f"openlake_gpu_compression only supports fp16/bf16 KV "
+                f"caches, got {cache.dtype}"
+            )
+        itemsize = cache.element_size()
+        if block_bytes % itemsize != 0:
+            raise ValueError(
+                f"segment block size {block_bytes} is not a whole number "
+                f"of {cache.dtype} elements"
+            )
+        element_count = block_bytes // itemsize
+        compressed_bytes = self._native.cuda_compressed_size(
+            element_count, self.group_size
+        )
+        staging = torch.empty(
+            num_blocks * compressed_bytes, dtype=torch.uint8, device=cache.device
+        )
+        register_memory(staging.data_ptr(), staging.numel())
+        self._staging_tensors.append(staging)
+        self._segments.append((
+            dtype_name, element_count, compressed_bytes, block_bytes,
+            base_addr, staging.data_ptr(),
+        ))
+        return compressed_bytes
+
+    def wait_for(self, event) -> None:
+        """Makes this compressor's stream wait (GPU-side, non-blocking on
+        the host) for `event`, e.g. the event recorded after the model's
+        compute stream finished writing the KV cache blocks about to be
+        compressed."""
+        if event is not None:
+            self._stream.wait_event(event)
+
+    def compress_block(self, block_id: int) -> list[tuple[int, int]]:
+        """Launches (asynchronously, on this compressor's stream) the
+        compression kernel for every segment of `block_id` and returns the
+        resulting (staging_addr, compressed_bytes) scatter list. Call
+        `synchronize()` before the staging buffers are read (e.g. by
+        put_batch)."""
+        stream_ptr = self._stream.cuda_stream
+        scatter = []
+        with torch.cuda.stream(self._stream):
+            for dtype_name, element_count, compressed_bytes, block_bytes, \
+                    raw_addr, staging_addr in self._segments:
+                self._native.cuda_compress(
+                    dtype_name,
+                    raw_addr + block_id * block_bytes,
+                    element_count,
+                    self.group_size,
+                    staging_addr + block_id * compressed_bytes,
+                    compressed_bytes,
+                    stream_ptr,
+                )
+                scatter.append(
+                    (staging_addr + block_id * compressed_bytes, compressed_bytes)
+                )
+        return scatter
+
+    def decompress_block(self, block_id: int) -> list[tuple[int, int]]:
+        """Returns the (staging_addr, compressed_bytes) scatter list to
+        pass to get_batch for `block_id`. Call `finish_decompress(block_id)`
+        once the get completes to launch the decode kernels, then
+        `synchronize()` before the raw KV cache is read."""
+        return [
+            (staging_addr + block_id * compressed_bytes, compressed_bytes)
+            for _, _, compressed_bytes, _, _, staging_addr in self._segments
+        ]
+
+    def finish_decompress(self, block_id: int) -> None:
+        stream_ptr = self._stream.cuda_stream
+        with torch.cuda.stream(self._stream):
+            for dtype_name, element_count, compressed_bytes, block_bytes, \
+                    raw_addr, staging_addr in self._segments:
+                self._native.cuda_decompress(
+                    dtype_name,
+                    staging_addr + block_id * compressed_bytes,
+                    compressed_bytes,
+                    element_count,
+                    self.group_size,
+                    raw_addr + block_id * block_bytes,
+                    stream_ptr,
+                )
+
+    def synchronize(self) -> None:
+        self._stream.synchronize()
+
+
 class KVTransferThread(threading.Thread):
 
     def __init__(self, client, group_keys, block_size, tp_rank, namespaces, layout,
@@ -579,11 +714,13 @@ class KVCacheSendingThread(KVTransferThread):
 
     def __init__(self, client, group_keys, block_size, tp_rank, namespaces, layout,
                  coord, ready_event, replication_factors,
-                 enable_kv_event: bool = False, record_operation=None):
+                 enable_kv_event: bool = False, record_operation=None,
+                 gpu_compressor: "GpuBlockCompressor | None" = None):
         super().__init__(client, group_keys, block_size, tp_rank, namespaces, layout,
                          coord, ready_event, name="KVCacheSendingThread",
                          record_operation=record_operation)
         self.replication_factors = replication_factors
+        self.gpu_compressor = gpu_compressor
         self.stored_requests: dict[str, int] = {}
         self.enable_kv_event = enable_kv_event
         self._store_pressure_active = False
@@ -689,9 +826,19 @@ class KVCacheSendingThread(KVTransferThread):
             sizes: list[list[int]] = []
             stored_events: list[BlockStored] = []
             prev_hash_per_group: dict[int, object] = {}
+            compressing = self.gpu_compressor is not None
+            if compressing:
+                # GPU-side wait (non-blocking on the host): the compress
+                # kernels below must not read the KV cache blocks until the
+                # compute stream has finished writing them.
+                self.gpu_compressor.wait_for(req_meta.current_event)
             for group, chunk_idx, block_hash in entries:
                 block_id = req_meta.block_ids[group.g_idx][chunk_idx]
-                scatter = self.layout.addrs_for(block_id)
+                scatter = (
+                    self.gpu_compressor.compress_block(block_id)
+                    if compressing
+                    else self.layout.addrs_for(block_id)
+                )
                 addrs.append([addr for addr, _ in scatter])
                 sizes.append([size for _, size in scatter])
                 if self.enable_kv_event:
@@ -710,7 +857,11 @@ class KVCacheSendingThread(KVTransferThread):
                     ))
                     prev_hash_per_group[group.g_idx] = event_hash
 
-            if req_meta.current_event is not None:
+            if compressing:
+                # Blocks until the compress kernels finish, so put_batch
+                # below reads finished data out of the staging buffers.
+                self.gpu_compressor.synchronize()
+            elif req_meta.current_event is not None:
                 req_meta.current_event.synchronize()
 
             batch_bytes = sum(sum(seg) for seg in sizes)
@@ -752,11 +903,13 @@ class KVCacheSendingThread(KVTransferThread):
 class KVCacheRecvingThread(KVTransferThread):
 
     def __init__(self, client, group_keys, block_size, tp_rank, namespaces, layout,
-                 coord, ready_event, request_queue=None, record_operation=None):
+                 coord, ready_event, request_queue=None, record_operation=None,
+                 gpu_compressor: "GpuBlockCompressor | None" = None):
         super().__init__(client, group_keys, block_size, tp_rank, namespaces, layout,
                          coord, ready_event, name="KVCacheRecvingThread",
                          request_queue=request_queue,
                          record_operation=record_operation)
+        self.gpu_compressor = gpu_compressor
         self._invalid_block_ids_lock = threading.Lock()
         self._invalid_block_ids: set[int] = set()
 
@@ -799,10 +952,15 @@ class KVCacheRecvingThread(KVTransferThread):
         entries = entries[rotation:] + entries[:rotation]
         key_list = [key for _, key in entries]
         block_id_list = [block_id for block_id, _ in entries]
+        compressing = self.gpu_compressor is not None
         addr_list: list[list[int]] = []
         size_list: list[list[int]] = []
         for block_id, _ in entries:
-            scatter = self.layout.addrs_for(block_id)
+            scatter = (
+                self.gpu_compressor.decompress_block(block_id)
+                if compressing
+                else self.layout.addrs_for(block_id)
+            )
             addr_list.append([addr for addr, _ in scatter])
             size_list.append([size for _, size in scatter])
 
@@ -825,6 +983,11 @@ class KVCacheRecvingThread(KVTransferThread):
                     "load_get", get_start, len(batch_keys), num_bytes=batch_bytes,
                     status="partial_failure" if failed else "ok",
                     num_failed_keys=len(failed))
+                if compressing:
+                    failed_ids = {block_id for _, _, block_id in failed}
+                    for block_id in batch_block_ids:
+                        if block_id not in failed_ids:
+                            self.gpu_compressor.finish_decompress(block_id)
                 if failed:
                     self._add_load_error_block_ids(
                         [block_id for _, _, block_id in failed]
@@ -841,6 +1004,10 @@ class KVCacheRecvingThread(KVTransferThread):
                                    status="error",
                                    num_failed_keys=len(current_batch_block_ids))
             logger.error("get_batch failed (req=%s): %s", req_id, err)
+        if compressing:
+            # Blocks until the decompress kernels finish, so the raw KV
+            # cache is fully populated before this request is reported done.
+            self.gpu_compressor.synchronize()
         self.set_finished_request(req_id)
         self.request_queue.task_done()
 
@@ -938,6 +1105,11 @@ class OpenLakeWorker:
             )
         self.num_recv_threads = max(1, int(extra.get("openlake_recv_threads", 1)))
         self.enable_kv_events = bool(extra.get("openlake_kv_events", False))
+        self.gpu_compression_enabled = bool(extra.get("openlake_gpu_compression", False))
+        self.gpu_compression_group_size = int(
+            extra.get("openlake_gpu_compression_group_size", 128)
+        )
+        self._gpu_compressor: "GpuBlockCompressor | None" = None
         self.layout = GroupLayout()
         self.kv_send_thread: "KVCacheSendingThread | None" = None
         self.kv_recv_threads: list[KVCacheRecvingThread] = []
@@ -992,6 +1164,7 @@ class OpenLakeWorker:
         seen_ptrs: set[int] = set()
         addrs: list[int] = []
         block_lens: list[int] = []
+        segment_caches: list = []
         for value in kv_caches.values():
             cache = value[0] if isinstance(value, list) else value
             storage = cache.untyped_storage()
@@ -1010,13 +1183,43 @@ class OpenLakeWorker:
             if not outer:
                 addrs.append(base_addr)
                 block_lens.append(page_bytes)
+                segment_caches.append(cache)
             else:
                 seg_stride = cache.stride(outer[0]) * element
                 for idx in range(cache.shape[outer[0]]):
                     addrs.append(base_addr + idx * seg_stride)
                     block_lens.append(seg_stride // self._num_blocks)
+                    segment_caches.append(cache)
         self.layout.set(addrs, block_lens)
-        local_slot_bytes = SLOT_HEADER_BYTES + sum(block_lens) if addrs else 0
+
+        compressed_block_lens: list[int] | None = None
+        if self.gpu_compression_enabled and addrs:
+            try:
+                compressor = GpuBlockCompressor(self.gpu_compression_group_size)
+                compressed_block_lens = [
+                    compressor.add_segment(
+                        segment_caches[i], addrs[i], block_lens[i],
+                        self._num_blocks, self._client.register_memory,
+                    )
+                    for i in range(len(addrs))
+                ]
+                self._gpu_compressor = compressor
+                logger.info(
+                    "openlake: GPU compression enabled (group_size=%d): "
+                    "%d B/block -> %d B/block payload",
+                    self.gpu_compression_group_size,
+                    sum(block_lens), sum(compressed_block_lens),
+                )
+            except Exception as err:
+                logger.warning(
+                    "openlake: GPU compression unavailable, falling back to "
+                    "uncompressed KV transfer: %s", err,
+                )
+                self._gpu_compressor = None
+                compressed_block_lens = None
+
+        payload_lens = compressed_block_lens or block_lens
+        local_slot_bytes = SLOT_HEADER_BYTES + sum(payload_lens) if addrs else 0
         slot_bytes = self._sync_max_slot_bytes(local_slot_bytes)
         if not addrs:
             logger.warning(
@@ -1047,6 +1250,7 @@ class OpenLakeWorker:
                 self._group_tp_replication_factors,
                 self.enable_kv_events,
                 record_operation=self._record_kv_connector_operation,
+                gpu_compressor=self._gpu_compressor,
             )
             self.kv_send_thread.start()
 
@@ -1065,6 +1269,7 @@ class OpenLakeWorker:
                 ready_event_recving,
                 request_queue=self.recv_request_queue,
                 record_operation=self._record_kv_connector_operation,
+                gpu_compressor=self._gpu_compressor,
             )
             recv_thread.name = f"KVCacheRecvingThread-{i}"
             recv_thread.start()

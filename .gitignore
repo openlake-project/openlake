@@ -8,3 +8,7 @@ Cargo.lock.bak
 /data
 __pycache__/
 *.pyc
+
+# Local agent tooling state, not project source.
+/.claude
+/.serena
