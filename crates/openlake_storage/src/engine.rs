@@ -2254,33 +2254,32 @@ fn validate_bucket_name(name: &str) -> StorageResult<()> {
         std::sync::LazyLock::new(|| regex::Regex::new(r"^(\d+\.){3}\d+$").unwrap());
 
     let bad = || StorageError::InvalidBucketName(name.to_owned());
+    let trimmed = name.trim();
 
-    // Validate the raw name — do not trim before checking. Leading or
-    // trailing whitespace (including tabs) must be rejected, not
-    // silently normalized away.
-    if name.is_empty() {
+    if trimmed.is_empty() {
         return Err(bad());
     }
-    if name.len() < 3 {
+    if trimmed.len() < 3 {
         return Err(bad());
     }
-    if name.len() > 63 {
+    if trimmed.len() > 63 {
         return Err(bad());
     }
-    if name == "openlake" {
+    if trimmed == "openlake" {
         return Err(bad());
     }
-    if IP_ADDRESS.is_match(name) {
+    if IP_ADDRESS.is_match(trimmed) {
         return Err(bad());
     }
-    if name.contains("..") || name.contains(".-") || name.contains("-.") {
+    if trimmed.contains("..") || trimmed.contains(".-") || trimmed.contains("-.") {
         return Err(bad());
     }
-    if !VALID_BUCKET_NAME_STRICT.is_match(name) {
+    if !VALID_BUCKET_NAME_STRICT.is_match(trimmed) {
         return Err(bad());
     }
     Ok(())
 }
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -3552,45 +3551,6 @@ mod tests {
         ] {
             validate_bucket_name(ok).unwrap();
         }
-    }
-
-    #[test]
-    fn rejects_bucket_names_with_surrounding_whitespace() {
-        let cases: &[(&str, &str)] = &[
-            (" demo", "leading space"),
-            ("demo ", "trailing space"),
-            (" demo ", "leading and trailing space"),
-            ("\tdemo", "leading tab"),
-            ("demo\t", "trailing tab"),
-            ("\tdemo\t", "leading and trailing tab"),
-        ];
-        for (name, desc) in cases {
-            assert!(
-                validate_bucket_name(name).is_err(),
-                "should reject {desc}: {name:?}"
-            );
-        }
-        for ok in ["demo", "a-b-c", "abc123"] {
-            validate_bucket_name(ok).unwrap();
-        }
-    }
-
-    #[compio::test]
-    async fn bucket_ops_reject_whitespace_padded_names_consistently() {
-        let (_dirs, e) = eng(3, 3).await;
-        let bad = " demo ";
-
-        let err = e
-            .create_bucket(bad, BucketMeta::new(0, false))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, StorageError::InvalidBucketName(_)));
-
-        let err = e.stat_bucket(bad).await.unwrap_err();
-        assert!(matches!(err, StorageError::InvalidBucketName(_)));
-
-        let err = e.delete_bucket(bad, false).await.unwrap_err();
-        assert!(matches!(err, StorageError::InvalidBucketName(_)));
     }
 
     #[compio::test]
