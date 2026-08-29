@@ -127,9 +127,11 @@ pub async fn head_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
     Query(query): Query<ObjectQuery>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let version_id = parse_version_id(query.version_id.as_deref())?;
     let explicit_version_requested = version_id.is_some();
+    let range_spec = parse_range_header(&headers)?;
 
     let engine = state.engine().clone();
     let info = SendWrapper::new(async move {
@@ -156,13 +158,7 @@ pub async fn head_object(
         return Ok((status, headers, Body::empty()).into_response());
     }
 
-    let mut headers = HeaderMap::new();
-    populate_object_headers(&mut headers, &info);
-    headers.insert(
-        axum::http::header::CONTENT_LENGTH,
-        HeaderValue::from(info.size),
-    );
-    Ok((StatusCode::OK, headers, Body::empty()).into_response())
+    Ok(head_object_response(&info, range_spec))
 }
 
 pub async fn delete_object(
@@ -765,38 +761,9 @@ fn stream_object_response(
     range: Option<(u64, u64)>,
 ) -> Response {
     let total = info.size;
-    let (status, served_len) = match range {
-        None => (StatusCode::OK, total),
-        Some((_, length)) => (StatusCode::PARTIAL_CONTENT, length),
-    };
-
     let mut headers = HeaderMap::new();
     populate_object_headers(&mut headers, &info);
-    headers.insert(
-        axum::http::header::CONTENT_LENGTH,
-        HeaderValue::from(served_len),
-    );
-    if let Some((offset, length)) = range {
-        // length > 0 here because `resolve_range` filters empty
-        // windows out, so offset+length-1 never underflows.
-        let end = offset + length - 1;
-        let v = HeaderValue::from_str(&format!("bytes {}-{}/{}", offset, end, total))
-            .expect("range header from u64s is always valid ASCII");
-        headers.insert(axum::http::header::CONTENT_RANGE, v);
-        // RFC 7233 §4.1: 206 responses SHOULD also include Accept-Ranges
-        // so clients learn the unit. Cheap and explicit.
-        headers.insert(
-            axum::http::header::ACCEPT_RANGES,
-            HeaderValue::from_static("bytes"),
-        );
-    } else {
-        // Advertise byte range support on full responses too. Some S3
-        // clients probe this before issuing parallel range GETs.
-        headers.insert(
-            axum::http::header::ACCEPT_RANGES,
-            HeaderValue::from_static("bytes"),
-        );
-    }
+    let (status, served_len) = populate_range_response_headers(&mut headers, total, range);
 
     let frames = SendWrapper::new(stream::unfold(
         (byte_stream, served_len, 0u64),
@@ -828,9 +795,9 @@ fn stream_object_response(
 /// Parse the request's `Range:` header into the engine's [`ByteRange`].
 /// Returns `Ok(None)` when no header is present, `Ok(Some(spec))` when
 /// it parses cleanly, and `Err(Malformed)` on syntactic issues. Bounds
-/// against object size are resolved inside the engine, which knows the
-/// size from its consensus read. S3 accepts a single byte range only;
-/// multi-range requests (`bytes=0-99,200-299`) are rejected with 400.
+/// against object size are resolved once the caller has object metadata.
+/// S3 accepts a single byte range only; multi-range requests
+/// (`bytes=0-99,200-299`) are rejected with 400.
 fn parse_range_header(headers: &HeaderMap) -> Result<Option<ByteRange>, AppError> {
     let raw = match headers.get(axum::http::header::RANGE) {
         None => return Ok(None),
@@ -896,6 +863,45 @@ fn range_not_satisfiable(info: &ObjectInfo) -> Response {
     (StatusCode::RANGE_NOT_SATISFIABLE, headers).into_response()
 }
 
+fn head_object_response(info: &ObjectInfo, range_spec: Option<ByteRange>) -> Response {
+    let range_requested = range_spec.is_some();
+    let resolved_range = range_spec.and_then(|range| range.resolve(info.size));
+    if range_requested && resolved_range.is_none() {
+        return range_not_satisfiable(info);
+    }
+
+    let mut headers = HeaderMap::new();
+    populate_object_headers(&mut headers, info);
+    let (status, _) = populate_range_response_headers(&mut headers, info.size, resolved_range);
+    (status, headers, Body::empty()).into_response()
+}
+
+fn populate_range_response_headers(
+    headers: &mut HeaderMap,
+    total: u64,
+    range: Option<(u64, u64)>,
+) -> (StatusCode, u64) {
+    let (status, served_len) = match range {
+        None => (StatusCode::OK, total),
+        Some((_, length)) => (StatusCode::PARTIAL_CONTENT, length),
+    };
+    headers.insert(
+        axum::http::header::CONTENT_LENGTH,
+        HeaderValue::from(served_len),
+    );
+    headers.insert(
+        axum::http::header::ACCEPT_RANGES,
+        HeaderValue::from_static("bytes"),
+    );
+    if let Some((offset, length)) = range {
+        let end = offset + length - 1;
+        let value = HeaderValue::from_str(&format!("bytes {offset}-{end}/{total}"))
+            .expect("range header from u64s is always valid ASCII");
+        headers.insert(axum::http::header::CONTENT_RANGE, value);
+    }
+    (status, served_len)
+}
+
 fn populate_object_headers(headers: &mut HeaderMap, info: &ObjectInfo) {
     if let Ok(v) = HeaderValue::from_str(&format!("\"{}\"", info.etag)) {
         headers.insert(ETAG, v);
@@ -932,7 +938,164 @@ fn http_date_rfc1123(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
     use axum::http::HeaderValue;
+    use openlake_storage::StorageClass;
+
+    fn object_info() -> ObjectInfo {
+        ObjectInfo {
+            bucket: "bucket".to_owned(),
+            key: "object".to_owned(),
+            size: 16,
+            etag: "etag".to_owned(),
+            storage_class: StorageClass::Single,
+            modified_ms: 0,
+            content_type: None,
+            version_id: "null".to_owned(),
+            is_delete_marker: false,
+        }
+    }
+
+    fn head_response(range: &'static str) -> Response {
+        let mut headers = HeaderMap::new();
+        headers.insert(RANGE, HeaderValue::from_static(range));
+        match parse_range_header(&headers) {
+            Ok(range_spec) => head_object_response(&object_info(), range_spec),
+            Err(error) => error.into_response(),
+        }
+    }
+
+    fn assert_satisfiable_head_range(
+        range: &'static str,
+        expected_length: &'static str,
+        expected_range: &'static str,
+    ) {
+        let response = head_response(range);
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_length)
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_range)
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(ACCEPT_RANGES)
+                .and_then(|value| value.to_str().ok()),
+            Some("bytes")
+        );
+    }
+
+    #[test]
+    fn head_range_bounded_returns_selected_range() {
+        assert_satisfiable_head_range("bytes=4-7", "4", "bytes 4-7/16");
+    }
+
+    #[test]
+    fn head_range_open_ended_uses_remaining_length() {
+        assert_satisfiable_head_range("bytes=5-", "11", "bytes 5-15/16");
+    }
+
+    #[test]
+    fn head_range_suffix_uses_requested_tail_length() {
+        assert_satisfiable_head_range("bytes=-5", "5", "bytes 11-15/16");
+    }
+
+    #[test]
+    fn head_range_end_past_eof_is_clamped() {
+        assert_satisfiable_head_range("bytes=12-99", "4", "bytes 12-15/16");
+    }
+
+    #[test]
+    fn head_range_covering_full_object_is_still_partial_content() {
+        assert_satisfiable_head_range("bytes=0-99", "16", "bytes 0-15/16");
+    }
+
+    #[test]
+    fn head_without_range_returns_full_object_metadata() {
+        let response = head_object_response(&object_info(), None);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some("16")
+        );
+        assert!(!response.headers().contains_key(CONTENT_RANGE));
+        assert_eq!(
+            response
+                .headers()
+                .get(ACCEPT_RANGES)
+                .and_then(|value| value.to_str().ok()),
+            Some("bytes")
+        );
+    }
+
+    #[test]
+    fn head_range_malformed_returns_bad_request() {
+        let response = head_response("invalid");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/xml")
+        );
+    }
+
+    #[test]
+    fn head_range_unsatisfiable_returns_range_error() {
+        let response = head_response("bytes=16-");
+
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some("0")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok()),
+            Some("bytes */16")
+        );
+    }
+
+    #[test]
+    fn head_range_zero_length_suffix_returns_range_error() {
+        assert_eq!(
+            head_response("bytes=-0").status(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+    }
+
+    #[test]
+    fn head_range_on_empty_object_returns_range_error() {
+        let mut info = object_info();
+        info.size = 0;
+
+        assert_eq!(
+            head_object_response(&info, Some(ByteRange::Bounded { start: 0, end: 0 })).status(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+    }
 
     #[test]
     fn parse_copy_source_accepts_bucket_and_key() {
