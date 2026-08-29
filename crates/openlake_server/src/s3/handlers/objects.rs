@@ -1025,7 +1025,9 @@ mod tests {
     #[test]
     fn head_bounded_range_clamps_end_past_eof() {
         let info = test_info(100);
-        let spec = parse_range_header(&range_header("bytes=90-999")).unwrap().unwrap();
+        let spec = parse_range_header(&range_header("bytes=90-999"))
+            .unwrap()
+            .unwrap();
         let range = spec.resolve(info.size).unwrap();
         assert_eq!(range, (90, 10));
         let resp = head_object_response(&info, Some(range));
@@ -1144,7 +1146,10 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("100")
         );
-        assert!(resp.headers().get(axum::http::header::CONTENT_RANGE).is_none());
+        assert!(resp
+            .headers()
+            .get(axum::http::header::CONTENT_RANGE)
+            .is_none());
     }
 
     #[test]
