@@ -761,38 +761,9 @@ fn stream_object_response(
     range: Option<(u64, u64)>,
 ) -> Response {
     let total = info.size;
-    let (status, served_len) = match range {
-        None => (StatusCode::OK, total),
-        Some((_, length)) => (StatusCode::PARTIAL_CONTENT, length),
-    };
-
     let mut headers = HeaderMap::new();
     populate_object_headers(&mut headers, &info);
-    headers.insert(
-        axum::http::header::CONTENT_LENGTH,
-        HeaderValue::from(served_len),
-    );
-    if let Some((offset, length)) = range {
-        // length > 0 here because `resolve_range` filters empty
-        // windows out, so offset+length-1 never underflows.
-        let end = offset + length - 1;
-        let v = HeaderValue::from_str(&format!("bytes {}-{}/{}", offset, end, total))
-            .expect("range header from u64s is always valid ASCII");
-        headers.insert(axum::http::header::CONTENT_RANGE, v);
-        // RFC 7233 §4.1: 206 responses SHOULD also include Accept-Ranges
-        // so clients learn the unit. Cheap and explicit.
-        headers.insert(
-            axum::http::header::ACCEPT_RANGES,
-            HeaderValue::from_static("bytes"),
-        );
-    } else {
-        // Advertise byte range support on full responses too. Some S3
-        // clients probe this before issuing parallel range GETs.
-        headers.insert(
-            axum::http::header::ACCEPT_RANGES,
-            HeaderValue::from_static("bytes"),
-        );
-    }
+    let (status, served_len) = populate_range_response_headers(&mut headers, total, range);
 
     let frames = SendWrapper::new(stream::unfold(
         (byte_stream, served_len, 0u64),
@@ -899,14 +870,36 @@ fn head_object_response(info: &ObjectInfo, range_spec: Option<ByteRange>) -> Res
         return range_not_satisfiable(info);
     }
 
-    let content_length = resolved_range.map_or(info.size, |(_, length)| length);
     let mut headers = HeaderMap::new();
     populate_object_headers(&mut headers, info);
+    let (status, _) = populate_range_response_headers(&mut headers, info.size, resolved_range);
+    (status, headers, Body::empty()).into_response()
+}
+
+fn populate_range_response_headers(
+    headers: &mut HeaderMap,
+    total: u64,
+    range: Option<(u64, u64)>,
+) -> (StatusCode, u64) {
+    let (status, served_len) = match range {
+        None => (StatusCode::OK, total),
+        Some((_, length)) => (StatusCode::PARTIAL_CONTENT, length),
+    };
     headers.insert(
         axum::http::header::CONTENT_LENGTH,
-        HeaderValue::from(content_length),
+        HeaderValue::from(served_len),
     );
-    (StatusCode::OK, headers, Body::empty()).into_response()
+    headers.insert(
+        axum::http::header::ACCEPT_RANGES,
+        HeaderValue::from_static("bytes"),
+    );
+    if let Some((offset, length)) = range {
+        let end = offset + length - 1;
+        let value = HeaderValue::from_str(&format!("bytes {offset}-{end}/{total}"))
+            .expect("range header from u64s is always valid ASCII");
+        headers.insert(axum::http::header::CONTENT_RANGE, value);
+    }
+    (status, served_len)
 }
 
 fn populate_object_headers(headers: &mut HeaderMap, info: &ObjectInfo) {
@@ -972,10 +965,14 @@ mod tests {
         }
     }
 
-    fn assert_satisfiable_head_range(range: &'static str, expected_length: &'static str) {
+    fn assert_satisfiable_head_range(
+        range: &'static str,
+        expected_length: &'static str,
+        expected_range: &'static str,
+    ) {
         let response = head_response(range);
 
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(
             response
                 .headers()
@@ -983,28 +980,67 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some(expected_length)
         );
-        assert!(!response.headers().contains_key(CONTENT_RANGE));
-        assert!(!response.headers().contains_key(ACCEPT_RANGES));
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_range)
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(ACCEPT_RANGES)
+                .and_then(|value| value.to_str().ok()),
+            Some("bytes")
+        );
     }
 
     #[test]
-    fn head_range_bounded_changes_only_content_length() {
-        assert_satisfiable_head_range("bytes=4-7", "4");
+    fn head_range_bounded_returns_selected_range() {
+        assert_satisfiable_head_range("bytes=4-7", "4", "bytes 4-7/16");
     }
 
     #[test]
     fn head_range_open_ended_uses_remaining_length() {
-        assert_satisfiable_head_range("bytes=5-", "11");
+        assert_satisfiable_head_range("bytes=5-", "11", "bytes 5-15/16");
     }
 
     #[test]
     fn head_range_suffix_uses_requested_tail_length() {
-        assert_satisfiable_head_range("bytes=-5", "5");
+        assert_satisfiable_head_range("bytes=-5", "5", "bytes 11-15/16");
     }
 
     #[test]
     fn head_range_end_past_eof_is_clamped() {
-        assert_satisfiable_head_range("bytes=12-99", "4");
+        assert_satisfiable_head_range("bytes=12-99", "4", "bytes 12-15/16");
+    }
+
+    #[test]
+    fn head_range_covering_full_object_is_still_partial_content() {
+        assert_satisfiable_head_range("bytes=0-99", "16", "bytes 0-15/16");
+    }
+
+    #[test]
+    fn head_without_range_returns_full_object_metadata() {
+        let response = head_object_response(&object_info(), None);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some("16")
+        );
+        assert!(!response.headers().contains_key(CONTENT_RANGE));
+        assert_eq!(
+            response
+                .headers()
+                .get(ACCEPT_RANGES)
+                .and_then(|value| value.to_str().ok()),
+            Some("bytes")
+        );
     }
 
     #[test]
@@ -1039,6 +1075,25 @@ mod tests {
                 .get(CONTENT_RANGE)
                 .and_then(|value| value.to_str().ok()),
             Some("bytes */16")
+        );
+    }
+
+    #[test]
+    fn head_range_zero_length_suffix_returns_range_error() {
+        assert_eq!(
+            head_response("bytes=-0").status(),
+            StatusCode::RANGE_NOT_SATISFIABLE
+        );
+    }
+
+    #[test]
+    fn head_range_on_empty_object_returns_range_error() {
+        let mut info = object_info();
+        info.size = 0;
+
+        assert_eq!(
+            head_object_response(&info, Some(ByteRange::Bounded { start: 0, end: 0 })).status(),
+            StatusCode::RANGE_NOT_SATISFIABLE
         );
     }
 
