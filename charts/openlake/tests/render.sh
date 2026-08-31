@@ -219,6 +219,12 @@ expect_render_failure \
   --set 'kv.targets[1].ip=10.0.0.12'
 
 expect_render_failure \
+  "the H2/local connector requires kv.sharedMemory.type=hostPath" \
+  --set kv.enabled=true \
+  --set 'kv.targets[0].nodeName=gpu-worker-0' \
+  --set 'kv.targets[0].ip=10.0.0.11'
+
+expect_render_failure \
   "kv.rdma.devName is required for the dct backend" \
   --set kv.enabled=true \
   --set kv.transport=rdma \
@@ -231,7 +237,7 @@ expect_render_failure \
   --set vllmSmokeTest.enabled=true
 
 expect_render_failure \
-  "the H2/local vLLM smoke test requires kv.sharedMemory.type=hostPath" \
+  "the H2/local connector requires kv.sharedMemory.type=hostPath" \
   --values "${smoke_values}" \
   --set kv.sharedMemory.type=emptyDir
 
