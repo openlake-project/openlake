@@ -61,9 +61,6 @@ ucx
   {{- if not .Values.kv.connector.enabled -}}
     {{- fail "the vLLM smoke test requires kv.connector.enabled=true" -}}
   {{- end -}}
-  {{- if ne .Values.kv.sharedMemory.type "hostPath" -}}
-    {{- fail "the H2/local vLLM smoke test requires kv.sharedMemory.type=hostPath" -}}
-  {{- end -}}
 {{- end -}}
 {{- end -}}
 
@@ -80,6 +77,9 @@ ucx
   {{- end -}}
   {{- if and .Values.kv.connector.enabled (eq .Values.kv.transport "h2") (gt (len .Values.kv.targets) 1) -}}
     {{- fail "the H2/local connector supports one same-host KV target only; disable kv.connector.enabled for a multi-node H2 orchestration smoke test or use the rdma transport" -}}
+  {{- end -}}
+  {{- if and .Values.kv.connector.enabled (eq .Values.kv.transport "h2") (ne .Values.kv.sharedMemory.type "hostPath") -}}
+    {{- fail "the H2/local connector requires kv.sharedMemory.type=hostPath so vLLM and OpenLake can share the POSIX slab" -}}
   {{- end -}}
   {{- if eq (int .Values.kv.ports.rpc) (int .Values.kv.ports.telemetry) -}}
     {{- fail "kv.ports.rpc and kv.ports.telemetry must be different" -}}
