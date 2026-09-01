@@ -15,6 +15,7 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::http::Request;
 use axum::response::Response;
+use percent_encoding::percent_decode_str;
 
 /// Latency histogram upper bounds, microseconds; last bucket is +Inf.
 const LE_US: [u64; 8] = [
@@ -134,6 +135,18 @@ fn record(op: Op, latency_us: u64, bytes_out: u64, bytes_in: u64) {
     }
 }
 
+fn has_query_param(query: &str, name: &str) -> bool {
+    query
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .any(|part| {
+            let encoded_name = part.split_once('=').map_or(part, |(key, _)| key);
+            percent_decode_str(encoded_name)
+                .decode_utf8()
+                .is_ok_and(|decoded| decoded == name)
+        })
+}
+
 fn classify(req: &Request<Body>) -> Op {
     let path = req.uri().path();
     if let Some(rest) = path.strip_prefix("/openlake/") {
@@ -162,9 +175,10 @@ fn classify(req: &Request<Body>) -> Op {
     if key.is_empty() {
         return match method {
             "GET" => {
-                if query.contains("list-type=2") {
+                if has_query_param(query, "list-type") {
                     Op::ListObjectsV2
-                } else if query.contains("location") || query.contains("versioning") {
+                } else if has_query_param(query, "location") || has_query_param(query, "versioning")
+                {
                     Op::BucketMeta
                 } else {
                     Op::ListObjectsV1
@@ -183,23 +197,23 @@ fn classify(req: &Request<Body>) -> Op {
         "PUT" => {
             if req.headers().contains_key("x-amz-copy-source") {
                 Op::CopyObject
-            } else if query.contains("partNumber") && query.contains("uploadId") {
+            } else if has_query_param(query, "partNumber") && has_query_param(query, "uploadId") {
                 Op::UploadPart
             } else {
                 Op::PutObject
             }
         }
         "DELETE" => {
-            if query.contains("uploadId") {
+            if has_query_param(query, "uploadId") {
                 Op::AbortMultipartUpload
             } else {
                 Op::DeleteObject
             }
         }
         "POST" => {
-            if query.contains("uploads") {
+            if has_query_param(query, "uploads") {
                 Op::CreateMultipartUpload
-            } else if query.contains("uploadId") {
+            } else if has_query_param(query, "uploadId") {
                 Op::CompleteMultipartUpload
             } else {
                 Op::Other
@@ -443,6 +457,34 @@ mod tests {
         assert!(matches!(
             classify(&req("PUT", "/openlake/cache/some/key")),
             Op::CacheWrite
+        ));
+    }
+
+    #[test]
+    fn classify_matches_query_parameter_names_instead_of_substrings() {
+        assert!(matches!(
+            classify(&req("GET", "/b?prefix=list-type=2")),
+            Op::ListObjectsV1
+        ));
+        assert!(matches!(
+            classify(&req("GET", "/b?prefix=location")),
+            Op::ListObjectsV1
+        ));
+        assert!(matches!(
+            classify(&req("PUT", "/b/k?first=partNumber&second=uploadId")),
+            Op::PutObject
+        ));
+        assert!(matches!(
+            classify(&req("DELETE", "/b/k?marker=uploadId")),
+            Op::DeleteObject
+        ));
+        assert!(matches!(
+            classify(&req("POST", "/b/k?prefix=uploads")),
+            Op::Other
+        ));
+        assert!(matches!(
+            classify(&req("GET", "/b?list%2Dtype=2")),
+            Op::ListObjectsV2
         ));
     }
 
