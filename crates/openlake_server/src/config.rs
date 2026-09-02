@@ -368,6 +368,21 @@ impl Config {
                 }
             }
         }
+        {
+            let mut seen_rpc_addrs: std::collections::HashMap<SocketAddr, u16> =
+                std::collections::HashMap::new();
+
+            for n in &cfg.nodes {
+                if let Some(previous_node_id) = seen_rpc_addrs.insert(n.rpc_addr, n.id) {
+                    anyhow::bail!(
+                        "duplicate rpc_addr {} used by node ids {} and {}; each storage node must have a unique RPC endpoint",
+                        n.rpc_addr,
+                        previous_node_id,
+                        n.id,
+                    );
+                }
+            }
+        }
 
         if cfg.mode == Mode::Kv {
             if cfg.kv_slab.is_none() {
@@ -659,5 +674,104 @@ capacity_gb = 1
         assert!(error
             .to_string()
             .contains("mode = \"kv\" requires a non-empty kv_agents list"));
+    }
+
+    #[test]
+    fn duplicate_rpc_addresses_are_rejected() {
+        let error = Config::from_toml(
+            r#"
+    self_id = 0
+    rpc_addr = "0.0.0.0:9100"
+    s3_addr = "0.0.0.0:9000"
+    data_dirs = ["/tmp"]
+    set_drive_count = 2
+    default_parity_count = 1
+    region = "us-east-1"
+
+    [[credentials]]
+    access_key = "test"
+    secret_key = "test"
+
+    [[nodes]]
+    id = 0
+    rpc_addr = "127.0.0.1:9100"
+    disk_count = 1
+
+    [[nodes]]
+    id = 1
+    rpc_addr = "127.0.0.1:9100"
+    disk_count = 1
+    "#,
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+
+        assert!(message.contains("duplicate rpc_addr"));
+        assert!(message.contains("127.0.0.1:9100"));
+        assert!(message.contains("0"));
+        assert!(message.contains("1"));
+    }
+
+    #[test]
+    fn same_ip_with_different_rpc_ports_is_allowed() {
+        let cfg = Config::from_toml(
+            r#"
+    self_id = 0
+    rpc_addr = "0.0.0.0:9100"
+    s3_addr = "0.0.0.0:9000"
+    data_dirs = ["/tmp"]
+    set_drive_count = 2
+    default_parity_count = 1
+    region = "us-east-1"
+
+    [[credentials]]
+    access_key = "test"
+    secret_key = "test"
+
+    [[nodes]]
+    id = 0
+    rpc_addr = "127.0.0.1:9100"
+    disk_count = 1
+
+    [[nodes]]
+    id = 1
+    rpc_addr = "127.0.0.1:9101"
+    disk_count = 1
+    "#,
+        );
+
+        assert!(cfg.is_ok());
+    }
+
+    #[test]
+    fn different_ips_with_same_rpc_port_are_allowed() {
+        let cfg = Config::from_toml(
+            r#"
+    self_id = 0
+    rpc_addr = "0.0.0.0:9100"
+    s3_addr = "0.0.0.0:9000"
+    data_dirs = ["/tmp"]
+    set_drive_count = 2
+    default_parity_count = 1
+    region = "us-east-1"
+
+    [[credentials]]
+    access_key = "test"
+    secret_key = "test"
+
+    [[nodes]]
+    id = 0
+    rpc_addr = "127.0.0.1:9100"
+    disk_count = 1
+
+    [[nodes]]
+    id = 1
+    rpc_addr = "127.0.0.2:9100"
+    disk_count = 1
+    "#,
+        );
+
+        assert!(cfg.is_ok());
     }
 }
