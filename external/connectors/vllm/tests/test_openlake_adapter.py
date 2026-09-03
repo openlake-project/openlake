@@ -36,6 +36,7 @@ def _module(name: str) -> types.ModuleType:
 def _install_import_stubs() -> None:
     torch = _module("torch")
     torch.cuda = SimpleNamespace(Event=object)
+    torch.bfloat16 = "bfloat16"
     torch.int64 = "int64"
 
     _module("vllm")
@@ -165,6 +166,148 @@ def _parallel(**overrides):
 
 
 class OpenLakeRankNamespaceTests(unittest.TestCase):
+    def test_compression_config_rejects_non_lossless_codecs(self):
+        for field, codec, mode in (
+            ("codec", "unknown", "lossless"),
+            ("mode", "expans", "lossy"),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                ValueError, field
+            ):
+                ADAPTER._expans_enabled({"openlake_compression": {
+                    "enabled": True, "codec": codec, "mode": mode,
+                }})
+
+    def test_expans_namespace_isolated_without_changing_default(self):
+        interface = sys.modules["vllm.v1.kv_cache_interface"]
+        spec = interface.FullAttentionSpec()
+        spec.block_size = 16
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]
+        )
+
+        def tag(compression=None):
+            extra = {}
+            if compression is not None:
+                extra["openlake_compression"] = compression
+            config = SimpleNamespace(
+                model_config=SimpleNamespace(model="org/model"),
+                kv_transfer_config=SimpleNamespace(
+                    kv_connector_extra_config=extra
+                ),
+                speculative_config=None,
+            )
+            return ADAPTER._group_key_spaces(
+                config, kv_cache_config
+            )[1][0]._model_tag
+
+        default = tag()
+        disabled = tag({"enabled": False})
+        enabled = tag({
+            "enabled": True,
+            "codec": "expans",
+            "mode": "lossless",
+        })
+
+        self.assertEqual(default, disabled)
+        self.assertNotEqual(default, enabled)
+
+    def test_compressed_store_stops_at_first_overflow(self):
+        sender = ADAPTER.KVCacheSendingThread.__new__(
+            ADAPTER.KVCacheSendingThread
+        )
+        sender.done_task_lock = __import__("threading").Lock()
+        sender.stored_requests = {"request": 1}
+        sender._compression_stopped_requests = set()
+        sender._saved_offset = {}
+        sender._store_pressure_active = False
+        sender._skip_store_requests = set()
+        sender.enable_kv_event = False
+        sender._record_operation_cb = None
+        sender.layout = SimpleNamespace(
+            addrs_for=lambda block_id: [(block_id * 1000, 100)]
+        )
+
+        class FakeCompression:
+            max_batch_blocks = 8
+            record_bytes = 768
+
+            def encode(self, _scatters):
+                return (
+                    (10_000, 11_000, 12_000, 13_000),
+                    (True, True, False, True),
+                )
+
+        calls = []
+        sender.compression = FakeCompression()
+        sender.client = SimpleNamespace(
+            put_batch=lambda keys, addrs, sizes: (
+                calls.append((keys, addrs, sizes)) or [0] * len(keys)
+            )
+        )
+        group = SimpleNamespace(g_idx=0, block_size=16)
+        entries = [
+            (group, index, bytes([index])) for index in range(4)
+        ]
+        keys = [bytes([index]) * ADAPTER.SLOT_HEADER_BYTES for index in range(4)]
+        req_meta = SimpleNamespace(block_ids=([4, 5, 6, 7],))
+
+        sender._put_compressed(entries, keys, req_meta, 64, "request")
+
+        self.assertEqual(calls, [(
+            keys[:2], [[10_000], [11_000]], [[768], [768]],
+        )])
+        self.assertIn("request", sender._compression_stopped_requests)
+        self.assertNotIn("request", sender._saved_offset)
+
+    def test_compressed_load_uses_fixed_records_and_decodes_hits(self):
+        receiver = ADAPTER.KVCacheRecvingThread.__new__(
+            ADAPTER.KVCacheRecvingThread
+        )
+        receiver._invalid_block_ids_lock = __import__("threading").Lock()
+        receiver._invalid_block_ids = set()
+        receiver._record_operation_cb = None
+        receiver.layout = SimpleNamespace(
+            addrs_for=lambda block_id: [(block_id * 1000, 100)]
+        )
+
+        class FakeCompression:
+            max_batch_blocks = 8
+            record_bytes = 768
+
+            def __init__(self):
+                self.decode_calls = []
+
+            def reserve(self, count):
+                return tuple(10_000 + i * 768 for i in range(count))
+
+            def decode(self, indexes, destinations):
+                self.decode_calls.append((indexes, destinations))
+
+        get_calls = []
+        receiver.compression = FakeCompression()
+        receiver.client = SimpleNamespace(
+            get_batch=lambda keys, addrs, sizes: (
+                get_calls.append((keys, addrs, sizes)) or [0, -1, 0]
+            )
+        )
+        entries = [(4, b"a"), (5, b"b"), (6, b"c")]
+
+        receiver._get_compressed(entries, "request")
+
+        self.assertEqual(
+            get_calls,
+            [(
+                [b"a", b"b", b"c"],
+                [[10_000], [10_768], [11_536]],
+                [[768], [768], [768]],
+            )],
+        )
+        self.assertEqual(receiver._invalid_block_ids, {5})
+        self.assertEqual(receiver.compression.decode_calls, [(
+            [0, 2], [[(4000, 100)], [(6000, 100)]],
+        )])
+
     def test_cross_layer_cache_uses_the_standard_registration_path(self):
         worker = ADAPTER.OpenLakeWorker.__new__(ADAPTER.OpenLakeWorker)
         captured = []
@@ -174,6 +317,78 @@ class OpenLakeRankNamespaceTests(unittest.TestCase):
         worker.register_cross_layers_kv_caches(cache)
 
         self.assertEqual(captured, [{"__cross_layer__": cache}])
+
+    def test_worker_registration_honors_exact_compression_json(self):
+        raw_block_bytes = 999_424
+        parallel_state = sys.modules["vllm.distributed.parallel_state"]
+        parallel_state.get_world_group = lambda: SimpleNamespace(
+            world_size=1, cpu_group="cpu-world"
+        )
+
+        codec_calls = []
+
+        class FakeCodec:
+            def __init__(self, **kwargs):
+                codec_calls.append(kwargs)
+
+        expans_module = _module("openlake_client.openlake_expans")
+        expans_module.ExpansCodec = FakeCodec
+
+        storage = SimpleNamespace(
+            data_ptr=lambda: 1_000,
+            nbytes=lambda: 2 * raw_block_bytes,
+        )
+        cache = SimpleNamespace(
+            dtype=sys.modules["torch"].bfloat16,
+            ndim=1,
+            shape=(2,),
+            untyped_storage=lambda: storage,
+            element_size=lambda: 2,
+            stride=lambda _dimension: 1,
+        )
+
+        def register(compression):
+            attaches = []
+            worker = ADAPTER.OpenLakeWorker.__new__(ADAPTER.OpenLakeWorker)
+            worker.compression_enabled = ADAPTER._expans_enabled({
+                "openlake_compression": compression,
+            })
+            worker.compression = None
+            worker.group_keys = [object()]
+            worker.layout = ADAPTER.GroupLayout()
+            worker._num_blocks = 2
+            worker._nodes = ["node"]
+            worker.kv_role = "none"
+            worker.num_recv_threads = 0
+            worker._client = SimpleNamespace(
+                register_memory=lambda *_args: None,
+                attach=lambda *args: attaches.append(args),
+            )
+
+            worker.register_kv_caches({"layer": cache})
+            return worker, attaches
+
+        enabled_worker, enabled_attaches = register({
+            "enabled": True,
+            "codec": "expans",
+            "mode": "lossless",
+        })
+        self.assertEqual(codec_calls[0]["raw_block_bytes"], raw_block_bytes)
+        self.assertEqual(codec_calls[0]["record_bytes"], 770_048)
+        self.assertEqual(codec_calls[0]["segment_bytes"], (raw_block_bytes,))
+        self.assertIsInstance(enabled_worker.compression, FakeCodec)
+        self.assertEqual(
+            enabled_attaches,
+            [("node", 0, ADAPTER.SLOT_HEADER_BYTES + 770_048)],
+        )
+
+        disabled_worker, disabled_attaches = register({"enabled": False})
+        self.assertEqual(len(codec_calls), 1)
+        self.assertIsNone(disabled_worker.compression)
+        self.assertEqual(
+            disabled_attaches,
+            [("node", 0, ADAPTER.SLOT_HEADER_BYTES + raw_block_bytes)],
+        )
 
     def test_slot_size_uses_cpu_world_max_for_unequal_pp_stages(self):
         torch = sys.modules["torch"]
