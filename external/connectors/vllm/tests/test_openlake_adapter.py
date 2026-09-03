@@ -33,6 +33,19 @@ def _module(name: str) -> types.ModuleType:
     return module
 
 
+class _StreamContext:
+    """Fakes the object returned by ``torch.cuda.stream(...)``."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def __enter__(self):
+        return self._stream
+
+    def __exit__(self, *_exc):
+        return False
+
+
 def _install_import_stubs() -> None:
     torch = _module("torch")
     torch.cuda = SimpleNamespace(Event=object)
@@ -487,6 +500,340 @@ class OpenLakeRankNamespaceTests(unittest.TestCase):
         self.assertEqual(
             scheduler._gather_exists([block_hash], 16),
             {(0, block_hash), (1, block_hash)},
+        )
+
+
+class GpuBlockCompressorTests(unittest.TestCase):
+    """Unit tests for the optional on-GPU KV compression codec wiring.
+
+    These mock out ``openlake_client``'s ``cuda_*`` functions (the pyo3
+    bindings over crates/openlake_kv_client/src/cuda_codec.rs) and
+    ``torch.cuda`` so the address/size arithmetic can be checked without a
+    CUDA build or GPU.
+    """
+
+    def setUp(self):
+        torch = sys.modules["torch"]
+        self._orig_cuda = torch.cuda
+        self._orig_empty = getattr(torch, "empty", None)
+        self._orig_uint8 = getattr(torch, "uint8", None)
+
+        class FakeStream:
+            def __init__(self):
+                self.cuda_stream = id(self)
+                self.waited = []
+                self.synced = 0
+
+            def wait_event(self, event):
+                self.waited.append(event)
+
+            def synchronize(self):
+                self.synced += 1
+
+        self.FakeStream = FakeStream
+        torch.cuda = SimpleNamespace(
+            Event=object,
+            Stream=FakeStream,
+            stream=lambda stream: _StreamContext(stream),
+        )
+
+        class FakeStagingTensor:
+            def __init__(self, nbytes, dtype, device):
+                self._nbytes = nbytes
+                self.dtype = dtype
+                self.device = device
+
+            def data_ptr(self):
+                return 0xB000
+
+            def numel(self):
+                return self._nbytes
+
+        self.FakeStagingTensor = FakeStagingTensor
+        torch.empty = lambda n, dtype=None, device=None: FakeStagingTensor(n, dtype, device)
+        torch.uint8 = "uint8"
+        self.addCleanup(self._restore_torch)
+
+    def _restore_torch(self):
+        torch = sys.modules["torch"]
+        torch.cuda = self._orig_cuda
+        if self._orig_empty is not None:
+            torch.empty = self._orig_empty
+        else:
+            del torch.empty
+        if self._orig_uint8 is not None:
+            torch.uint8 = self._orig_uint8
+        else:
+            del torch.uint8
+
+    def _fake_client(self, *, available=True):
+        client = _module("openlake_client")
+        client.cuda_compression_available = lambda: available
+        # One byte of compressed payload per element, so expected sizes stay
+        # easy to compute by hand in the assertions below.
+        client.cuda_compressed_size = lambda element_count, group_size: element_count
+        calls = SimpleNamespace(compress=[], decompress=[])
+        client.cuda_compress = lambda *args: calls.compress.append(args)
+        client.cuda_decompress = lambda *args: calls.decompress.append(args)
+        return client, calls
+
+    def test_requires_cuda_enabled_build(self):
+        self._fake_client(available=False)
+        with self.assertRaisesRegex(RuntimeError, "requires the CUDA-enabled"):
+            ADAPTER.GpuBlockCompressor(128)
+
+    def test_add_segment_rejects_unsupported_dtype(self):
+        self._fake_client()
+        compressor = ADAPTER.GpuBlockCompressor(128)
+        cache = SimpleNamespace(dtype="torch.float32", device="cuda:0", element_size=lambda: 4)
+
+        with self.assertRaisesRegex(ValueError, "fp16/bf16"):
+            compressor.add_segment(
+                cache, base_addr=0, block_bytes=64, num_blocks=2,
+                register_memory=lambda *_: None,
+            )
+
+    def test_add_segment_rejects_block_bytes_not_a_whole_number_of_elements(self):
+        self._fake_client()
+        compressor = ADAPTER.GpuBlockCompressor(128)
+        cache = SimpleNamespace(dtype="torch.bfloat16", device="cuda:0", element_size=lambda: 2)
+
+        with self.assertRaisesRegex(ValueError, "whole number"):
+            compressor.add_segment(
+                cache, base_addr=0, block_bytes=5, num_blocks=1,
+                register_memory=lambda *_: None,
+            )
+
+    def test_add_segment_sizes_and_registers_fixed_ratio_staging_buffer(self):
+        self._fake_client()
+        compressor = ADAPTER.GpuBlockCompressor(128)
+        cache = SimpleNamespace(dtype="torch.float16", device="cuda:3", element_size=lambda: 2)
+        registered = []
+
+        compressed_bytes = compressor.add_segment(
+            cache, base_addr=0x1000, block_bytes=256, num_blocks=4,
+            register_memory=lambda addr, length: registered.append((addr, length)),
+        )
+
+        # element_count = block_bytes // itemsize = 128; the fake
+        # cuda_compressed_size above returns element_count directly.
+        self.assertEqual(compressed_bytes, 128)
+        self.assertEqual(registered, [(0xB000, 4 * 128)])
+        self.assertEqual(len(compressor._staging_tensors), 1)
+        self.assertEqual(compressor._staging_tensors[0].device, "cuda:3")
+
+    def test_compress_block_launches_kernel_at_block_offset_and_returns_scatter(self):
+        _, calls = self._fake_client()
+        compressor = ADAPTER.GpuBlockCompressor(64)
+        cache = SimpleNamespace(dtype="torch.float16", device="cuda:0", element_size=lambda: 2)
+        compressed_bytes = compressor.add_segment(
+            cache, base_addr=0x1000, block_bytes=256, num_blocks=4,
+            register_memory=lambda *_: None,
+        )
+        staging_addr = compressor._segments[0][5]
+
+        scatter = compressor.compress_block(2)
+
+        self.assertEqual(scatter, [(staging_addr + 2 * compressed_bytes, compressed_bytes)])
+        self.assertEqual(len(calls.compress), 1)
+        dtype, input_ptr, element_count, group_size, output_ptr, output_bytes, _stream_ptr = calls.compress[0]
+        self.assertEqual(dtype, "fp16")
+        self.assertEqual(input_ptr, 0x1000 + 2 * 256)
+        self.assertEqual(element_count, 128)
+        self.assertEqual(group_size, 64)
+        self.assertEqual(output_ptr, staging_addr + 2 * compressed_bytes)
+        self.assertEqual(output_bytes, compressed_bytes)
+
+    def test_decompress_block_returns_scatter_without_launching_a_kernel(self):
+        _, calls = self._fake_client()
+        compressor = ADAPTER.GpuBlockCompressor(64)
+        cache = SimpleNamespace(dtype="torch.bfloat16", device="cuda:0", element_size=lambda: 2)
+        compressed_bytes = compressor.add_segment(
+            cache, base_addr=0x2000, block_bytes=128, num_blocks=3,
+            register_memory=lambda *_: None,
+        )
+        staging_addr = compressor._segments[0][5]
+
+        scatter = compressor.decompress_block(1)
+
+        self.assertEqual(scatter, [(staging_addr + compressed_bytes, compressed_bytes)])
+        self.assertEqual(calls.decompress, [])
+
+    def test_finish_decompress_launches_kernel_writing_into_the_raw_block(self):
+        _, calls = self._fake_client()
+        compressor = ADAPTER.GpuBlockCompressor(64)
+        cache = SimpleNamespace(dtype="torch.bfloat16", device="cuda:0", element_size=lambda: 2)
+        compressed_bytes = compressor.add_segment(
+            cache, base_addr=0x2000, block_bytes=128, num_blocks=3,
+            register_memory=lambda *_: None,
+        )
+        staging_addr = compressor._segments[0][5]
+
+        compressor.finish_decompress(1)
+
+        self.assertEqual(len(calls.decompress), 1)
+        dtype, input_ptr, input_bytes, element_count, group_size, output_ptr, _stream_ptr = calls.decompress[0]
+        self.assertEqual(dtype, "bf16")
+        self.assertEqual(input_ptr, staging_addr + compressed_bytes)
+        self.assertEqual(input_bytes, compressed_bytes)
+        self.assertEqual(element_count, 64)
+        self.assertEqual(group_size, 64)
+        self.assertEqual(output_ptr, 0x2000 + 1 * 128)
+
+    def test_wait_for_and_synchronize_delegate_to_the_compressor_stream(self):
+        self._fake_client()
+        compressor = ADAPTER.GpuBlockCompressor(64)
+        event = object()
+
+        compressor.wait_for(event)
+        compressor.wait_for(None)
+        compressor.synchronize()
+
+        self.assertEqual(compressor._stream.waited, [event])
+        self.assertEqual(compressor._stream.synced, 1)
+
+
+class RegisterKvCachesGpuCompressionTests(unittest.TestCase):
+    """Covers OpenLakeWorker.register_kv_caches's GPU-compression branch and
+    its fall back to uncompressed transfer when the CUDA build is
+    unavailable or the codec rejects the KV cache's dtype."""
+
+    def _worker(self, **overrides):
+        registered_memory = []
+        attached = []
+        layout_calls = []
+        worker = SimpleNamespace(
+            _num_blocks=4,
+            _client=SimpleNamespace(
+                register_memory=lambda addr, length: registered_memory.append((addr, length)),
+                attach=lambda addr, node_id, slot_bytes: attached.append((addr, node_id, slot_bytes)),
+            ),
+            layout=SimpleNamespace(set=lambda addrs, lens: layout_calls.append((addrs, lens))),
+            gpu_compression_enabled=True,
+            gpu_compression_group_size=128,
+            _gpu_compressor=None,
+            _nodes=["node-a"],
+            _sync_max_slot_bytes=lambda n: n,
+            # kv_role="kv_consumer" and num_recv_threads=0 keep this test
+            # from spinning up real KVCacheSendingThread/KVCacheRecvingThread
+            # background threads, which are exercised elsewhere.
+            kv_role="kv_consumer",
+            num_recv_threads=0,
+        )
+        for key, value in overrides.items():
+            setattr(worker, key, value)
+        worker.registered_memory = registered_memory
+        worker.attached = attached
+        worker.layout_calls = layout_calls
+        return worker
+
+    def _cache(self, *, dtype="torch.float16", itemsize=2, storage_bytes):
+        storage = SimpleNamespace(data_ptr=lambda: 0x9000, nbytes=lambda: storage_bytes)
+        return SimpleNamespace(
+            untyped_storage=lambda: storage,
+            element_size=lambda: itemsize,
+            ndim=1,
+            stride=lambda _d: 1,
+            shape=(1,),
+            dtype=dtype,
+            device="cuda:0",
+        )
+
+    def test_falls_back_to_uncompressed_when_cuda_build_is_unavailable(self):
+        _module("openlake_client").cuda_compression_available = lambda: False
+        worker = self._worker()
+        cache = self._cache(storage_bytes=1024)  # 4 blocks * 256 B/block
+
+        ADAPTER.OpenLakeWorker.register_kv_caches(worker, {"layer": cache})
+
+        self.assertIsNone(worker._gpu_compressor)
+        self.assertEqual(worker.layout_calls, [([0x9000], [256])])
+        self.assertEqual(
+            worker.attached, [("node-a", 0, ADAPTER.SLOT_HEADER_BYTES + 256)]
+        )
+
+    def test_falls_back_to_uncompressed_when_kv_cache_dtype_is_unsupported(self):
+        _module("openlake_client").cuda_compression_available = lambda: True
+
+        torch = sys.modules["torch"]
+        orig_cuda = torch.cuda
+
+        class FakeStream:
+            def wait_event(self, _event):
+                pass
+
+            def synchronize(self):
+                pass
+
+        torch.cuda = SimpleNamespace(Event=object, Stream=FakeStream)
+        try:
+            worker = self._worker()
+            cache = self._cache(dtype="torch.float32", itemsize=4, storage_bytes=1024)
+
+            ADAPTER.OpenLakeWorker.register_kv_caches(worker, {"layer": cache})
+        finally:
+            torch.cuda = orig_cuda
+
+        self.assertIsNone(worker._gpu_compressor)
+        self.assertEqual(
+            worker.attached, [("node-a", 0, ADAPTER.SLOT_HEADER_BYTES + 256)]
+        )
+
+    def test_enables_compression_and_shrinks_the_registered_slot(self):
+        client = _module("openlake_client")
+        client.cuda_compression_available = lambda: True
+        client.cuda_compressed_size = lambda element_count, _group_size: element_count // 4
+        client.cuda_compress = lambda *_args: None
+        client.cuda_decompress = lambda *_args: None
+
+        torch = sys.modules["torch"]
+        orig_cuda, orig_empty, orig_uint8 = (
+            torch.cuda, getattr(torch, "empty", None), getattr(torch, "uint8", None)
+        )
+
+        class FakeStream:
+            def wait_event(self, _event):
+                pass
+
+            def synchronize(self):
+                pass
+
+        class FakeStaging:
+            def __init__(self, n):
+                self._n = n
+
+            def data_ptr(self):
+                return 0xB000
+
+            def numel(self):
+                return self._n
+
+        torch.cuda = SimpleNamespace(
+            Event=object, Stream=FakeStream, stream=lambda s: _StreamContext(s)
+        )
+        torch.empty = lambda n, dtype=None, device=None: FakeStaging(n)
+        torch.uint8 = "uint8"
+        try:
+            worker = self._worker()
+            # 256 B/block, itemsize 2 -> 128 elements/block.
+            cache = self._cache(storage_bytes=1024)
+
+            ADAPTER.OpenLakeWorker.register_kv_caches(worker, {"layer": cache})
+        finally:
+            torch.cuda = orig_cuda
+            if orig_empty is not None:
+                torch.empty = orig_empty
+            else:
+                del torch.empty
+            if orig_uint8 is not None:
+                torch.uint8 = orig_uint8
+            else:
+                del torch.uint8
+
+        self.assertIsNotNone(worker._gpu_compressor)
+        # compressed_bytes = element_count // 4 = 32
+        self.assertEqual(
+            worker.attached, [("node-a", 0, ADAPTER.SLOT_HEADER_BYTES + 32)]
         )
 
 

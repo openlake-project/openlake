@@ -2231,6 +2231,7 @@ dependencies = [
 name = "openlake_kv_client"
 version = "0.8.0"
 dependencies = [
+ "cc",
  "compio",
  "futures",
  "libc",
