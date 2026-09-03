@@ -18,5 +18,6 @@ python-source = "python"
 include = [
   "python/openlake_client/openlaked",
   "python/openlake_client/openlake_*.py",
+  "python/openlake_client/libopenlake_expans.so",
   "python/openlake_client/configs/*.toml",
 ]

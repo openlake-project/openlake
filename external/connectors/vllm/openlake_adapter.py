@@ -49,6 +49,9 @@ MAX_SLOT_BYTES = (1 << 32) - 1
 CLIENT_NODE_ID_BASE = 2_048
 CLIENT_NODE_ID_MAX = 0xFFF
 
+EXPANS_RECORD_ALIGNMENT = 4096
+EXPANS_MAX_BATCH_BLOCKS = 64
+
 _HASH_SEED_HELP = (
     "OpenLake external KV offloading requires PYTHONHASHSEED to be set for "
     "block-hash consistency. Please set it, e.g. "
@@ -65,6 +68,30 @@ def _unwrap(spec):
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return next(iter(spec.kv_cache_specs.values()))
     return spec
+
+
+def _expans_enabled(extra) -> bool:
+    value = extra.get("openlake_compression")
+    if value is None:
+        return False
+    if not isinstance(value, dict):
+        raise ValueError("openlake_compression must be an object")
+    if not bool(value.get("enabled", False)):
+        return False
+    if value.get("codec") != "expans":
+        raise ValueError("openlake_compression.codec must be expans")
+    if value.get("mode") != "lossless":
+        raise ValueError("openlake_compression.mode must be lossless")
+    return True
+
+
+def _expans_record_bytes(raw_block_bytes: int) -> int:
+    unaligned = (int(raw_block_bytes) * 10 + 12) // 13
+    return (
+        (unaligned + EXPANS_RECORD_ALIGNMENT - 1)
+        // EXPANS_RECORD_ALIGNMENT
+        * EXPANS_RECORD_ALIGNMENT
+    )
 
 
 class ChunkHashes(BlockHashListWithBlockSize):
@@ -460,9 +487,13 @@ def _group_key_spaces(vllm_config, kv_cache_config):
         vllm_config.kv_transfer_config.kv_connector_extra_config
         if vllm_config.kv_transfer_config is not None else {}
     )
+    compression = _expans_enabled(extra)
     cache_prefix = str(extra.get("cache_prefix", ""))
-    if model_name or cache_prefix:
+    compression_tag = "expans:lossless:nvcomp:fixed-13-to-10:v1" if compression else ""
+    if model_name or cache_prefix or compression_tag:
         tag_source = model_name if not cache_prefix else f"{cache_prefix}\0{model_name}"
+        if compression_tag:
+            tag_source = f"{tag_source}\0{compression_tag}"
         model_tag = hashlib.blake2b(tag_source.encode(), digest_size=12).digest()
     else:
         model_tag = bytes(12)
@@ -506,7 +537,7 @@ class KVTransferThread(threading.Thread):
 
     def __init__(self, client, group_keys, block_size, tp_rank, namespaces, layout,
                  coord, ready_event, name, request_queue=None,
-                 record_operation=None):
+                 record_operation=None, compression=None):
         super().__init__(daemon=True, name=name)
         self.client = client
         self.coord = coord
@@ -516,6 +547,7 @@ class KVTransferThread(threading.Thread):
         self.tp_rank = tp_rank
         self.namespaces = namespaces
         self.layout = layout
+        self.compression = compression
         self.ready_event = ready_event
         self.done_task_lock = threading.Lock()
         self.request_queue: queue.Queue = (
@@ -579,16 +611,19 @@ class KVCacheSendingThread(KVTransferThread):
 
     def __init__(self, client, group_keys, block_size, tp_rank, namespaces, layout,
                  coord, ready_event, replication_factors,
-                 enable_kv_event: bool = False, record_operation=None):
+                 enable_kv_event: bool = False, record_operation=None,
+                 compression=None):
         super().__init__(client, group_keys, block_size, tp_rank, namespaces, layout,
                          coord, ready_event, name="KVCacheSendingThread",
-                         record_operation=record_operation)
+                         record_operation=record_operation,
+                         compression=compression)
         self.replication_factors = replication_factors
         self.stored_requests: dict[str, int] = {}
         self.enable_kv_event = enable_kv_event
         self._store_pressure_active = False
         self._skip_store_requests: set[str] = set()
         self._saved_offset: dict[str, int] = {}
+        self._compression_stopped_requests: set[str] = set()
 
     def add_stored_request(self, req_id: str) -> None:
         with self.done_task_lock:
@@ -603,6 +638,7 @@ class KVCacheSendingThread(KVTransferThread):
         with self.done_task_lock:
             self.stored_requests.pop(req_id, None)
             self._skip_store_requests.discard(req_id)
+            self._compression_stopped_requests.discard(req_id)
             self._saved_offset.pop(req_id, None)
 
     def _should_skip_request(self, req_id: str) -> bool:
@@ -629,6 +665,101 @@ class KVCacheSendingThread(KVTransferThread):
             if req_id in self.stored_requests:
                 self._saved_offset[req_id] = token_len
 
+    def _stored_event(self, entry, req_meta, prev_hash_per_group):
+        group, chunk_idx, block_hash = entry
+        start = chunk_idx * group.block_size
+        event_hash = maybe_convert_block_hash(block_hash)
+        event = BlockStored(
+            block_hashes=[event_hash],
+            parent_block_hash=prev_hash_per_group.get(group.g_idx),
+            token_ids=req_meta.token_ids[start : start + group.block_size]
+            if req_meta.token_ids is not None else None,
+            block_size=group.block_size,
+            lora_id=None,
+            medium="external",
+            lora_name=None,
+            group_idx=group.g_idx,
+        )
+        prev_hash_per_group[group.g_idx] = event_hash
+        return event
+
+    def _put_compressed(self, entries, keys, req_meta, token_len, req_id):
+        stored_events: list[BlockStored] = []
+        prev_hash_per_group: dict[int, object] = {}
+        completed = 0
+
+        while completed < len(entries):
+            end = min(
+                completed + self.compression.max_batch_blocks,
+                len(entries),
+            )
+            batch_entries = entries[completed:end]
+            batch_keys = keys[completed:end]
+            raw_scatters = []
+            for group, chunk_idx, _ in batch_entries:
+                block_id = req_meta.block_ids[group.g_idx][chunk_idx]
+                raw_scatters.append(self.layout.addrs_for(block_id))
+
+            encoded_addresses, fits = self.compression.encode(raw_scatters)
+            fit_count = next(
+                (i for i, fit in enumerate(fits) if not fit),
+                len(batch_entries),
+            )
+            overflowed = fit_count != len(batch_entries)
+            batch_entries = batch_entries[:fit_count]
+            batch_keys = batch_keys[:fit_count]
+
+            if batch_keys:
+                batch_addrs = [[addr] for addr in encoded_addresses[:fit_count]]
+                batch_sizes = [
+                    [self.compression.record_bytes]
+                    for _ in range(fit_count)
+                ]
+                put_start = time.perf_counter()
+                try:
+                    result = self.client.put_batch(
+                        batch_keys, batch_addrs, batch_sizes
+                    )
+                except Exception as err:
+                    self._record_operation(
+                        "save_put", put_start, len(batch_keys),
+                        num_bytes=len(batch_keys) * self.compression.record_bytes,
+                        status="error", num_failed_keys=len(batch_keys))
+                    logger.error("put_batch failed (req=%s): %s", req_id, err)
+                    return
+                failed = [i for i, value in enumerate(result) if value < 0]
+                self._record_operation(
+                    "save_put", put_start, len(batch_keys),
+                    num_bytes=len(batch_keys) * self.compression.record_bytes,
+                    status="partial_failure" if failed else "ok",
+                    num_failed_keys=len(failed))
+                if failed:
+                    logger.warning(
+                        "put_batch: %d/%d compressed keys failed for request %s",
+                        len(failed), len(batch_keys), req_id,
+                    )
+                    self._mark_request_skipped_for_pressure(req_id)
+                    return
+                if self.enable_kv_event:
+                    stored_events.extend(
+                        self._stored_event(entry, req_meta, prev_hash_per_group)
+                        for entry in batch_entries
+                    )
+
+            if overflowed:
+                with self.done_task_lock:
+                    self._compression_stopped_requests.add(req_id)
+                if stored_events:
+                    self.update_kv_event(stored_events)
+                return
+            completed = end
+
+        self._record_saved(req_id, token_len)
+        if self._clear_store_pressure():
+            logger.info("store pressure cleared after a full batch")
+        if stored_events:
+            self.update_kv_event(stored_events)
+
     def _handle_request(self, req_meta: "ReqMeta"):
         lcm = self.coord.lcm_block_size
         token_len = req_meta.token_len_chunk // lcm * lcm
@@ -636,12 +767,15 @@ class KVCacheSendingThread(KVTransferThread):
 
         with self.done_task_lock:
             live = req_id in self.stored_requests
+            compression_stopped = req_id in self._compression_stopped_requests
         if not live:
             self.request_queue.task_done()
             return
 
         try:
             if token_len == 0:
+                return
+            if compression_stopped:
                 return
             if self._should_skip_request(req_id):
                 logger.debug(
@@ -685,6 +819,12 @@ class KVCacheSendingThread(KVTransferThread):
             entries = [entries[i] for i in missing]
             keys = [keys[i] for i in missing]
 
+            if self.compression is not None:
+                if req_meta.current_event is not None:
+                    req_meta.current_event.synchronize()
+                self._put_compressed(entries, keys, req_meta, token_len, req_id)
+                return
+
             addrs: list[list[int]] = []
             sizes: list[list[int]] = []
             stored_events: list[BlockStored] = []
@@ -695,20 +835,11 @@ class KVCacheSendingThread(KVTransferThread):
                 addrs.append([addr for addr, _ in scatter])
                 sizes.append([size for _, size in scatter])
                 if self.enable_kv_event:
-                    start = chunk_idx * group.block_size
-                    event_hash = maybe_convert_block_hash(block_hash)
-                    stored_events.append(BlockStored(
-                        block_hashes=[event_hash],
-                        parent_block_hash=prev_hash_per_group.get(group.g_idx),
-                        token_ids=req_meta.token_ids[start : start + group.block_size]
-                        if req_meta.token_ids is not None else None,
-                        block_size=group.block_size,
-                        lora_id=None,
-                        medium="external",
-                        lora_name=None,
-                        group_idx=group.g_idx,
+                    stored_events.append(self._stored_event(
+                        (group, chunk_idx, block_hash),
+                        req_meta,
+                        prev_hash_per_group,
                     ))
-                    prev_hash_per_group[group.g_idx] = event_hash
 
             if req_meta.current_event is not None:
                 req_meta.current_event.synchronize()
@@ -752,11 +883,13 @@ class KVCacheSendingThread(KVTransferThread):
 class KVCacheRecvingThread(KVTransferThread):
 
     def __init__(self, client, group_keys, block_size, tp_rank, namespaces, layout,
-                 coord, ready_event, request_queue=None, record_operation=None):
+                 coord, ready_event, request_queue=None, record_operation=None,
+                 compression=None):
         super().__init__(client, group_keys, block_size, tp_rank, namespaces, layout,
                          coord, ready_event, name="KVCacheRecvingThread",
                          request_queue=request_queue,
-                         record_operation=record_operation)
+                         record_operation=record_operation,
+                         compression=compression)
         self._invalid_block_ids_lock = threading.Lock()
         self._invalid_block_ids: set[int] = set()
 
@@ -769,6 +902,72 @@ class KVCacheRecvingThread(KVTransferThread):
             invalid = self._invalid_block_ids.copy()
             self._invalid_block_ids.clear()
         return invalid
+
+    def _get_compressed(self, entries, req_id):
+        completed = 0
+        while completed < len(entries):
+            end = min(
+                completed + self.compression.max_batch_blocks,
+                len(entries),
+            )
+            batch_entries = entries[completed:end]
+            batch_keys = [key for _, key in batch_entries]
+            batch_block_ids = [block_id for block_id, _ in batch_entries]
+            records = self.compression.reserve(len(batch_entries))
+            batch_addrs = [[address] for address in records]
+            batch_sizes = [
+                [self.compression.record_bytes]
+                for _ in batch_entries
+            ]
+            get_start = time.perf_counter()
+            try:
+                result = self.client.get_batch(
+                    batch_keys, batch_addrs, batch_sizes
+                )
+            except Exception as err:
+                self._add_load_error_block_ids(
+                    block_id for block_id, _ in entries[completed:]
+                )
+                self._record_operation(
+                    "load_get", get_start, len(batch_keys),
+                    num_bytes=len(batch_keys) * self.compression.record_bytes,
+                    status="error", num_failed_keys=len(batch_keys))
+                logger.error("get_batch failed (req=%s): %s", req_id, err)
+                return
+
+            failed_indexes = {
+                i for i, value in enumerate(result) if value < 0
+            }
+            self._record_operation(
+                "load_get", get_start, len(batch_keys),
+                num_bytes=len(batch_keys) * self.compression.record_bytes,
+                status="partial_failure" if failed_indexes else "ok",
+                num_failed_keys=len(failed_indexes))
+            if failed_indexes:
+                self._add_load_error_block_ids(
+                    batch_block_ids[i] for i in failed_indexes
+                )
+
+            record_indexes = [
+                i for i in range(len(batch_entries))
+                if i not in failed_indexes
+            ]
+            destinations = [
+                self.layout.addrs_for(batch_block_ids[i])
+                for i in record_indexes
+            ]
+            if record_indexes:
+                try:
+                    self.compression.decode(record_indexes, destinations)
+                except Exception as err:
+                    self._add_load_error_block_ids(
+                        block_id for block_id, _ in entries[completed:]
+                    )
+                    logger.error(
+                        "ExpANS decode failed (req=%s): %s", req_id, err
+                    )
+                    return
+            completed = end
 
     def _handle_request(self, req_meta: "ReqMeta"):
         load = req_meta.load
@@ -797,6 +996,13 @@ class KVCacheRecvingThread(KVTransferThread):
             return
         rotation = self.tp_rank % len(entries)
         entries = entries[rotation:] + entries[:rotation]
+
+        if self.compression is not None:
+            self._get_compressed(entries, req_id)
+            self.set_finished_request(req_id)
+            self.request_queue.task_done()
+            return
+
         key_list = [key for _, key in entries]
         block_id_list = [block_id for block_id, _ in entries]
         addr_list: list[list[int]] = []
@@ -897,6 +1103,7 @@ class OpenLakeWorker:
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.compression_enabled = _expans_enabled(extra)
         nodes = extra.get("openlake_nodes")
         if not nodes:
             raise ValueError("kv_connector_extra_config.openlake_nodes required")
@@ -939,6 +1146,7 @@ class OpenLakeWorker:
         self.num_recv_threads = max(1, int(extra.get("openlake_recv_threads", 1)))
         self.enable_kv_events = bool(extra.get("openlake_kv_events", False))
         self.layout = GroupLayout()
+        self.compression = None
         self.kv_send_thread: "KVCacheSendingThread | None" = None
         self.kv_recv_threads: list[KVCacheRecvingThread] = []
         self.recv_request_queue: queue.Queue = queue.Queue()
@@ -994,6 +1202,8 @@ class OpenLakeWorker:
         block_lens: list[int] = []
         for value in kv_caches.values():
             cache = value[0] if isinstance(value, list) else value
+            if self.compression_enabled and cache.dtype != torch.bfloat16:
+                raise ValueError("ExpANS requires a BF16 vLLM KV cache")
             storage = cache.untyped_storage()
             base_addr = storage.data_ptr()
             if base_addr in seen_ptrs:
@@ -1016,7 +1226,27 @@ class OpenLakeWorker:
                     addrs.append(base_addr + idx * seg_stride)
                     block_lens.append(seg_stride // self._num_blocks)
         self.layout.set(addrs, block_lens)
-        local_slot_bytes = SLOT_HEADER_BYTES + sum(block_lens) if addrs else 0
+        raw_block_bytes = sum(block_lens)
+        if addrs and self.compression_enabled:
+            if len(self.group_keys) != 1:
+                raise ValueError(
+                    "ExpANS currently supports one homogeneous KV cache group"
+                )
+            from openlake_client.openlake_expans import ExpansCodec
+
+            record_bytes = _expans_record_bytes(raw_block_bytes)
+            self.compression = ExpansCodec(
+                raw_block_bytes=raw_block_bytes,
+                record_bytes=record_bytes,
+                segment_bytes=tuple(block_lens),
+                max_batch_blocks=EXPANS_MAX_BATCH_BLOCKS,
+                client=self._client,
+            )
+            local_slot_bytes = SLOT_HEADER_BYTES + record_bytes
+        else:
+            local_slot_bytes = (
+                SLOT_HEADER_BYTES + raw_block_bytes if addrs else 0
+            )
         slot_bytes = self._sync_max_slot_bytes(local_slot_bytes)
         if not addrs:
             logger.warning(
@@ -1047,6 +1277,8 @@ class OpenLakeWorker:
                 self._group_tp_replication_factors,
                 self.enable_kv_events,
                 record_operation=self._record_kv_connector_operation,
+                compression=self.compression.new_lane()
+                if self.compression is not None else None,
             )
             self.kv_send_thread.start()
 
@@ -1065,6 +1297,8 @@ class OpenLakeWorker:
                 ready_event_recving,
                 request_queue=self.recv_request_queue,
                 record_operation=self._record_kv_connector_operation,
+                compression=self.compression.new_lane()
+                if self.compression is not None else None,
             )
             recv_thread.name = f"KVCacheRecvingThread-{i}"
             recv_thread.start()
