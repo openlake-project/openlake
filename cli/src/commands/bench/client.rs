@@ -276,9 +276,10 @@ async fn one_call(
                 .send()
                 .await
                 .context("GET send")?;
+            let status = resp.status();
             let bytes = resp.bytes().await.context("GET body")?;
-            anyhow::ensure!(bytes.len() as u64 == block, "short GET body");
-        }
+            anyhow::ensure!(status.is_success(), "GET non-2xx: {}", status);
+            anyhow::ensure!(bytes.len() as u64 == block, "short GET body");       }
         OpArg::Write => {
             let url = format!("{url_base}/bench/sink");
             let body = put_body.clone().unwrap();
@@ -310,4 +311,74 @@ async fn run_rdma(_args: &ClientArgs, _block_bytes: &[u64]) -> Result<Report> {
          Rebuild with `cargo build --bin openlake --features rdma` on a Linux \
          host with ibverbs headers, or run `openlake bench client --mode tls` instead."
     )
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use axum::Router;
+    use compio::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Clone)]
+    struct TestState {
+        fail: Arc<AtomicBool>,
+    }
+
+    async fn echo(State(state): State<TestState>, Path(len): Path<usize>) -> impl IntoResponse {
+        let body = vec![0u8; len];
+        if state.fail.load(Ordering::Relaxed) {
+            (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+        } else {
+            (StatusCode::OK, body).into_response()
+        }
+    }
+
+    async fn spawn_test_target(fail: Arc<AtomicBool>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let app = Router::new()
+            .route("/bench/echo/{len}", get(echo))
+            .with_state(TestState { fail });
+        compio::runtime::spawn(async move {
+            let _ = cyper_axum::serve(listener, app).await;
+        })
+        .detach();
+        format!("http://{addr}")
+    }
+
+    #[compio::test]
+    async fn get_accepts_2xx_with_matching_body() {
+        let url_base = spawn_test_target(Arc::new(AtomicBool::new(false))).await;
+        let client = cyper::Client::builder().http2_prior_knowledge().build();
+
+        let result = one_call(&client, &url_base, 16, OpArg::Read, None).await;
+
+        assert!(result.is_ok(), "expected 2xx GET to succeed: {result:?}");
+    }
+
+    #[compio::test]
+    async fn get_rejects_non_2xx_even_with_matching_body_size() {
+        let url_base = spawn_test_target(Arc::new(AtomicBool::new(true))).await;
+        let client = cyper::Client::builder().http2_prior_knowledge().build();
+
+        let result = one_call(&client, &url_base, 16, OpArg::Read, None).await;
+
+        let err = result.expect_err(
+            "a non-2xx GET response must not be counted as a successful benchmark transfer",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("500"),
+            "error should surface the HTTP status code, got: {msg}"
+        );
+    }
 }
