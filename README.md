@@ -31,7 +31,7 @@ Fast, easy and efficient storage for LLM Inference and Training
 
 ## Updates
 
-- [2026/09] 🔥 OpenLake tops the **MLPerf Storage v3.0** 2026 object checkpointing benchmarks, ahead of NVIDIA and Nebius ([blog](https://www.theopenlake.com/blog/openlake-leads-mlperf-storage-v3-0)).
+- [2026/09] 🔥 OpenLake tops the **MLPerf Storage v3.0** 2026 object checkpointing benchmarks, leading NVIDIA and Nebius ([blog](https://www.theopenlake.com/blog/openlake-leads-mlperf-storage-v3-0)).
 - [2026/08] **ExANS**: a lossless GPU codec for BF16 KV cache: 1.51× cost savings, now available in OpenLake v0.8 ([blog](https://www.theopenlake.com/blog/exans-lossless-gpu-compression-for-bf16-kv-cache)).
 - [2026/07] Introducing OpenLake: open source storage that saturates the GPUs: 8× throughput and 600 µs reads ([blog](https://theopenlake.com/blog/introducing-openlake)).
 <details>
