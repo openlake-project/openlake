@@ -111,11 +111,16 @@ fn parse_version_id(raw: Option<&str>) -> Result<Option<String>, AppError> {
     if s == VersioningStatus::NULL_VERSION_ID {
         return Ok(Some(s.to_owned()));
     }
-    // UUID validation: 32 hex chars after stripping dashes (matches the
-    // canonical 8-4-4-4-12 layout). Cheap parse — no allocation per char.
-    let hex_chars = s.chars().filter(|c| *c != '-').count();
-    let all_hex = s.chars().all(|c| c == '-' || c.is_ascii_hexdigit());
-    if hex_chars == 32 && all_hex {
+    // UUID validation: require the canonical 8-4-4-4-12 layout emitted by
+    // `BucketMeta::next_version_id`. Keep this allocation-free because every
+    // version-specific GET/HEAD passes through here.
+    let bytes = s.as_bytes();
+    let canonical_uuid = bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        });
+    if canonical_uuid {
         return Ok(Some(s.to_owned()));
     }
     Err(AppError::BadRequest(
@@ -1136,5 +1141,29 @@ mod tests {
         let header = HeaderValue::from_static("/bucket/path/file.parquet?versionId=abc123");
 
         assert!(parse_copy_source(&header).is_err());
+    }
+
+    #[test]
+    fn parse_version_id_accepts_canonical_uuid() {
+        let version_id = "550e8400-e29b-41d4-a716-446655440000";
+
+        assert_eq!(
+            parse_version_id(Some(version_id)).unwrap(),
+            Some(version_id.to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_version_id_rejects_noncanonical_uuid_layouts() {
+        for version_id in [
+            "550e8400e29b41d4a716446655440000",
+            "550e-8400e29b-41d4-a716-446655440000",
+            "550e8400-e29b-41d4-a7164466-55440000",
+        ] {
+            assert!(
+                parse_version_id(Some(version_id)).is_err(),
+                "accepted malformed versionId {version_id:?}"
+            );
+        }
     }
 }
