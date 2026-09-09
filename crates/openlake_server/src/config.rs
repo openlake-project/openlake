@@ -501,9 +501,16 @@ impl Config {
         if cfg.credentials.is_empty() {
             anyhow::bail!("at least one credential is required; server refuses to run open");
         }
+        let mut seen_access_keys = std::collections::HashSet::new();
         for c in &cfg.credentials {
             if c.access_key.is_empty() || c.secret_key.is_empty() {
                 anyhow::bail!("credential access_key and secret_key must both be non-empty");
+            }
+            if !seen_access_keys.insert(c.access_key.as_str()) {
+                anyhow::bail!(
+                    "duplicate credential access_key {:?}; each access key must be unique",
+                    c.access_key
+                );
             }
         }
         if let Some(t) = &cfg.s3_tls {
@@ -773,5 +780,43 @@ capacity_gb = 1
         );
 
         assert!(cfg.is_ok());
+    }
+
+    #[test]
+    fn duplicate_credential_access_keys_are_rejected() {
+        let error = Config::from_toml(
+            r#"
+self_id = 0
+mode = "kv"
+rpc_addr = "0.0.0.0:9400"
+s3_addr = "0.0.0.0:9000"
+data_dirs = []
+set_drive_count = 1
+default_parity_count = 1
+region = "us-east-1"
+kv_agents = ["127.0.0.1:9400"]
+
+[[credentials]]
+access_key = "duplicate"
+secret_key = "first-secret"
+
+[[credentials]]
+access_key = "duplicate"
+secret_key = "second-secret"
+
+[[nodes]]
+id = 0
+rpc_addr = "0.0.0.0:9400"
+disk_count = 0
+
+[kv_slab]
+capacity_gb = 1
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("duplicate credential access_key \"duplicate\""));
     }
 }
