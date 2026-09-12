@@ -11,6 +11,31 @@ use serde::Serialize;
 const BLOCK_HASH_BYTES: usize = 32;
 const KEY_HEADER_BYTES: usize = std::mem::size_of::<openlake_io::kv::KeyHash>();
 
+fn attach_slot_count(capacity_bytes: u64, slot_bytes: u32) -> Result<Option<u32>, String> {
+    if slot_bytes == 0 {
+        return Ok(None);
+    }
+    if slot_bytes <= KEY_HEADER_BYTES as u32 {
+        return Err(format!(
+            "slot_bytes {slot_bytes} must exceed the {KEY_HEADER_BYTES}-byte key header"
+        ));
+    }
+    if u64::from(slot_bytes) > capacity_bytes {
+        return Err(format!(
+            "slot_bytes {slot_bytes} exceeds configured KV slab capacity {capacity_bytes} bytes"
+        ));
+    }
+
+    let slot_count = capacity_bytes / u64::from(slot_bytes);
+    let slot_count = u32::try_from(slot_count).map_err(|_| {
+        format!(
+            "configured KV slab capacity {capacity_bytes} bytes with {slot_bytes}-byte slots exceeds the {}-slot protocol limit",
+            u32::MAX
+        )
+    })?;
+    Ok(Some(slot_count))
+}
+
 fn logical_block_ids(keys: &[Vec<u8>]) -> Option<Vec<[u8; BLOCK_HASH_BYTES]>> {
     keys.iter()
         .map(|key| key.get(..BLOCK_HASH_BYTES)?.try_into().ok())
@@ -219,11 +244,10 @@ impl KvEngine {
         let host_backed = true;
 
         if let KvRequest::Attach { slot_bytes } = &req {
-            if *slot_bytes != 0 && *slot_bytes <= KEY_HEADER_BYTES as u32 {
-                return KvResponse::Err(format!(
-                    "slot_bytes {slot_bytes} must exceed the {KEY_HEADER_BYTES}-byte key header"
-                ));
-            }
+            let slot_count = match attach_slot_count(self.capacity_bytes, *slot_bytes) {
+                Ok(slot_count) => slot_count,
+                Err(error) => return KvResponse::Err(error),
+            };
             if *slot_bytes != 0 {
                 let slab = self.slab.borrow();
                 if let Some(slab) = slab.as_ref() {
@@ -236,7 +260,7 @@ impl KvEngine {
                 }
             }
             if host_backed && *slot_bytes > 0 && self.slab.borrow().is_none() {
-                let slot_count = (self.capacity_bytes / *slot_bytes as u64).max(1) as u32;
+                let slot_count = slot_count.expect("non-zero slot size has a slot count");
                 match HostSlab::new(*slot_bytes, slot_count, self.reserve_ttl) {
                     Ok(s) => {
                         tracing::info!(
@@ -332,11 +356,7 @@ impl KvEngine {
         slot_bytes: u32,
         dry_run: bool,
     ) -> Result<openlake_io::rpc::UcxEndpointReply, String> {
-        if slot_bytes != 0 && slot_bytes <= KEY_HEADER_BYTES as u32 {
-            return Err(format!(
-                "slot_bytes {slot_bytes} must exceed the {KEY_HEADER_BYTES}-byte key header"
-            ));
-        }
+        let slot_count = attach_slot_count(self.capacity_bytes, slot_bytes)?;
 
         let mut ucx = self.ucx.borrow_mut();
         let state = ucx.as_mut().ok_or("engine is not configured for UCX")?;
@@ -379,7 +399,7 @@ impl KvEngine {
         }
 
         if self.slab.borrow().is_none() {
-            let slot_count = (self.capacity_bytes / u64::from(slot_bytes)).max(1) as u32;
+            let slot_count = slot_count.expect("non-zero slot size has a slot count");
             let slab = HostSlab::new(slot_bytes, slot_count, self.reserve_ttl)
                 .map_err(|e| format!("UCX slab create: {e}"))?;
             tracing::info!(
@@ -449,11 +469,7 @@ impl KvEngine {
         epoch: u64,
         slot_bytes: u32,
     ) -> Result<(), String> {
-        if slot_bytes != 0 && slot_bytes <= KEY_HEADER_BYTES as u32 {
-            return Err(format!(
-                "slot_bytes {slot_bytes} must exceed the {KEY_HEADER_BYTES}-byte key header"
-            ));
-        }
+        let slot_count = attach_slot_count(self.capacity_bytes, slot_bytes)?;
         if slot_bytes != 0 {
             let slab = self.slab.borrow();
             if let Some(slab) = slab.as_ref() {
@@ -474,7 +490,7 @@ impl KvEngine {
         })?;
         if slot_bytes > 0 && self.slab.borrow().is_none() {
             let dev = self.dev.clone().expect("rdma engine built with a device");
-            let slot_count = (self.capacity_bytes / slot_bytes as u64).max(1) as usize;
+            let slot_count = slot_count.expect("non-zero slot size has a slot count") as usize;
             let slab =
                 openlake_io::RdmaSlab::new(dev, slot_bytes as usize, slot_count, self.reserve_ttl)
                     .map_err(|e| format!("rdma slab create: {e}"))?;
@@ -642,6 +658,26 @@ mod tests {
             e.serve_tcp(KvRequest::Attach { slot_bytes: 8192 }),
             KvResponse::Err(message) if message.contains("slot size mismatch")
         ));
+    }
+
+    #[test]
+    fn attach_rejects_slot_larger_than_capacity_without_allocating_slab() {
+        let capacity_bytes = 64 * 1024;
+        let e = KvEngine::new_tcp(capacity_bytes, Duration::from_secs(60));
+
+        assert!(matches!(
+            e.serve_tcp(KvRequest::Attach {
+                slot_bytes: capacity_bytes as u32 + 1,
+            }),
+            KvResponse::Err(message)
+                if message.contains("slot_bytes 65537")
+                    && message.contains("capacity 65536 bytes")
+        ));
+        assert!(!e.stats().attached);
+
+        let (_, slot_bytes, slot_count) = attach(&e, capacity_bytes as u32);
+        assert_eq!(slot_bytes, capacity_bytes as u32);
+        assert_eq!(slot_count, 1);
     }
 
     #[test]
