@@ -249,6 +249,10 @@ async fn list_page(
 ) -> Result<(Vec<ListEntry>, bool, Option<String>), AppError> {
     let engine = state.engine().clone();
 
+    if max_keys == 0 {
+        return Ok((Vec::new(), false, None));
+    }
+
     if let Some(delim) = delimiter {
         let bucket_owned = bucket.to_owned();
         let prefix_owned = prefix.to_owned();
@@ -316,7 +320,7 @@ async fn list_objects_v2(
     let max_keys = query
         .max_keys
         .unwrap_or(LIST_DEFAULT_MAX_KEYS)
-        .clamp(1, LIST_HARD_CAP_MAX_KEYS);
+        .clamp(0, LIST_HARD_CAP_MAX_KEYS);
     let delimiter = query.delimiter.clone().filter(|d| !d.is_empty());
     let cursor = query
         .continuation_token
@@ -361,7 +365,7 @@ async fn list_objects_v1(
     let max_keys = query
         .max_keys
         .unwrap_or(LIST_DEFAULT_MAX_KEYS)
-        .clamp(1, LIST_HARD_CAP_MAX_KEYS);
+        .clamp(0, LIST_HARD_CAP_MAX_KEYS);
     let delimiter = query.delimiter.clone().filter(|d| !d.is_empty());
     let marker = query.marker.clone();
 
