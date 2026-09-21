@@ -72,10 +72,20 @@ pub struct ClientArgs {
     )]
     pub block_sizes: Vec<String>,
 
-    #[arg(long, default_value = "1", value_delimiter = ',')]
+    #[arg(
+        long,
+        default_value = "1",
+        value_delimiter = ',',
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
     pub batch_sizes: Vec<u32>,
 
-    #[arg(long, default_value = "1", value_delimiter = ',')]
+    #[arg(
+        long,
+        default_value = "1",
+        value_delimiter = ',',
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
     pub threads: Vec<u32>,
 
     #[arg(long, default_value_t = 1)]
@@ -110,4 +120,66 @@ pub fn parse_size(s: &str) -> Result<u64> {
     };
     let n: u64 = num_part.trim().parse()?;
     Ok(n * mul)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClientArgs;
+    use clap::{error::ErrorKind, Parser};
+
+    #[test]
+    fn rejects_zero_thread_counts() {
+        for value in ["0", "0,1", "1,0", "1,0,2"] {
+            let error = ClientArgs::try_parse_from([
+                "client",
+                "--target",
+                "127.0.0.1:9090",
+                "--threads",
+                value,
+            ])
+            .expect_err("zero thread counts must be rejected");
+            assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn rejects_zero_batch_sizes() {
+        for value in ["0", "0,1", "1,0", "1,0,2"] {
+            let error = ClientArgs::try_parse_from([
+                "client",
+                "--target",
+                "127.0.0.1:9090",
+                "--batch-sizes",
+                value,
+            ])
+            .expect_err("zero batch sizes must be rejected");
+            assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        }
+    }
+
+    #[test]
+    fn accepts_positive_thread_counts_and_batch_sizes() {
+        let args = ClientArgs::try_parse_from([
+            "client",
+            "--target",
+            "127.0.0.1:9090",
+            "--threads",
+            "1,4",
+            "--batch-sizes",
+            "1,8",
+        ])
+        .expect("positive thread counts and batch sizes must be accepted");
+
+        assert_eq!(args.threads, vec![1, 4]);
+        assert_eq!(args.batch_sizes, vec![1, 8]);
+    }
+
+    #[test]
+    fn defaults_to_one_thread_and_one_request_per_batch() {
+        let args = ClientArgs::try_parse_from(["client", "--target", "127.0.0.1:9090"])
+            .expect("default benchmark arguments must be accepted");
+
+        assert_eq!(args.threads, vec![1]);
+        assert_eq!(args.batch_sizes, vec![1]);
+    }
 }
