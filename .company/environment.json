@@ -1,0 +1,14 @@
+{
+  "$schema": "https://api.thecompany.company/schemas/v1/environment.json",
+  "scripts": {
+    "install": {
+      "command": "sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config clang cmake libhwloc-dev libudev-dev libssl-dev && (command -v rustup >/dev/null 2>&1 || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.91.1 -c rustfmt -c clippy) && ([ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\") && rustup toolchain install 1.91.1 --component rustfmt,clippy && (command -v helm >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash) && cargo fetch"
+    },
+    "prepare": {
+      "command": "cargo fetch"
+    }
+  },
+  "env": {
+    "RUST_BACKTRACE": "1"
+  }
+}
