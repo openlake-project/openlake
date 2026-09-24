@@ -119,13 +119,55 @@ pub fn parse_size(s: &str) -> Result<u64> {
         (s, 1)
     };
     let n: u64 = num_part.trim().parse()?;
-    Ok(n * mul)
+    n.checked_mul(mul)
+        .ok_or_else(|| anyhow::anyhow!("size {s:?} exceeds the maximum supported byte count"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ClientArgs;
+    use super::{parse_size, ClientArgs};
     use clap::{error::ErrorKind, Parser};
+
+    #[test]
+    fn rejects_size_unit_overflow() {
+        for input in [
+            "18014398509481984KiB",
+            "17592186044416MiB",
+            "17179869184GiB",
+        ] {
+            assert!(parse_size(input).is_err(), "must reject {input}");
+        }
+    }
+
+    #[test]
+    fn accepts_largest_representable_sizes() {
+        for (suffix, multiplier) in [
+            ("", 1),
+            ("B", 1),
+            ("KiB", 1 << 10),
+            ("MiB", 1 << 20),
+            ("GiB", 1 << 30),
+        ] {
+            let units = u64::MAX / multiplier;
+            let input = format!("{units}{suffix}");
+            assert_eq!(parse_size(&input).unwrap(), units * multiplier);
+        }
+    }
+
+    #[test]
+    fn parses_supported_size_units() {
+        for (input, expected) in [
+            ("0", 0),
+            ("42", 42),
+            ("42B", 42),
+            ("4KiB", 4096),
+            ("2MiB", 2_097_152),
+            ("1GiB", 1_073_741_824),
+            (" 4 KiB ", 4096),
+        ] {
+            assert_eq!(parse_size(input).unwrap(), expected, "input: {input}");
+        }
+    }
 
     #[test]
     fn rejects_zero_thread_counts() {
