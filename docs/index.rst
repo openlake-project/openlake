@@ -1,125 +1,72 @@
-================================
-OpenLake Documentation Structure
-================================
+=======================
+OpenLake Documentation
+=======================
 
-.. contents:: On this page
-   :depth: 2
+Welcome to the OpenLake documentation.
 
-Overview
-========
+OpenLake is a distributed object storage system designed for modern data
+processing and AI workloads.
 
-This document proposes the initial documentation hierarchy for OpenLake.
+Use the sections below to find developer guides, integration examples,
+operational documentation, and CLI reference material.
 
-The goal is to provide a structured learning path for both developers and users,
-covering development workflows, deployment, operations, and system architecture.
-
-.. note::
-
-   This document describes the proposed documentation organization.
-   Individual pages will be implemented incrementally.
-
-Documentation Layout
-====================
-
-Developer Guide
----------------
-
-Resources for contributors and developers working on OpenLake.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
-
-   * - Section
-     - Description
-   * - Environment Setup
-     - Build prerequisites, Docker configuration, dependency installation, and local development workflow.
-    * - KV Offload for Inference Engines
-     - Using OpenLake as a KV cache backend for inference engines, including local shared-memory and cross-node RDMA deployments.
-   * - Testing
-     - Unit tests, integration tests, validation suites, and benchmarks.
-   * - Contributing
-     - Contribution workflow, coding guidelines, pull request process, and code review expectations.
-
-User Guide
-----------
-
-Documentation for deploying and operating OpenLake clusters.
-
-Cluster Setup
-~~~~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
-
-   * - Section
-     - Description
-   * - Local / Development Deployment
-     - Single-node setup for evaluation, development, and testing.
-   * - Multi-Node Deployment
-     - Production deployment across multiple nodes with high availability.
-
-Examples
-~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
-
-   * - Section
-     - Description
-   * - Example Workloads
-     - Sample workloads demonstrating OpenLake capabilities and common use cases.
-   * - Integration Examples
-     - Integrations with applications, storage workflows, and third-party tools.
-   * - Spark Integration
-     - Example workflow for reading and writing data with Apache Spark.
-
-Operations
-~~~~~~~~~~
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
-
-   * - Section
-     - Description
-   * - Benchmarks
-     - Running benchmark suites and interpreting performance results.
-   * - CLI Reference
-     - Command reference with options, flags, and usage examples.
-   * - Cluster Operations
-     - Monitoring, troubleshooting, maintenance procedures, and health checks.
-
-Architecture
-------------
-
-Technical documentation describing OpenLake internals and system design.
-
-.. list-table::
-   :header-rows: 1
-   :widths: 35 65
-
-   * - Topic
-     - Description
-   * - System Overview
-     - High-level architecture, component interactions, and data flow.
-   * - Storage Engine
-     - Object storage implementation, data layout, and I/O path.
-   * - RDMA Design
-     - RDMA communication architecture, protocol details, and performance considerations.
-   * - Cluster Architecture
-     - Node coordination, metadata management, consensus, and fault tolerance.
-
-Future Additions
+Developer Guides
 ================
 
-Potential future documentation sections include:
+These guides help contributors set up a development environment and
+understand core OpenLake features.
 
-* Performance tuning and optimization guides
-* Security, authentication, and access control
-* Upgrade and migration procedures
-* Configuration reference
-* API documentation
-* Troubleshooting playbooks and runbooks
+* To get started with local OpenLake development on Windows, see
+  :doc:`developer/environment_setup`.
+
+* Learn how OpenLake can be used as a KV cache backend for inference
+  engines in :doc:`developer/kv_offload`.
+
+.. toctree::
+   :maxdepth: 1
+
+   Developer Environment Setup <developer/environment_setup>
+   KV Offload for Inference Engines <developer/kv_offload>
+
+User Guides
+===========
+
+Learn how to integrate OpenLake with popular data processing frameworks.
+
+* To use Apache Spark with OpenLake through its S3-compatible API, follow
+  :doc:`examples/spark_openlake`.
+
+* To configure Apache Flink checkpointing with OpenLake, see
+  :doc:`user/flink-openlake`.
+
+.. toctree::
+   :maxdepth: 1
+
+   Spark Integration <examples/spark_openlake>
+   Flink Integration <user/flink-openlake>
+
+Operations
+==========
+
+Operational guides for managing and troubleshooting OpenLake clusters.
+
+* Learn how to start a cluster, inspect topology, monitor node health,
+  and troubleshoot common issues in :doc:`cluster_operations`.
+
+.. toctree::
+   :maxdepth: 1
+
+   Cluster Operations <cluster_operations>
+
+Reference
+=========
+
+Reference documentation for the OpenLake command-line interface.
+
+* Browse available cluster management and inspection commands in
+  :doc:`cli_reference`.
+
+.. toctree::
+   :maxdepth: 1
+
+   CLI Reference <cli_reference>
