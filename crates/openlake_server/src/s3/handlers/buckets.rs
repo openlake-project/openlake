@@ -233,9 +233,6 @@ pub async fn get_bucket_query(
             _ => "bucket sub-resource is not implemented",
         }));
     }
-    let engine = state.engine().clone();
-    let bucket_to_check = bucket.clone();
-    SendWrapper::new(async move { engine.stat_bucket(&bucket_to_check).await }).await?;
     if BucketQuery::flag_present(&query.list_type) {
         return list_objects_v2(state, bucket, query).await;
     }
@@ -253,6 +250,8 @@ async fn list_page(
     let engine = state.engine().clone();
 
     if max_keys == 0 {
+        let bucket_owned = bucket.to_owned();
+        SendWrapper::new(async move { engine.stat_bucket(&bucket_owned).await }).await?;
         return Ok((Vec::new(), false, None));
     }
 

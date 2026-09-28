@@ -1473,13 +1473,19 @@ impl Engine {
         });
         let results = join_all(walks).await;
         let mut streams: Vec<Vec<(String, FileInfo)>> = Vec::with_capacity(n);
+        let mut missing = 0;
         for r in results {
-            if let Ok(s) = r {
-                streams.push(s);
+            match r {
+                Ok(s) => streams.push(s),
+                Err(IoError::VolumeNotFound(_)) => missing += 1,
+                Err(_) => {}
             }
         }
         let quorum = (n + 1) / 2;
         if streams.len() < quorum {
+            if missing >= quorum {
+                return Err(StorageError::BucketNotFound(bucket.to_owned()));
+            }
             return Ok(Vec::new());
         }
         Ok(merge_within_set(streams, quorum, bucket))
@@ -3155,6 +3161,19 @@ mod tests {
         let mut expected: Vec<&str> = keys.to_vec();
         expected.sort();
         assert_eq!(listed_keys, expected);
+    }
+
+    #[compio::test]
+    async fn list_missing_bucket_returns_bucket_not_found() {
+        for n in [3, 6] {
+            let (_dirs, e) = eng(n, 3).await;
+            for max_keys in [0, 1] {
+                assert!(matches!(
+                    e.list("missing-bucket", "", None, max_keys).await,
+                    Err(StorageError::BucketNotFound(bucket)) if bucket == "missing-bucket"
+                ));
+            }
+        }
     }
 
     /// LIST on a multi-set cluster must fan out across every set and merge
