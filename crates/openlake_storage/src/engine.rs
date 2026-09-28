@@ -3214,6 +3214,24 @@ mod tests {
         }
     }
 
+    #[compio::test]
+    async fn list_folder_marker_keeps_child_visible() {
+        let (_dirs, e) = eng(3, 3).await;
+        put_bytes(&e, "buk", "folder/child.txt", b"child".to_vec(), None).await;
+        put_bytes(&e, "buk", "folder/", Vec::new(), None).await;
+
+        let listed = e.list("buk", "folder/", None, 0).await.unwrap();
+        let keys: Vec<&str> = listed.iter().map(|object| object.key.as_str()).collect();
+        assert_eq!(keys, ["folder/child.txt"]);
+
+        let root = e.list("buk", "", None, 0).await.unwrap();
+        assert!(root.iter().any(|object| object.key == "folder/child.txt"));
+
+        let after_marker = e.list("buk", "folder/", Some("folder/"), 1).await.unwrap();
+        assert_eq!(after_marker[0].key, "folder/child.txt");
+        assert_eq!(get_bytes(&e, "buk", "folder/child.txt").await.1, b"child");
+    }
+
     /// 1 MiB payload — straight onto the EC streaming path with the
     /// default inline cutoff (128 KiB). EC(2+1) on a 3-disk set, no
     /// faults, exact-bytes round trip via streaming.

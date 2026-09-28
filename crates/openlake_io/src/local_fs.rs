@@ -1306,34 +1306,35 @@ fn walk_dir_local_inner<'a>(
                 continue;
             }
 
-            match backend.read_version("", volume, &child, None, false).await {
+            let descend = match backend.read_version("", volume, &child, None, false).await {
                 Ok(fi) => {
-                    if !prefix_filter.is_empty() && !fi.name.starts_with(prefix_filter) {
-                        continue;
+                    if (prefix_filter.is_empty() || fi.name.starts_with(prefix_filter))
+                        && start_after.is_none_or(|after| fi.name.as_str() > after)
+                    {
+                        out.push((fi.name.clone(), fi));
                     }
-                    if let Some(after) = start_after {
-                        if fi.name.as_str() <= after {
-                            continue;
-                        }
-                    }
-                    out.push((fi.name.clone(), fi));
+                    // An object directory can also contain child objects.
+                    true
                 }
                 Err(IoError::FileNotFound { .. }) => {
-                    if recursive {
-                        walk_dir_local_inner(
-                            backend,
-                            volume,
-                            &child,
-                            prefix_filter,
-                            recursive,
-                            start_after,
-                            max_keys,
-                            out,
-                        )
-                        .await?;
-                    }
+                    recursive
+                        && std::fs::symlink_metadata(backend.file_path(volume, &child))
+                            .is_ok_and(|meta| meta.file_type().is_dir())
                 }
                 Err(_) => continue,
+            };
+            if recursive && descend {
+                walk_dir_local_inner(
+                    backend,
+                    volume,
+                    &child,
+                    prefix_filter,
+                    recursive,
+                    start_after,
+                    max_keys,
+                    out,
+                )
+                .await?;
             }
         }
         Ok(())
