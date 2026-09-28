@@ -233,6 +233,9 @@ pub async fn get_bucket_query(
             _ => "bucket sub-resource is not implemented",
         }));
     }
+    let engine = state.engine().clone();
+    let bucket_to_check = bucket.clone();
+    SendWrapper::new(async move { engine.stat_bucket(&bucket_to_check).await }).await?;
     if BucketQuery::flag_present(&query.list_type) {
         return list_objects_v2(state, bucket, query).await;
     }
@@ -511,7 +514,118 @@ fn rfc3339_from_ms(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::AuthState;
+    use crate::in_memory_store::InMemoryStore;
+    use openlake_io::{BucketMeta, LocalFsBackend, StorageBackend};
     use openlake_storage::StorageClass;
+    use openlake_storage::{ClusterConfig, DiskAddr, Engine, NodeAddr};
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    async fn list_test_state() -> (Vec<TempDir>, AppState) {
+        let dirs: Vec<TempDir> = (0..3).map(|_| TempDir::new().unwrap()).collect();
+        let nodes = (0..3)
+            .map(|id| NodeAddr {
+                id,
+                rpc_addr: format!("127.0.0.1:{}", 9100 + id).parse().unwrap(),
+                disk_count: 1,
+            })
+            .collect();
+        let cluster = ClusterConfig {
+            nodes,
+            set_drive_count: 3,
+            default_parity_count: 1,
+            deployment_id: Uuid::nil(),
+        };
+        let backends: HashMap<DiskAddr, Rc<dyn StorageBackend>> = dirs
+            .iter()
+            .enumerate()
+            .map(|(id, dir)| {
+                (
+                    DiskAddr {
+                        node_id: id as u16,
+                        disk_idx: 0,
+                    },
+                    Rc::new(LocalFsBackend::new(dir.path()).unwrap()) as Rc<dyn StorageBackend>,
+                )
+            })
+            .collect();
+        let engine = Rc::new(Engine::new(
+            cluster,
+            backends,
+            vec![Rc::new(openlake_storage::DsyncClient::no_op())],
+            0,
+        ));
+        engine
+            .create_bucket("existing-bucket", BucketMeta::new(0, false))
+            .await
+            .unwrap();
+        let auth = Rc::new(AuthState::new("us-east-1".into(), &[]));
+        (dirs, AppState::new(engine, auth, InMemoryStore::new()))
+    }
+
+    #[compio::test]
+    async fn list_objects_missing_bucket_returns_no_such_bucket_for_both_versions() {
+        let (_dirs, state) = list_test_state().await;
+        for list_type in [None, Some("2")] {
+            for max_keys in [None, Some(0)] {
+                let query = BucketQuery {
+                    list_type: list_type.map(str::to_owned),
+                    max_keys,
+                    ..BucketQuery::default()
+                };
+                let uri = if list_type.is_some() {
+                    "/missing-bucket?list-type=2".parse().unwrap()
+                } else {
+                    "/missing-bucket".parse().unwrap()
+                };
+                let response = get_bucket_query(
+                    State(state.clone()),
+                    Path("missing-bucket".into()),
+                    Query(query),
+                    uri,
+                )
+                .await
+                .expect_err("missing bucket should fail")
+                .into_response();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert!(String::from_utf8_lossy(&body).contains("<Code>NoSuchBucket</Code>"));
+            }
+        }
+    }
+
+    #[compio::test]
+    async fn list_objects_existing_empty_bucket_succeeds_for_both_versions() {
+        let (_dirs, state) = list_test_state().await;
+        for list_type in [None, Some("2")] {
+            for max_keys in [None, Some(0)] {
+                let query = BucketQuery {
+                    list_type: list_type.map(str::to_owned),
+                    max_keys,
+                    ..BucketQuery::default()
+                };
+                let uri = if list_type.is_some() {
+                    "/existing-bucket?list-type=2".parse().unwrap()
+                } else {
+                    "/existing-bucket".parse().unwrap()
+                };
+                let response = get_bucket_query(
+                    State(state.clone()),
+                    Path("existing-bucket".into()),
+                    Query(query),
+                    uri,
+                )
+                .await
+                .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+        }
+    }
 
     fn obj(key: &str) -> ObjectInfo {
         ObjectInfo {
