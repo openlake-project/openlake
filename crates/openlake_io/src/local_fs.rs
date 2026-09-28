@@ -962,6 +962,7 @@ impl StorageBackend for LocalFsBackend {
             recursive,
             start_after,
             max_keys,
+            None,
             &mut out,
         )
         .await?;
@@ -1269,6 +1270,7 @@ fn walk_dir_local_inner<'a>(
     recursive: bool,
     start_after: Option<&'a str>,
     max_keys: Option<usize>,
+    skip_internal: Option<Vec<String>>,
     out: &'a mut Vec<(String, FileInfo)>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = IoResult<()>> + 'a>> {
     Box::pin(async move {
@@ -1280,6 +1282,13 @@ fn walk_dir_local_inner<'a>(
         let mut entries = backend.list_dir(volume, dir, 0).await?;
         entries.sort();
         for name in entries {
+            if skip_internal.as_ref().is_some_and(|data_dirs| {
+                name == META_FILENAME
+                    || name == META_BACKUP_FILENAME
+                    || data_dirs.iter().any(|data_dir| data_dir == &name)
+            }) {
+                continue;
+            }
             if let Some(n) = max_keys {
                 if out.len() >= n {
                     return Ok(());
@@ -1306,23 +1315,43 @@ fn walk_dir_local_inner<'a>(
                 continue;
             }
 
-            let descend = match backend.read_version("", volume, &child, None, false).await {
-                Ok(fi) => {
-                    if (prefix_filter.is_empty() || fi.name.starts_with(prefix_filter))
-                        && start_after.is_none_or(|after| fi.name.as_str() > after)
-                    {
-                        out.push((fi.name.clone(), fi));
+            let (descend, child_skip_internal) =
+                match compio::fs::read(backend.meta_path(volume, &child)).await {
+                    Ok(bytes) => {
+                        let records = match xl_meta::decode_all(bytes::Bytes::from(bytes)) {
+                            Ok(records) => records,
+                            Err(_) => continue,
+                        };
+                        let data_dirs = records
+                            .iter()
+                            .filter(|record| !record.data_dir.is_empty())
+                            .map(|record| record.data_dir.clone())
+                            .collect();
+                        let mut fi = xl_meta::file_info_from_record(
+                            records
+                                .into_iter()
+                                .next()
+                                .expect("decoded metadata has a version"),
+                            volume,
+                            &child,
+                        );
+                        fi.data = None;
+                        if (prefix_filter.is_empty() || fi.name.starts_with(prefix_filter))
+                            && start_after.is_none_or(|after| fi.name.as_str() > after)
+                        {
+                            out.push((fi.name.clone(), fi));
+                        }
+                        // Descend into real children, skipping this object's shard directories.
+                        (true, Some(data_dirs))
                     }
-                    // An object directory can also contain child objects.
-                    true
-                }
-                Err(IoError::FileNotFound { .. }) => {
-                    recursive
-                        && std::fs::symlink_metadata(backend.file_path(volume, &child))
-                            .is_ok_and(|meta| meta.file_type().is_dir())
-                }
-                Err(_) => continue,
-            };
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+                        recursive
+                            && std::fs::symlink_metadata(backend.file_path(volume, &child))
+                                .is_ok_and(|meta| meta.file_type().is_dir()),
+                        None,
+                    ),
+                    Err(_) => continue,
+                };
             if recursive && descend {
                 walk_dir_local_inner(
                     backend,
@@ -1332,6 +1361,7 @@ fn walk_dir_local_inner<'a>(
                     recursive,
                     start_after,
                     max_keys,
+                    child_skip_internal,
                     out,
                 )
                 .await?;

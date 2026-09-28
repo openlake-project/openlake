@@ -3232,6 +3232,36 @@ mod tests {
         assert_eq!(get_bytes(&e, "buk", "folder/child.txt").await.1, b"child");
     }
 
+    #[compio::test]
+    async fn list_folder_marker_skips_version_data_directories() {
+        let (dirs, e) = eng(3, 3).await;
+        e.put_bucket_versioning("buk", VersioningStatus::Enabled)
+            .await
+            .unwrap();
+        put_bytes(&e, "buk", "folder/child.txt", b"child".to_vec(), None).await;
+        put_bytes(&e, "buk", "folder/", vec![1; 200 * 1024], None).await;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        put_bytes(&e, "buk", "folder/", vec![2; 200 * 1024], None).await;
+
+        for dir in &dirs {
+            let folder = dir.path().join("buk/folder");
+            let records = openlake_io::xl_meta::decode_all(bytes::Bytes::from(
+                std::fs::read(folder.join("xl.meta")).unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(records.len(), 2);
+            for record in records {
+                let internal = folder.join(record.data_dir).join("sentinel");
+                std::fs::create_dir_all(&internal).unwrap();
+                std::fs::copy(folder.join("child.txt/xl.meta"), internal.join("xl.meta")).unwrap();
+            }
+        }
+
+        let listed = e.list("buk", "folder/", None, 0).await.unwrap();
+        let keys: Vec<&str> = listed.iter().map(|object| object.key.as_str()).collect();
+        assert_eq!(keys, ["folder/child.txt"]);
+    }
+
     /// 1 MiB payload — straight onto the EC streaming path with the
     /// default inline cutoff (128 KiB). EC(2+1) on a 3-disk set, no
     /// faults, exact-bytes round trip via streaming.
