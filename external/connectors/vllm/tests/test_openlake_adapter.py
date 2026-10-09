@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU-only regression tests for OpenLake's vLLM rank namespaces.
+"""CPU-only regression tests for OpenLake's vLLM adapter.
 
 The connector normally imports torch and vLLM on GPU serving hosts.  These
-tests exercise its pure rank/key logic with small import stubs so they can run
-in the repository's standard Python environment as well.
+tests exercise its scheduling and rank/key logic with small import stubs so
+they can run in the repository's standard Python environment as well.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 
 def _module(name: str) -> types.ModuleType:
@@ -703,6 +704,118 @@ class OpenLakeRankNamespaceTests(unittest.TestCase):
             scheduler._gather_exists([block_hash], 16),
             {(0, block_hash), (1, block_hash)},
         )
+
+
+class OpenLakeSchedulerLookupTests(unittest.TestCase):
+    def _make_scheduler(self, num_tokens, *, block_size=16, matched_tokens=None,
+                        min_lookup_tokens=1000, load_async=True):
+        scheduler = ADAPTER.OpenLakeScheduler.__new__(ADAPTER.OpenLakeScheduler)
+        scheduler._sched_bs = block_size
+        scheduler._hash_bs = block_size
+        scheduler._min_external_lookup_tokens = min_lookup_tokens
+        scheduler.load_async = load_async
+        scheduler._loads = {}
+        scheduler._group_keys = [ADAPTER.GroupKeys(
+            0, SimpleNamespace(block_size=block_size), block_size,
+        )]
+        scheduler._namespaces_by_group = (((0, 0, 0, 0),),)
+        scheduler._client = SimpleNamespace(
+            batch_is_exist=Mock(side_effect=lambda keys: [1] * len(keys)),
+        )
+        if matched_tokens is None:
+            matched_tokens = num_tokens // block_size * block_size
+        scheduler._coord = SimpleNamespace(
+            lookup_mask=Mock(return_value=(None,)),
+            find_longest_cache_hit=Mock(return_value=(None, matched_tokens)),
+        )
+        request = SimpleNamespace(
+            request_id="request",
+            num_tokens=num_tokens,
+            num_prompt_tokens=num_tokens,
+            block_hashes=[
+                index.to_bytes(32, "little")
+                for index in range(num_tokens // block_size)
+            ],
+        )
+        return scheduler, request
+
+    def test_local_hits_skip_external_lookup(self):
+        for block_size in (16, 32, 128):
+            for num_tokens, local_tokens in (
+                (1024, 1024 - block_size),
+                (1024, 1024),
+                (1025, 1024),
+                (1024 + block_size - 1, 1024),
+            ):
+                with self.subTest(block_size=block_size, num_tokens=num_tokens,
+                                  local_tokens=local_tokens):
+                    scheduler, request = self._make_scheduler(
+                        num_tokens, block_size=block_size,
+                    )
+
+                    self.assertEqual(scheduler.get_num_new_matched_tokens(
+                        request, local_tokens,
+                    ), (0, False))
+
+                    scheduler._client.batch_is_exist.assert_not_called()
+                    scheduler._coord.lookup_mask.assert_not_called()
+                    scheduler._coord.find_longest_cache_hit.assert_not_called()
+                    self.assertEqual(scheduler._loads, {})
+
+    def test_prompts_up_to_one_block_have_no_reusable_external_tokens(self):
+        for block_size in (16, 32, 128):
+            for num_tokens in (0, 1, block_size - 1, block_size):
+                with self.subTest(block_size=block_size, num_tokens=num_tokens):
+                    scheduler, request = self._make_scheduler(
+                        num_tokens, block_size=block_size, min_lookup_tokens=0,
+                    )
+
+                    self.assertEqual(
+                        scheduler.get_num_new_matched_tokens(request, 0),
+                        (0, False),
+                    )
+
+                    scheduler._client.batch_is_exist.assert_not_called()
+                    scheduler._coord.lookup_mask.assert_not_called()
+                    scheduler._coord.find_longest_cache_hit.assert_not_called()
+                    self.assertEqual(scheduler._loads, {})
+
+    def test_external_lookup_still_loads_tokens_beyond_local_hit(self):
+        for num_tokens, local_tokens, expected_tokens in (
+            (1024, 0, 1008),
+            (1024, 992, 16),
+            (1025, 1008, 16),
+            (1039, 1008, 16),
+        ):
+            for load_async in (False, True):
+                with self.subTest(num_tokens=num_tokens, local_tokens=local_tokens,
+                                  load_async=load_async):
+                    scheduler, request = self._make_scheduler(
+                        num_tokens, load_async=load_async,
+                    )
+
+                    self.assertEqual(scheduler.get_num_new_matched_tokens(
+                        request, local_tokens,
+                    ), (expected_tokens, load_async))
+
+                    scheduler._client.batch_is_exist.assert_called_once()
+                    self.assertEqual(scheduler._loads[request.request_id],
+                                     ADAPTER.PendingLoad(
+                                         local_tokens, local_tokens + expected_tokens,
+                                     ))
+
+    def test_eagle_lookup_keeps_full_bound_before_coordinator_drops_block(self):
+        scheduler, request = self._make_scheduler(1024, matched_tokens=1008)
+
+        self.assertEqual(scheduler.get_num_new_matched_tokens(request, 992),
+                         (16, True))
+
+        scheduler._client.batch_is_exist.assert_called_once()
+        self.assertEqual(
+            scheduler._coord.find_longest_cache_hit.call_args.args[1], 1024,
+        )
+        self.assertEqual(scheduler._loads[request.request_id],
+                         ADAPTER.PendingLoad(992, 1008))
 
 
 if __name__ == "__main__":
