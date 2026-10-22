@@ -22,6 +22,7 @@ pub enum AppError {
     Storage(StorageError),
     BadRequest(&'static str),
     Malformed(&'static str),
+    InvalidDigest,
     NotImplemented(&'static str),
 }
 
@@ -53,6 +54,11 @@ impl IntoResponse for AppError {
                 "MalformedRequest".into(),
                 (*msg).into(),
             ),
+            AppError::InvalidDigest => (
+                StatusCode::BAD_REQUEST,
+                "InvalidDigest".into(),
+                "The Content-MD5 you specified is not valid".into(),
+            ),
             AppError::NotImplemented(msg) => (
                 StatusCode::NOT_IMPLEMENTED,
                 "NotImplemented".into(),
@@ -80,6 +86,7 @@ fn map_storage(e: &StorageError) -> (StatusCode, String, String) {
         StorageError::InvalidObjectKey(_) => (StatusCode::BAD_REQUEST, "InvalidObjectName"),
         StorageError::LockTimeout(_) => (StatusCode::SERVICE_UNAVAILABLE, "SlowDown"),
         StorageError::LockLost(_) => (StatusCode::SERVICE_UNAVAILABLE, "SlowDown"),
+        StorageError::BadDigest => (StatusCode::BAD_REQUEST, "BadDigest"),
         // Both consensus failures map to 503 (transient — the cluster
         // is currently unable to satisfy this read; retry may succeed
         // once heal restores quorum). Distinct error codes so operators

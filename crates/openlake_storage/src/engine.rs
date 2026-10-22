@@ -821,6 +821,7 @@ impl Engine {
         size: u64,
         src: &mut dyn ByteStream,
         content_type: Option<String>,
+        content_md5: Option<[u8; 16]>,
     ) -> StorageResult<ObjectInfo> {
         let lock = self
             .dsync_for_obj(bucket, key)
@@ -840,6 +841,7 @@ impl Engine {
                 size,
                 src,
                 content_type,
+                content_md5,
                 mod_time_ms,
                 version_id,
                 &backends,
@@ -854,6 +856,7 @@ impl Engine {
                 size,
                 src,
                 content_type,
+                content_md5,
                 mod_time_ms,
                 version_id,
                 &backends,
@@ -877,6 +880,7 @@ impl Engine {
         size: u64,
         src: &mut dyn ByteStream,
         content_type: Option<String>,
+        content_md5: Option<[u8; 16]>,
         mod_time_ms: u64,
         version_id: String,
         backends: &[Rc<dyn StorageBackend>],
@@ -888,6 +892,7 @@ impl Engine {
 
         // todo: @arnav support chunked put, with no advertised content size header
         let (frames, etag) = drain_inline_payload(src, size as usize).await?;
+        check_content_md5(content_md5, &etag)?;
 
         let parts = single_part_info(&etag, size as i64, size as i64, mod_time_ms);
         let mut base_fi = build_file_info(
@@ -939,6 +944,7 @@ impl Engine {
         size: u64,
         src: &mut dyn ByteStream,
         content_type: Option<String>,
+        content_md5: Option<[u8; 16]>,
         mod_time_ms: u64,
         version_id: String,
         backends: &[Rc<dyn StorageBackend>],
@@ -989,6 +995,7 @@ impl Engine {
                 encode_and_write_stripes(&ec, src, size, stripe_data, stripes, sinks)
                     .await
                     .map_err(map_bucket_or_io(bucket))?;
+            check_content_md5(content_md5, &etag)?;
 
             finalize_sinks_quorum(sinks, quorum) // rpc 4
                 .await
@@ -2542,6 +2549,13 @@ async fn drain_inline_payload(
     Ok((frames, hex::encode(hasher.finalize())))
 }
 
+fn check_content_md5(expected: Option<[u8; 16]>, etag: &str) -> StorageResult<()> {
+    match expected {
+        Some(md5) if hex::encode(md5) != etag => Err(StorageError::BadDigest),
+        _ => Ok(()),
+    }
+}
+
 /// Cluster-wide nominal EC contract recorded on every persisted
 /// `FileInfo`, inline or EC. Mirrors MinIO's `Erasure.BlockSize`
 /// semantics: `block_size` = full stripe = `D × per-shard`. The
@@ -3063,7 +3077,7 @@ mod tests {
     ) -> ObjectInfo {
         let size = bytes.len() as u64;
         let mut src = VecByteStream::new(bytes);
-        e.put(bucket, key, size, &mut src, ct).await.unwrap()
+        e.put(bucket, key, size, &mut src, ct, None).await.unwrap()
     }
 
     /// Test helper: drain a GET into a Vec.
@@ -3081,6 +3095,45 @@ mod tests {
         put_bytes(&e, "buk", "k", b"hello".to_vec(), None).await;
         let (_, data) = get_bytes(&e, "buk", "k").await;
         assert_eq!(&data[..], b"hello");
+    }
+
+    #[compio::test]
+    async fn put_checks_content_md5_before_commit() {
+        let (_dirs, e) = eng(3, 3).await;
+        for size in [5, DEFAULT_INLINE_THRESHOLD + 1] {
+            let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let md5: [u8; 16] = md5::Md5::digest(&payload).into();
+
+            let info = e
+                .put(
+                    "buk",
+                    "good",
+                    size as u64,
+                    &mut VecByteStream::new(payload.clone()),
+                    None,
+                    Some(md5),
+                )
+                .await
+                .unwrap();
+            assert_eq!(info.etag, hex::encode(md5));
+
+            assert!(matches!(
+                e.put(
+                    "buk",
+                    "bad",
+                    size as u64,
+                    &mut VecByteStream::new(payload),
+                    None,
+                    Some([0u8; 16]),
+                )
+                .await,
+                Err(StorageError::BadDigest)
+            ));
+            assert!(matches!(
+                e.get("buk", "bad").await,
+                Err(StorageError::ObjectNotFound { .. })
+            ));
+        }
     }
 
     #[compio::test]
@@ -3481,6 +3534,7 @@ mod tests {
                 v1.len() as u64,
                 &mut VecByteStream::new(v1.clone()),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -3491,6 +3545,7 @@ mod tests {
                 "mv",
                 v2.len() as u64,
                 &mut VecByteStream::new(v2.clone()),
+                None,
                 None,
             )
             .await
