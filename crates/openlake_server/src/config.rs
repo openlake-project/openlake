@@ -175,7 +175,10 @@ impl KvSlabToml {
         let gb = self
             .capacity_gb
             .ok_or_else(|| anyhow::anyhow!("[kv_slab] set cpu_ram_frac or capacity_gb"))?;
-        Ok(gb * GIB)
+        anyhow::ensure!(gb > 0, "[kv_slab] capacity_gb must be greater than zero");
+        gb.checked_mul(GIB).ok_or_else(|| {
+            anyhow::anyhow!("[kv_slab] capacity_gb {gb} is too large to convert to bytes")
+        })
     }
 }
 
@@ -603,10 +606,36 @@ mod kv_slab_tests {
     }
 
     #[test]
+    fn capacity_gb_rejects_zero_and_overflow() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let zero = slab(Some(0), None).capacity_bytes().unwrap_err();
+        assert!(zero
+            .to_string()
+            .contains("capacity_gb must be greater than zero"));
+
+        let max_gb = u64::MAX / GIB;
+        assert_eq!(slab(Some(1), None).capacity_bytes().unwrap(), GIB);
+        assert_eq!(
+            slab(Some(max_gb), None).capacity_bytes().unwrap(),
+            max_gb * GIB
+        );
+        let overflow = slab(Some(max_gb + 1), None).capacity_bytes().unwrap_err();
+        assert!(overflow
+            .to_string()
+            .contains("too large to convert to bytes"));
+    }
+
+    #[test]
+    fn cpu_ram_frac_takes_precedence_over_invalid_capacity_gb() {
+        let error = slab(Some(0), Some(0.0)).capacity_bytes().unwrap_err();
+        assert!(error.to_string().contains("cpu_ram_frac must be in"));
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn frac_wins_and_floors_to_whole_gib() {
         const GIB: u64 = 1024 * 1024 * 1024;
-        let bytes = slab(Some(1), Some(0.5)).capacity_bytes().unwrap();
+        let bytes = slab(Some(0), Some(0.5)).capacity_bytes().unwrap();
         assert_eq!(bytes % GIB, 0);
         assert_eq!(
             bytes,
