@@ -70,6 +70,11 @@ pub enum StorageError {
         msg: String,
     },
 
+    /// The body's MD5 did not match the caller-supplied Content-MD5.
+    /// Raised before commit, so no version is written.
+    #[error("content md5 mismatch")]
+    BadDigest,
+
     #[error("io: {0}")]
     Io(#[from] IoError),
 }

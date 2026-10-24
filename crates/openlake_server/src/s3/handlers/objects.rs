@@ -572,6 +572,7 @@ pub async fn put_object(
         .and_then(|s| s.parse().ok())
         .ok_or(AppError::Malformed("missing or invalid Content-Length"))?;
 
+    let content_md5 = parse_content_md5(&parts.headers)?;
     let (engine_size, mut body_src) =
         build_body_source(&state, &parts.headers, body, content_length)?;
 
@@ -587,7 +588,14 @@ pub async fn put_object(
         let key = key.clone();
         async move {
             engine
-                .put(&bucket, &key, engine_size, &mut body_src, content_type)
+                .put(
+                    &bucket,
+                    &key,
+                    engine_size,
+                    &mut body_src,
+                    content_type,
+                    content_md5,
+                )
                 .await
         }
     })
@@ -691,6 +699,7 @@ fn copy_object(
                 src_info.size,
                 src_stream.as_mut(),
                 content_type,
+                None,
             )
             .await?;
 
@@ -742,6 +751,20 @@ async fn upload_part_handler(
         resp_headers.insert(ETAG, v);
     }
     Ok((StatusCode::OK, resp_headers).into_response())
+}
+
+fn parse_content_md5(headers: &HeaderMap) -> Result<Option<[u8; 16]>, AppError> {
+    use base64::Engine as _;
+    let Some(value) = headers.get("content-md5") else {
+        return Ok(None);
+    };
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value.as_bytes())
+        .map_err(|_| AppError::InvalidDigest)?;
+    decoded
+        .try_into()
+        .map(Some)
+        .map_err(|_| AppError::InvalidDigest)
 }
 
 fn is_hex_sha256(s: &str) -> bool {
@@ -1100,6 +1123,33 @@ mod tests {
             head_object_response(&info, Some(ByteRange::Bounded { start: 0, end: 0 })).status(),
             StatusCode::RANGE_NOT_SATISFIABLE
         );
+    }
+
+    #[test]
+    fn parse_content_md5_decodes_base64_digest() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(parse_content_md5(&headers).unwrap(), None);
+
+        headers.insert(
+            "content-md5",
+            HeaderValue::from_static("XUFAKrxLKna5cZ2REBfFkg=="),
+        );
+        assert_eq!(
+            parse_content_md5(&headers).unwrap().map(hex::encode),
+            Some("5d41402abc4b2a76b9719d911017c592".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_content_md5_rejects_invalid_digest() {
+        for value in ["not base64!", "aGVsbG8="] {
+            let mut headers = HeaderMap::new();
+            headers.insert("content-md5", HeaderValue::from_static(value));
+            assert!(matches!(
+                parse_content_md5(&headers),
+                Err(AppError::InvalidDigest)
+            ));
+        }
     }
 
     #[test]
