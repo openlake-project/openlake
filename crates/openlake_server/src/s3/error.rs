@@ -21,6 +21,7 @@ pub enum AppError {
     Auth(AuthError),
     Storage(StorageError),
     BadRequest(&'static str),
+    InvalidArgument(&'static str),
     Malformed(&'static str),
     InvalidDigest,
     NotImplemented(&'static str),
@@ -49,6 +50,11 @@ impl IntoResponse for AppError {
             AppError::BadRequest(msg) => {
                 (StatusCode::BAD_REQUEST, "BadRequest".into(), (*msg).into())
             }
+            AppError::InvalidArgument(msg) => (
+                StatusCode::BAD_REQUEST,
+                "InvalidArgument".into(),
+                (*msg).into(),
+            ),
             AppError::Malformed(msg) => (
                 StatusCode::BAD_REQUEST,
                 "MalformedRequest".into(),

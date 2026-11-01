@@ -12,8 +12,10 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use openlake_io::{BucketMeta, VersioningStatus};
 use openlake_storage::ObjectInfo;
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use send_wrapper::SendWrapper;
 use serde::Deserialize;
 
@@ -85,8 +87,8 @@ pub struct BucketQuery {
     #[serde(default, rename = "max-keys")]
     pub max_keys: Option<u32>,
     /// `?continuation-token=` — opaque token returned by the previous
-    /// truncated response. We use the last-key-returned as the token,
-    /// so resumption is "list keys strictly greater than this string."
+    /// truncated response. Decodes to the last key returned, so resumption
+    /// is "list keys strictly greater than the decoded key."
     #[serde(default, rename = "continuation-token")]
     pub continuation_token: Option<String>,
     /// `?start-after=` — alternative resumption: "list keys strictly
@@ -103,11 +105,56 @@ pub struct BucketQuery {
     pub delimiter: Option<String>,
     #[serde(default)]
     pub marker: Option<String>,
+    #[serde(default, rename = "encoding-type")]
+    pub encoding_type: Option<String>,
 }
 
 impl BucketQuery {
     fn flag_present(v: &Option<String>) -> bool {
         v.is_some()
+    }
+
+    fn url_encoding(&self) -> Result<bool, AppError> {
+        match self.encoding_type.as_deref() {
+            None => Ok(false),
+            Some("url") => Ok(true),
+            Some(_) => Err(AppError::InvalidArgument("encoding-type must be url")),
+        }
+    }
+}
+
+// Encode UTF-8 bytes except RFC 3986 unreserved characters, including '/' and '%'.
+const LIST_URL_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+fn encode_list_value(value: String, url_encoding: bool) -> String {
+    if url_encoding {
+        utf8_percent_encode(&value, LIST_URL_ENCODE_SET).to_string()
+    } else {
+        value
+    }
+}
+
+// Tokens are opaque, not key-name fields covered by encoding-type. Base64
+// keeps XML-unsafe keys out of these fields, independently of the listing mode.
+const LIST_TOKEN_PREFIX: &str = "openlake-list-v1:";
+
+fn encode_list_token(key: String) -> String {
+    format!("{LIST_TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(key))
+}
+
+fn decode_list_token(token: &str) -> Result<String, AppError> {
+    match token.strip_prefix(LIST_TOKEN_PREFIX) {
+        Some(encoded) => URL_SAFE_NO_PAD
+            .decode(encoded)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .ok_or(AppError::InvalidArgument("invalid continuation-token")),
+        // Accept the previous raw-key format during an upgrade.
+        None => Ok(token.to_owned()),
     }
 }
 
@@ -318,6 +365,7 @@ async fn list_objects_v2(
     bucket: String,
     query: BucketQuery,
 ) -> Result<Response, AppError> {
+    let url_encoding = query.url_encoding()?;
     let prefix = query.prefix.clone().unwrap_or_default();
     let max_keys = query
         .max_keys
@@ -326,7 +374,9 @@ async fn list_objects_v2(
     let delimiter = query.delimiter.clone().filter(|d| !d.is_empty());
     let cursor = query
         .continuation_token
-        .clone()
+        .as_deref()
+        .map(decode_list_token)
+        .transpose()?
         .or_else(|| query.start_after.clone());
 
     let (page, truncated, next_token) = list_page(
@@ -338,19 +388,23 @@ async fn list_objects_v2(
         max_keys as usize,
     )
     .await?;
-    let (contents, common_prefixes) = split_page(page, None);
+    let (contents, common_prefixes) = split_page(page, None, url_encoding);
 
     let key_count = (contents.len() + common_prefixes.len()) as u32;
     let body = ListBucketResult {
         xmlns: S3_NS,
         name: bucket,
-        prefix: prefix,
+        prefix: encode_list_value(prefix, url_encoding),
+        encoding_type: url_encoding.then_some("url"),
         key_count: key_count,
         max_keys: max_keys,
         is_truncated: truncated,
-        delimiter: delimiter,
+        delimiter: delimiter.map(|value| encode_list_value(value, url_encoding)),
+        start_after: query
+            .start_after
+            .map(|value| encode_list_value(value, url_encoding)),
         continuation_token: query.continuation_token,
-        next_continuation_token: next_token,
+        next_continuation_token: next_token.map(encode_list_token),
         contents: contents,
         common_prefixes: common_prefixes,
     };
@@ -363,6 +417,7 @@ async fn list_objects_v1(
     bucket: String,
     query: BucketQuery,
 ) -> Result<Response, AppError> {
+    let url_encoding = query.url_encoding()?;
     let prefix = query.prefix.clone().unwrap_or_default();
     let max_keys = query
         .max_keys
@@ -380,17 +435,18 @@ async fn list_objects_v1(
         max_keys as usize,
     )
     .await?;
-    let (contents, common_prefixes) = split_page(page, Some(v1_owner()));
+    let (contents, common_prefixes) = split_page(page, Some(v1_owner()), url_encoding);
 
     let body = ListBucketResultV1 {
         xmlns: S3_NS,
         name: bucket,
-        prefix: prefix,
-        marker: marker.unwrap_or_default(),
-        next_marker: next_marker,
+        prefix: encode_list_value(prefix, url_encoding),
+        encoding_type: url_encoding.then_some("url"),
+        marker: encode_list_value(marker.unwrap_or_default(), url_encoding),
+        next_marker: next_marker.map(|value| encode_list_value(value, url_encoding)),
         max_keys: max_keys,
         is_truncated: truncated,
-        delimiter: delimiter,
+        delimiter: delimiter.map(|value| encode_list_value(value, url_encoding)),
         contents: contents,
         common_prefixes: common_prefixes,
     };
@@ -445,13 +501,19 @@ fn rollup_entries(infos: Vec<ObjectInfo>, prefix: &str, delim: &str) -> Vec<List
 fn split_page(
     page: Vec<ListEntry>,
     owner: Option<Owner>,
+    url_encoding: bool,
 ) -> (Vec<ListBucketObject>, Vec<CommonPrefix>) {
     let mut contents = Vec::new();
     let mut common_prefixes = Vec::new();
     for entry in page {
         match entry {
-            ListEntry::Object(info) => contents.push(object_to_xml(info, owner.clone())),
-            ListEntry::Prefix(prefix) => common_prefixes.push(CommonPrefix { prefix }),
+            ListEntry::Object(mut info) => {
+                info.key = encode_list_value(info.key, url_encoding);
+                contents.push(object_to_xml(info, owner.clone()));
+            }
+            ListEntry::Prefix(prefix) => common_prefixes.push(CommonPrefix {
+                prefix: encode_list_value(prefix, url_encoding),
+            }),
         }
     }
     (contents, common_prefixes)
@@ -626,6 +688,226 @@ mod tests {
         }
     }
 
+    async fn put_listing_keys(state: &AppState, keys: &[&str]) {
+        for key in keys {
+            let mut source = openlake_io::VecByteStream::new(Vec::new());
+            state
+                .engine()
+                .put("existing-bucket", key, 0, &mut source, None, None)
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn listing_xml(state: &AppState, query: &str) -> String {
+        let uri: Uri = format!("/existing-bucket?{query}").parse().unwrap();
+        let parsed = Query::<BucketQuery>::try_from_uri(&uri).unwrap();
+        let response = get_bucket_query(
+            State(state.clone()),
+            Path("existing-bucket".into()),
+            parsed,
+            uri,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn next_token(xml: &str) -> String {
+        #[derive(Deserialize)]
+        struct Page {
+            #[serde(rename = "NextContinuationToken")]
+            token: String,
+        }
+        quick_xml::de::from_str::<Page>(xml).unwrap().token
+    }
+
+    #[compio::test]
+    async fn list_url_encodes_keys_for_both_versions() {
+        let (_dirs, state) = list_test_state().await;
+        let cases = [
+            ("space key", "space%20key"),
+            ("literal%2F", "literal%252F"),
+            ("é猫", "%C3%A9%E7%8C%AB"),
+            ("control\u{1}", "control%01"),
+            ("xml<&\"", "xml%3C%26%22"),
+            ("test_file(3).png", "test_file%283%29.png"),
+            ("a-Z_0.~", "a-Z_0.~"),
+        ];
+        put_listing_keys(
+            &state,
+            &cases.iter().map(|(raw, _)| *raw).collect::<Vec<_>>(),
+        )
+        .await;
+        for version in ["", "list-type=2&"] {
+            let xml = listing_xml(&state, &format!("{version}encoding-type=url")).await;
+            assert!(xml.contains("<EncodingType>url</EncodingType>"));
+            assert!(!xml.contains('\u{1}'));
+            for (_, encoded) in cases {
+                assert!(xml.contains(&format!("<Key>{encoded}</Key>")), "{xml}");
+            }
+        }
+    }
+
+    #[compio::test]
+    async fn list_without_encoding_preserves_raw_keys_and_xml_escaping() {
+        let (_dirs, state) = list_test_state().await;
+        put_listing_keys(&state, &["dir/a % é&<>"]).await;
+        for version in ["", "list-type=2&"] {
+            let xml = listing_xml(&state, &format!("{version}prefix=dir%2F")).await;
+            assert!(xml.contains("<Prefix>dir/</Prefix>"));
+            assert!(xml.contains("<Key>dir/a % é&amp;&lt;&gt;</Key>"));
+            assert!(!xml.contains("<EncodingType>"));
+        }
+    }
+
+    #[compio::test]
+    async fn list_url_encoding_preserves_raw_filtering_and_pagination() {
+        let (_dirs, state) = list_test_state().await;
+        put_listing_keys(&state, &["root %/a child/item", "root %/b?.txt", "other"]).await;
+        for version in ["", "list-type=2&"] {
+            let base =
+                format!("{version}encoding-type=url&prefix=root%20%25%2F&delimiter=%2F&max-keys=1");
+            let first = listing_xml(&state, &base).await;
+            assert!(first.contains("<Prefix>root%20%25%2F</Prefix>"));
+            assert!(first.contains("<Delimiter>%2F</Delimiter>"));
+            assert!(first.contains(
+                "<CommonPrefixes><Prefix>root%20%25%2Fa%20child%2F</Prefix></CommonPrefixes>"
+            ));
+            assert!(first.contains("<IsTruncated>true</IsTruncated>"));
+            let cursor = if version.is_empty() {
+                assert!(first.contains("<NextMarker>root%20%25%2Fa%20child%2F</NextMarker>"));
+                "marker=root%20%25%2Fa%20child%2F".to_owned()
+            } else {
+                // V2 tokens are opaque; encoding-type does not percent-encode them.
+                format!("continuation-token={}", next_token(&first))
+            };
+            let second = listing_xml(&state, &format!("{base}&{cursor}")).await;
+            assert!(second.contains("<Key>root%20%25%2Fb%3F.txt</Key>"));
+            assert!(second.contains("<IsTruncated>false</IsTruncated>"));
+            assert!(!second.contains("<CommonPrefixes>"));
+            if version.is_empty() {
+                assert!(second.contains("<Marker>root%20%25%2Fa%20child%2F</Marker>"));
+            } else {
+                assert!(second.contains(&format!(
+                    "<ContinuationToken>{}</ContinuationToken>",
+                    next_token(&first)
+                )));
+            }
+        }
+    }
+
+    #[compio::test]
+    async fn list_v2_tokens_are_xml_safe_and_work_across_encoding_modes() {
+        let (_dirs, state) = list_test_state().await;
+        put_listing_keys(&state, &["a\u{1}%2F", "b", "openlake-list-v1:YQ", "z"]).await;
+        let first = listing_xml(&state, "list-type=2&encoding-type=url&max-keys=1").await;
+        assert!(!first.contains('\u{1}'));
+        assert!(first.contains("<Key>a%01%252F</Key>"));
+        let token = next_token(&first);
+        let second = listing_xml(
+            &state,
+            &format!("list-type=2&max-keys=1&continuation-token={token}"),
+        )
+        .await;
+        assert!(second.contains("<Key>b</Key>"));
+        let third = listing_xml(
+            &state,
+            &format!(
+                "list-type=2&max-keys=1&continuation-token={}",
+                next_token(&second)
+            ),
+        )
+        .await;
+        assert!(third.contains("<Key>openlake-list-v1:YQ</Key>"));
+        let fourth = listing_xml(
+            &state,
+            &format!(
+                "list-type=2&encoding-type=url&continuation-token={}",
+                next_token(&third)
+            ),
+        )
+        .await;
+        assert!(fourth.contains("<Key>z</Key>"));
+        assert!(!fourth.contains("<Key>b</Key>"));
+        assert!(fourth.contains("<IsTruncated>false</IsTruncated>"));
+
+        // Raw-key tokens issued by the previous server still resume a listing.
+        let legacy = listing_xml(
+            &state,
+            "list-type=2&encoding-type=url&continuation-token=a%01%252F",
+        )
+        .await;
+        assert!(legacy.contains("<Key>b</Key>"));
+        assert!(!legacy.contains("<Key>a%01%252F</Key>"));
+    }
+
+    #[compio::test]
+    async fn list_v2_rejects_invalid_versioned_tokens() {
+        let (_dirs, state) = list_test_state().await;
+        for token in ["openlake-list-v1:!", "openlake-list-v1:_w"] {
+            let response = list_objects_v2(
+                state.clone(),
+                "existing-bucket".into(),
+                BucketQuery {
+                    continuation_token: Some(token.into()),
+                    ..BucketQuery::default()
+                },
+            )
+            .await
+            .unwrap_err()
+            .into_response();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[compio::test]
+    async fn list_url_start_after_is_not_decoded_twice() {
+        let (_dirs, state) = list_test_state().await;
+        put_listing_keys(&state, &["p%2F/a", "p%2F/b", "p/other"]).await;
+        let xml = listing_xml(
+            &state,
+            "list-type=2&encoding-type=url&prefix=p%252F%2F&start-after=p%252F%2Fa",
+        )
+        .await;
+        assert!(xml.contains("<Prefix>p%252F%2F</Prefix>"));
+        assert!(xml.contains("<StartAfter>p%252F%2Fa</StartAfter>"));
+        assert!(xml.contains("<Key>p%252F%2Fb</Key>"));
+        assert!(!xml.contains("<Key>p%252F%2Fa</Key>"));
+        assert!(!xml.contains("other"));
+    }
+
+    #[compio::test]
+    async fn list_rejects_unsupported_encoding_types_for_both_versions() {
+        let (_dirs, state) = list_test_state().await;
+        for version in ["", "list-type=2&"] {
+            for encoding in ["", "URL", "base64"] {
+                let uri: Uri = format!("/existing-bucket?{version}encoding-type={encoding}")
+                    .parse()
+                    .unwrap();
+                let parsed = Query::<BucketQuery>::try_from_uri(&uri).unwrap();
+                let response = get_bucket_query(
+                    State(state.clone()),
+                    Path("existing-bucket".into()),
+                    parsed,
+                    uri,
+                )
+                .await
+                .unwrap_err()
+                .into_response();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert!(String::from_utf8_lossy(&bytes).contains("<Code>InvalidArgument</Code>"));
+            }
+        }
+    }
+
     fn obj(key: &str) -> ObjectInfo {
         ObjectInfo {
             bucket: "b".to_owned(),
@@ -688,13 +970,17 @@ mod tests {
             ListEntry::Object(obj("a.txt")),
             ListEntry::Prefix("dir/".to_owned()),
         ];
-        let (contents, prefixes) = split_page(page, None);
+        let (contents, prefixes) = split_page(page, None, false);
         assert_eq!(contents.len(), 1);
         assert!(contents[0].owner.is_none());
         assert_eq!(prefixes.len(), 1);
         assert_eq!(prefixes[0].prefix, "dir/");
 
-        let (contents, _) = split_page(vec![ListEntry::Object(obj("a.txt"))], Some(v1_owner()));
+        let (contents, _) = split_page(
+            vec![ListEntry::Object(obj("a.txt"))],
+            Some(v1_owner()),
+            false,
+        );
         assert!(contents[0].owner.is_some());
     }
 }
