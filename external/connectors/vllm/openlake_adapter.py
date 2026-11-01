@@ -3,6 +3,7 @@
 import dataclasses
 import hashlib
 import inspect
+import json
 import os
 import queue
 import struct
@@ -490,13 +491,26 @@ def _group_key_spaces(vllm_config, kv_cache_config):
     compression = _expans_enabled(extra)
     cache_prefix = str(extra.get("cache_prefix", ""))
     compression_tag = "expans:lossless:nvcomp:fixed-13-to-10:v1" if compression else ""
-    if model_name or cache_prefix or compression_tag:
-        tag_source = model_name if not cache_prefix else f"{cache_prefix}\0{model_name}"
-        if compression_tag:
-            tag_source = f"{tag_source}\0{compression_tag}"
-        model_tag = hashlib.blake2b(tag_source.encode(), digest_size=12).digest()
-    else:
-        model_tag = bytes(12)
+    model_config = vllm_config.model_config
+    # A resolved commit distinguishes updates to mutable refs such as "main".
+    revision = (
+        getattr(getattr(model_config, "hf_config", None), "_commit_hash", None)
+        or getattr(model_config, "revision", None)
+        or ""
+    )
+    # Locally updated weights need an operator-supplied deployment identity.
+    deployment_revision = extra.get("openlake_model_revision", "")
+    if "openlake_model_revision" in extra and (
+        not isinstance(deployment_revision, str) or not deployment_revision.strip()
+    ):
+        raise ValueError("openlake_model_revision must be a non-empty string")
+    # Version and frame the fields unambiguously; never reuse pre-revision keys.
+    tag_source = json.dumps(
+        ["openlake-kv-v2", model_name, revision, deployment_revision,
+         cache_prefix, compression_tag],
+        separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")
+    model_tag = hashlib.blake2b(tag_source, digest_size=12).digest()
     group_keys = [
         GroupKeys(i, _unwrap(g.kv_cache_spec), hash_bs, model_tag)
         for i, g in enumerate(groups)

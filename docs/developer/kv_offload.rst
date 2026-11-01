@@ -36,6 +36,23 @@ Before using OpenLake as a KV offload backend, ensure that you have:
 * A working OpenLake configuration.
 * RDMA-capable hardware if you plan to use cross-node KV offload.
 
+Model revisions in the vLLM cache
+--------------------------------
+
+The vLLM connector namespaces cached KV by model name and the resolved
+Hugging Face commit (``model_config.hf_config._commit_hash``), falling back
+to the configured ``revision`` when no resolved commit is available.
+The existing ``cache_prefix`` and compression format also remain isolated.
+
+For local weights, or mutable revision names without a resolved commit,
+set ``"openlake_model_revision": "weights-release-2026-10-31"`` in
+``kv_connector_extra_config``. Change this value whenever the weights
+change and use the same value on all workers serving those weights.
+The connector does not hash weight files or detect in-place updates.
+
+This changes the cache namespace version, so upgrading starts with a cold
+external KV cache instead of reusing entries from the old namespace.
+
 KV Offload Architecture
 =======================
 

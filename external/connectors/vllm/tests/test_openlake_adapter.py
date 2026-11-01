@@ -15,6 +15,7 @@ import logging
 import math
 import os
 import struct
+import subprocess
 import sys
 import types
 import unittest
@@ -433,7 +434,8 @@ class OpenLakeRankNamespaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "u32"):
             sync_slot_bytes(1 << 32)
 
-    def test_model_tag_preserves_default_and_isolates_cache_prefix(self):
+    @staticmethod
+    def _model_key(model_config, extra=None):
         interface = sys.modules["vllm.v1.kv_cache_interface"]
         spec = interface.FullAttentionSpec()
         spec.block_size = 16
@@ -441,22 +443,73 @@ class OpenLakeRankNamespaceTests(unittest.TestCase):
             kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)]
         )
 
-        def model_tag(cache_prefix=""):
-            config = SimpleNamespace(
-                model_config=SimpleNamespace(model="org/model"),
-                kv_transfer_config=SimpleNamespace(
-                    kv_connector_extra_config={"cache_prefix": cache_prefix}
-                ),
-                speculative_config=None,
-            )
-            return ADAPTER._group_key_spaces(config, kv_cache_config)[1][0]._model_tag
+        config = SimpleNamespace(
+            model_config=model_config,
+            kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra or {}),
+            speculative_config=None,
+        )
+        group = ADAPTER._group_key_spaces(config, kv_cache_config)[1][0]
+        return group.key_for(b"x" * 32, (0, 0, 0, 0))
 
-        expected = __import__("hashlib").blake2b(b"org/model", digest_size=12).digest()
-        default = model_tag()
+    def test_model_revision_isolates_keys_without_changing_key_layout(self):
+        model = SimpleNamespace(model="org/model", revision="revision-a")
+        first = self._model_key(model)
+        self.assertEqual(first, self._model_key(model))
+        model.revision = "revision-b"
+        second = self._model_key(model)
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(first), 54)
+        self.assertEqual(first[:32], second[:32])
+        self.assertEqual(first[44:], second[44:])
 
-        self.assertEqual(default, expected)
-        self.assertNotEqual(default, model_tag("tenant-a"))
-        self.assertNotEqual(model_tag("tenant-a"), model_tag("tenant-b"))
+    def test_resolved_commit_isolates_updates_to_same_revision_name(self):
+        model = SimpleNamespace(
+            model="org/model", revision="main", hf_config=SimpleNamespace(_commit_hash="commit-a")
+        )
+        first = self._model_key(model)
+        model.revision = "alias-for-same-commit"
+        self.assertEqual(first, self._model_key(model))
+        model.hf_config._commit_hash = "commit-b"
+        self.assertNotEqual(first, self._model_key(model))
+
+    def test_local_deployment_revision_and_cache_prefix_isolate_keys(self):
+        model = SimpleNamespace(model="/models/current")
+        key = self._model_key
+        default = key(model)
+        self.assertNotEqual(default, key(model, {"openlake_model_revision": "weights-a"}))
+        self.assertNotEqual(
+            key(model, {"openlake_model_revision": "weights-a"}),
+            key(model, {"openlake_model_revision": "weights-b"}),
+        )
+        self.assertNotEqual(default, key(model, {"cache_prefix": "tenant-a"}))
+        self.assertNotEqual(key(model, {"cache_prefix": "tenant-a"}),
+                            key(model, {"cache_prefix": "tenant-b"}))
+        for invalid in (None, "", " ", 42):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "openlake_model_revision"):
+                key(model, {"openlake_model_revision": invalid})
+
+    def test_namespace_is_versioned_and_fields_are_unambiguous(self):
+        model = SimpleNamespace(model="org/model")
+        old_tag = __import__("hashlib").blake2b(b"org/model", digest_size=12).digest()
+        self.assertNotEqual(self._model_key(model)[32:44], old_tag)
+        self.assertNotEqual(
+            self._model_key(SimpleNamespace(model="b\0c"), {"cache_prefix": "a"}),
+            self._model_key(SimpleNamespace(model="c"), {"cache_prefix": "a\0b"}),
+        )
+
+    def test_revision_keys_are_stable_across_python_processes(self):
+        code = (
+            "import runpy; from types import SimpleNamespace; "
+            f"tests = runpy.run_path({str(Path(__file__).resolve())!r}); "
+            "print(tests['OpenLakeRankNamespaceTests']._model_key("
+            "SimpleNamespace(model='org/model', revision='commit-a')).hex())"
+        )
+        keys = [subprocess.check_output(
+            [sys.executable, "-B", "-c", code],
+            env={**os.environ, "PYTHONHASHSEED": seed}, text=True,
+        ).strip() for seed in ("1", "2")]
+        expected = self._model_key(SimpleNamespace(model="org/model", revision="commit-a")).hex()
+        self.assertEqual(keys, [expected, expected])
 
     def test_replication_factors_match_mooncake(self):
         interface = sys.modules["vllm.v1.kv_cache_interface"]
