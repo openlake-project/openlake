@@ -54,14 +54,20 @@ EXPANS_RECORD_ALIGNMENT = 4096
 EXPANS_MAX_BATCH_BLOCKS = 64
 
 _HASH_SEED_HELP = (
-    "OpenLake external KV offloading requires PYTHONHASHSEED to be set for "
-    "block-hash consistency. Please set it, e.g. "
+    "OpenLake external KV offloading requires PYTHONHASHSEED to be a fixed "
+    "decimal integer between 0 and 4294967295 for block-hash consistency. "
+    "Set the same value before starting every Python worker, e.g. "
     "PYTHONHASHSEED=0 vllm serve <model> ..."
 )
 
 
 def _require_fixed_hash_seed() -> None:
-    if os.getenv("PYTHONHASHSEED") is None:
+    seed = os.getenv("PYTHONHASHSEED", "")
+    try:
+        valid = seed.isascii() and seed.isdecimal() and int(seed) <= 4294967295
+    except ValueError:
+        valid = False
+    if not valid:
         raise RuntimeError(_HASH_SEED_HELP)
 
 

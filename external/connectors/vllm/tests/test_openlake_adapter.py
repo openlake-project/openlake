@@ -21,7 +21,7 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 def _module(name: str) -> types.ModuleType:
@@ -165,6 +165,23 @@ def _parallel(**overrides):
     }
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+class OpenLakeHashSeedTests(unittest.TestCase):
+    def test_requires_fixed_in_range_decimal_seed(self):
+        for seed in (None, "", "random", "abc", "-1", "4294967296", "1.5", "１２", "9" * 5000):
+            with self.subTest(seed=seed), patch.dict(os.environ):
+                if seed is None:
+                    os.environ.pop("PYTHONHASHSEED", None)
+                else:
+                    os.environ["PYTHONHASHSEED"] = seed
+                with self.assertRaisesRegex(RuntimeError, "before starting every Python worker"):
+                    ADAPTER._require_fixed_hash_seed()
+
+    def test_accepts_fixed_seed_including_range_boundaries(self):
+        for seed in ("0", "1", "42", "00042", "4294967295"):
+            with self.subTest(seed=seed), patch.dict(os.environ, PYTHONHASHSEED=seed):
+                ADAPTER._require_fixed_hash_seed()
 
 
 class OpenLakeRankNamespaceTests(unittest.TestCase):
