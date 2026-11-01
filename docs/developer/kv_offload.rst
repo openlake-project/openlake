@@ -36,6 +36,13 @@ Before using OpenLake as a KV offload backend, ensure that you have:
 * A working OpenLake configuration.
 * RDMA-capable hardware if you plan to use cross-node KV offload.
 
+For the vLLM connector, set the same fixed ``PYTHONHASHSEED`` on every
+worker before starting Python, for example ``PYTHONHASHSEED=0 vllm serve
+<model> ...``. The connector accepts decimal integers from ``0`` through
+``4294967295``; unset, empty, ``random``, and invalid values fail startup.
+Changing this environment variable after Python has started does not
+change that process's hash seed.
+
 Model revisions in the vLLM cache
 --------------------------------
 
