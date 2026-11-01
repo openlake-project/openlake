@@ -104,6 +104,10 @@ pub struct ListBucketResult {
     pub name: String,
     #[serde(rename = "Prefix", skip_serializing_if = "String::is_empty")]
     pub prefix: String,
+    #[serde(rename = "EncodingType", skip_serializing_if = "Option::is_none")]
+    pub encoding_type: Option<&'static str>,
+    #[serde(rename = "StartAfter", skip_serializing_if = "Option::is_none")]
+    pub start_after: Option<String>,
     #[serde(rename = "KeyCount")]
     pub key_count: u32,
     #[serde(rename = "MaxKeys")]
@@ -205,6 +209,8 @@ pub struct ListBucketResultV1 {
     pub name: String,
     #[serde(rename = "Prefix", skip_serializing_if = "String::is_empty")]
     pub prefix: String,
+    #[serde(rename = "EncodingType", skip_serializing_if = "Option::is_none")]
+    pub encoding_type: Option<&'static str>,
     #[serde(rename = "Marker", skip_serializing_if = "String::is_empty")]
     pub marker: String,
     #[serde(rename = "NextMarker", skip_serializing_if = "Option::is_none")]

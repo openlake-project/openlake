@@ -179,6 +179,14 @@ aws --endpoint-url http://127.0.0.1:9000 s3 cp ./checkpoint.safetensors s3://dem
 aws --endpoint-url http://127.0.0.1:9000 s3 ls s3://demo/
 ```
 
+Both ListObjects versions support `encoding-type=url` for UTF-8 percent-encoded
+keys, prefixes, and delimiters in the XML response. Without this option, key
+names retain their existing XML representation. ListObjectsV2 now echoes
+`StartAfter` and returns XML-safe, versioned continuation tokens; treat tokens
+as opaque and pass them back unchanged, even when changing the encoding option.
+Legacy raw-key tokens remain accepted except for the reserved
+`openlake-list-v1:` token prefix (restart those listings after upgrading).
+
 ### Build from source: 
 
 To build from the source, please follow the platform specific build guides:
