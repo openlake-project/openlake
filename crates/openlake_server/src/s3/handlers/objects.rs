@@ -169,9 +169,19 @@ pub async fn head_object(
 pub async fn delete_object(
     State(state): State<AppState>,
     Path((bucket, key)): Path<(String, String)>,
+    Query(query): Query<ObjectQuery>,
 ) -> Result<StatusCode, AppError> {
     let engine = state.engine().clone();
-    SendWrapper::new(async move { engine.delete(&bucket, &key).await }).await?;
+    SendWrapper::new(async move {
+        if let Some(upload_id) = query.upload_id {
+            engine
+                .abort_multipart_upload(&bucket, &key, &upload_id)
+                .await
+        } else {
+            engine.delete(&bucket, &key).await
+        }
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -966,9 +976,102 @@ fn http_date_rfc1123(ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::AuthState;
+    use crate::in_memory_store::InMemoryStore;
     use axum::http::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE};
     use axum::http::HeaderValue;
+    use openlake_io::{BucketMeta, LocalFsBackend, StorageBackend};
     use openlake_storage::StorageClass;
+    use openlake_storage::{ClusterConfig, DiskAddr, Engine, NodeAddr};
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    #[compio::test]
+    async fn delete_with_upload_id_aborts_upload_not_existing_object() {
+        let dirs: Vec<TempDir> = (0..3).map(|_| TempDir::new().unwrap()).collect();
+        let cluster = ClusterConfig {
+            nodes: (0..3)
+                .map(|id| NodeAddr {
+                    id,
+                    rpc_addr: format!("127.0.0.1:{}", 9100 + id).parse().unwrap(),
+                    disk_count: 1,
+                })
+                .collect(),
+            set_drive_count: 3,
+            default_parity_count: 1,
+            deployment_id: Uuid::nil(),
+        };
+        let backends: HashMap<DiskAddr, Rc<dyn StorageBackend>> = dirs
+            .iter()
+            .enumerate()
+            .map(|(id, dir)| {
+                (
+                    DiskAddr {
+                        node_id: id as u16,
+                        disk_idx: 0,
+                    },
+                    Rc::new(LocalFsBackend::new(dir.path()).unwrap()) as Rc<dyn StorageBackend>,
+                )
+            })
+            .collect();
+        let engine = Rc::new(Engine::new(
+            cluster,
+            backends,
+            vec![Rc::new(openlake_storage::DsyncClient::no_op())],
+            0,
+        ));
+        engine
+            .create_bucket("bucket", BucketMeta::new(0, false))
+            .await
+            .unwrap();
+        let mut body = openlake_io::stream::VecByteStream::new(b"old".to_vec());
+        engine
+            .put("bucket", "key", 3, &mut body, None, None)
+            .await
+            .unwrap();
+        let upload_id = engine
+            .create_multipart_upload("bucket", "key", None)
+            .await
+            .unwrap()
+            .upload_id;
+        let state = AppState::new(
+            engine.clone(),
+            Rc::new(AuthState::new("us-east-1".into(), &[])),
+            InMemoryStore::new(),
+        );
+        let response = delete_object(
+            State(state.clone()),
+            Path(("bucket".into(), "key".into())),
+            Query(ObjectQuery {
+                upload_id: Some(upload_id.clone()),
+                ..ObjectQuery::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response, StatusCode::NO_CONTENT);
+        assert!(engine.get("bucket", "key").await.is_ok());
+        let mut part = openlake_io::stream::VecByteStream::new(b"new".to_vec());
+        assert!(matches!(
+            engine
+                .upload_part("bucket", "key", &upload_id, 1, 3, &mut part)
+                .await,
+            Err(openlake_storage::StorageError::NoSuchUpload(_))
+        ));
+        assert_eq!(
+            delete_object(
+                State(state),
+                Path(("bucket".into(), "key".into())),
+                Query(ObjectQuery::default()),
+            )
+            .await
+            .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+        assert!(engine.get("bucket", "key").await.is_err());
+    }
 
     fn object_info() -> ObjectInfo {
         ObjectInfo {

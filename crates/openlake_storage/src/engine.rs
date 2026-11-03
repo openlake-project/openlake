@@ -183,6 +183,10 @@ impl Engine {
         format!("part:{bucket}/{key}/{upload_id}/{part_number}")
     }
 
+    fn upload_lock_key(bucket: &str, key: &str, upload_id: &str) -> String {
+        format!("upload:{bucket}/{key}/{upload_id}")
+    }
+
     /// Object key under SYSTEM_BUCKET that holds `bucket`'s meta.
     fn bkt_meta_key(bucket: &str) -> String {
         format!("buckets/{bucket}/.metadata.bin")
@@ -539,6 +543,42 @@ impl Engine {
         Ok(MultipartInit { upload_id })
     }
 
+    /// Remove an unfinished upload without touching any completed object at this key.
+    pub async fn abort_multipart_upload(
+        &self,
+        bucket: &str,
+        key: &str,
+        upload_id: &str,
+    ) -> StorageResult<()> {
+        validate_bucket_name(bucket)?;
+        validate_upload_id(upload_id)?;
+        let object_lock = self
+            .dsync_for_obj(bucket, key)
+            .acquire(&Self::obj_lock_key(bucket, key), LOCK_ACQUIRE_TIMEOUT)
+            .await?;
+        let upload_lock = self
+            .dsync_for_obj(bucket, key)
+            .acquire(
+                &Self::upload_lock_key(bucket, key, upload_id),
+                LOCK_ACQUIRE_TIMEOUT,
+            )
+            .await?;
+        let backends = self.set_backends(bucket, key)?;
+        let session_path = format!("{bucket}/{key}/{upload_id}");
+        read_session_fi(&backends, &session_path, upload_id).await?;
+        object_lock.check()?;
+        upload_lock.check()?;
+        let deletes = backends.iter().map(|b| {
+            let b = b.clone();
+            let path = session_path.clone();
+            async move { b.delete(MULTIPART_VOL, &path, true).await }
+        });
+        require_quorum(join_all(deletes).await, self.cluster.write_quorum(), |e| {
+            matches!(e, IoError::FileNotFound { .. })
+        })
+        .map_err(StorageError::Io)
+    }
+
     pub async fn upload_part(
         &self,
         bucket: &str,
@@ -554,13 +594,14 @@ impl Engine {
             ))));
         }
         validate_bucket_name(bucket)?;
+        validate_upload_id(upload_id)?;
 
         let backends = self.set_backends(bucket, key)?;
         let n = backends.len();
         let quorum = self.cluster.write_quorum();
         let session_path = format!("{bucket}/{key}/{upload_id}");
 
-        let session_fi = read_session_fi(&backends, &session_path).await?;
+        let session_fi = read_session_fi(&backends, &session_path, upload_id).await?;
         let data_dir = session_fi.data_dir.clone();
         if data_dir.is_empty() {
             return Err(StorageError::Io(IoError::InvalidArgument(
@@ -626,6 +667,15 @@ impl Engine {
                 )
                 .await?;
 
+            let upload_lock = self
+                .dsync_for_obj(bucket, key)
+                .acquire(
+                    &Self::upload_lock_key(bucket, key, upload_id),
+                    LOCK_ACQUIRE_TIMEOUT,
+                )
+                .await?;
+            read_session_fi(&backends, &session_path, upload_id).await?;
+
             let cleanups = backends.iter().map(|b| {
                 let b = b.clone();
                 let part = final_part.clone();
@@ -660,6 +710,8 @@ impl Engine {
             require_quorum(join_all(placements).await, n, |_| false)
                 .map_err(map_bucket_or_io(bucket))?;
 
+            upload_lock.check()?;
+
             Ok(part_info)
         }
         .await;
@@ -680,6 +732,7 @@ impl Engine {
         parts: Vec<crate::object::CompletePart>,
     ) -> StorageResult<ObjectInfo> {
         validate_bucket_name(bucket)?;
+        validate_upload_id(upload_id)?;
         if parts.is_empty() {
             return Err(StorageError::Io(IoError::InvalidArgument(
                 "CompleteMultipartUpload requires at least one part".into(),
@@ -698,6 +751,13 @@ impl Engine {
             .dsync_for_obj(bucket, key)
             .acquire(&Self::obj_lock_key(bucket, key), LOCK_ACQUIRE_TIMEOUT)
             .await?;
+        let _upload_lock = self
+            .dsync_for_obj(bucket, key)
+            .acquire(
+                &Self::upload_lock_key(bucket, key, upload_id),
+                LOCK_ACQUIRE_TIMEOUT,
+            )
+            .await?;
 
         let backends = self.set_backends(bucket, key)?;
         let n = backends.len();
@@ -705,7 +765,7 @@ impl Engine {
         let read_quorum = self.cluster.read_quorum().max(1);
         let session_path = format!("{bucket}/{key}/{upload_id}");
 
-        let session_fi = read_session_fi(&backends, &session_path).await?;
+        let session_fi = read_session_fi(&backends, &session_path, upload_id).await?;
         let data_dir = session_fi.data_dir.clone();
         if data_dir.is_empty() {
             return Err(StorageError::Io(IoError::InvalidArgument(
@@ -2521,6 +2581,17 @@ fn format_upload_id(deployment_id: uuid::Uuid) -> String {
     URL_SAFE_NO_PAD.encode(payload.as_bytes())
 }
 
+fn validate_upload_id(upload_id: &str) -> StorageResult<()> {
+    if upload_id.is_empty()
+        || !upload_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(StorageError::NoSuchUpload(upload_id.to_owned()));
+    }
+    Ok(())
+}
+
 async fn drain_inline_payload(
     src: &mut dyn ByteStream,
     payload_len: usize,
@@ -2699,6 +2770,7 @@ where
 async fn read_session_fi(
     backends: &[Rc<dyn StorageBackend>],
     session_path: &str,
+    upload_id: &str,
 ) -> StorageResult<FileInfo> {
     let metas: Vec<openlake_io::IoResult<FileInfo>> = join_all(backends.iter().map(|b| {
         let b = b.clone();
@@ -2709,14 +2781,23 @@ async fn read_session_fi(
 
     let mut valid: Vec<FileInfo> = Vec::with_capacity(metas.len());
     let mut last_err: Option<IoError> = None;
+    let mut missing = 0usize;
     for r in metas {
         match r {
             Ok(fi) => valid.push(fi),
-            Err(e) => last_err = Some(e),
+            Err(e) => {
+                if matches!(e, IoError::FileNotFound { .. }) {
+                    missing += 1;
+                }
+                last_err = Some(e);
+            }
         }
     }
 
     let needed = (backends.len() / 2) + 1;
+    if missing >= needed {
+        return Err(StorageError::NoSuchUpload(upload_id.to_owned()));
+    }
     let key_of = |fi: &FileInfo| {
         (
             fi.data_dir.clone(),
@@ -3853,6 +3934,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[compio::test]
+    async fn abort_multipart_preserves_object_and_removes_only_selected_upload() {
+        let (dirs, e) = eng(3, 3).await;
+        put_bytes(&e, "buk", "k", b"existing object".to_vec(), None).await;
+        let cancelled = e.create_multipart_upload("buk", "k", None).await.unwrap();
+        let other = e.create_multipart_upload("buk", "k", None).await.unwrap();
+
+        let part = b"unfinished part".to_vec();
+        let mut src = VecByteStream::new(part.clone());
+        e.upload_part(
+            "buk",
+            "k",
+            &cancelled.upload_id,
+            1,
+            part.len() as u64,
+            &mut src,
+        )
+        .await
+        .unwrap();
+
+        for d in &dirs {
+            let session = d
+                .path()
+                .join(".openlake.multipart/buk/k")
+                .join(&cancelled.upload_id);
+            assert!(session.join("xl.meta").exists());
+            assert!(session
+                .read_dir()
+                .unwrap()
+                .any(|entry| entry.unwrap().path().is_dir()));
+        }
+
+        e.abort_multipart_upload("buk", "k", &cancelled.upload_id)
+            .await
+            .unwrap();
+        let (_, bytes) = get_bytes(&e, "buk", "k").await;
+        assert_eq!(bytes, b"existing object");
+        for d in &dirs {
+            let root = d.path().join(".openlake.multipart/buk/k");
+            assert!(!root.join(&cancelled.upload_id).exists());
+            assert!(root.join(&other.upload_id).join("xl.meta").exists());
+        }
+
+        let mut src = VecByteStream::new(part.clone());
+        assert!(matches!(
+            e.upload_part(
+                "buk",
+                "k",
+                &cancelled.upload_id,
+                2,
+                part.len() as u64,
+                &mut src
+            )
+            .await,
+            Err(StorageError::NoSuchUpload(_))
+        ));
+        let mut src = VecByteStream::new(part.clone());
+        e.upload_part("buk", "k", &other.upload_id, 1, part.len() as u64, &mut src)
+            .await
+            .unwrap();
     }
 
     /// Test helper: drain a ranged GET and return (window, bytes).

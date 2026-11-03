@@ -17,6 +17,9 @@ pub enum StorageError {
     #[error("object not found: {bucket}/{key}")]
     ObjectNotFound { bucket: String, key: String },
 
+    #[error("multipart upload not found: {0}")]
+    NoSuchUpload(String),
+
     /// The key exists but the requested `version_id` does not. Distinct
     /// from `ObjectNotFound` so the S3 frontend can surface
     /// `NoSuchVersion` (instead of `NoSuchKey`) — clients use the code
