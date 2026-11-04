@@ -84,6 +84,8 @@ impl IntoResponse for AppError {
 fn map_storage(e: &StorageError) -> (StatusCode, String, String) {
     let (status, code) = match e {
         StorageError::ObjectNotFound { .. } => (StatusCode::NOT_FOUND, "NoSuchKey"),
+        StorageError::NoSuchUpload(_) => (StatusCode::NOT_FOUND, "NoSuchUpload"),
+        StorageError::InvalidUploadId(_) => (StatusCode::BAD_REQUEST, "InvalidArgument"),
         StorageError::VersionNotFound { .. } => (StatusCode::NOT_FOUND, "NoSuchVersion"),
         StorageError::BucketNotFound(_) => (StatusCode::NOT_FOUND, "NoSuchBucket"),
         StorageError::BucketAlreadyExists(_) => (StatusCode::CONFLICT, "BucketAlreadyExists"),
