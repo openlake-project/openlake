@@ -2587,7 +2587,7 @@ fn validate_upload_id(upload_id: &str) -> StorageResult<()> {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
-        return Err(StorageError::NoSuchUpload(upload_id.to_owned()));
+        return Err(StorageError::InvalidUploadId(upload_id.to_owned()));
     }
     Ok(())
 }
@@ -3996,6 +3996,42 @@ mod tests {
         e.upload_part("buk", "k", &other.upload_id, 1, part.len() as u64, &mut src)
             .await
             .unwrap();
+    }
+
+    #[compio::test]
+    async fn abort_multipart_distinguishes_invalid_and_missing_upload_ids() {
+        let (dirs, e) = eng(3, 3).await;
+        put_bytes(&e, "buk", "k", b"existing object".to_vec(), None).await;
+        let active = e.create_multipart_upload("buk", "k", None).await.unwrap();
+
+        for (upload_id, invalid) in [("../other", true), ("never-created", false)] {
+            let error = e
+                .abort_multipart_upload("buk", "k", upload_id)
+                .await
+                .expect_err("abort should reject an invalid or missing upload ID");
+            if invalid {
+                assert!(matches!(error, StorageError::InvalidUploadId(ref id) if id == upload_id));
+                assert_eq!(
+                    error.to_string(),
+                    format!("invalid multipart upload ID: {upload_id}")
+                );
+            } else {
+                assert!(matches!(error, StorageError::NoSuchUpload(ref id) if id == upload_id));
+                assert_eq!(
+                    error.to_string(),
+                    format!("multipart upload not found: {upload_id}")
+                );
+            }
+            assert_eq!(get_bytes(&e, "buk", "k").await.1, b"existing object");
+            for d in &dirs {
+                assert!(d
+                    .path()
+                    .join(".openlake.multipart/buk/k")
+                    .join(&active.upload_id)
+                    .join("xl.meta")
+                    .exists());
+            }
+        }
     }
 
     /// Test helper: drain a ranged GET and return (window, bytes).

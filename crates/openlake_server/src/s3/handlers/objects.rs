@@ -1060,6 +1060,39 @@ mod tests {
                 .await,
             Err(openlake_storage::StorageError::NoSuchUpload(_))
         ));
+        let active = engine
+            .create_multipart_upload("bucket", "key", None)
+            .await
+            .unwrap();
+        for (upload_id, status, code) in [
+            ("../other", StatusCode::BAD_REQUEST, "InvalidArgument"),
+            ("never-created", StatusCode::NOT_FOUND, "NoSuchUpload"),
+        ] {
+            let response = delete_object(
+                State(state.clone()),
+                Path(("bucket".into(), "key".into())),
+                Query(ObjectQuery {
+                    upload_id: Some(upload_id.into()),
+                    ..ObjectQuery::default()
+                }),
+            )
+            .await
+            .expect_err("abort should reject an invalid or missing upload ID")
+            .into_response();
+            assert_eq!(response.status(), status);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let xml = String::from_utf8_lossy(&body);
+            assert!(xml.contains(&format!("<Code>{code}</Code>")), "{xml}");
+            assert!(xml.contains(upload_id), "{xml}");
+            assert!(engine.get("bucket", "key").await.is_ok());
+        }
+        let mut part = openlake_io::stream::VecByteStream::new(b"new".to_vec());
+        engine
+            .upload_part("bucket", "key", &active.upload_id, 1, 3, &mut part)
+            .await
+            .unwrap();
         assert_eq!(
             delete_object(
                 State(state),
