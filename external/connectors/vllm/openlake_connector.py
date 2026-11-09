@@ -180,6 +180,15 @@ class OpenLakeConnector(KVConnectorBase_V1, SupportsHMA):
         ), "Cross-layer KV cache is not supported with hybrid models"
         self._worker.register_cross_layers_kv_caches(kv_cache)
 
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        from vllm.distributed.kv_transfer.kv_connector.v1.openlake_adapter import (
+            OpenLakeConnectorMetadata,
+        )
+
+        assert isinstance(kv_connector_metadata, OpenLakeConnectorMetadata)
+        if self._worker is not None:
+            self._worker.handle_preemptions(kv_connector_metadata)
+
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         pass
 

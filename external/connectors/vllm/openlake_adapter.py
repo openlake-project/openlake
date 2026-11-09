@@ -415,6 +415,8 @@ class ReqMeta:
     token_ids: list[int] | None = None
     num_prompt_tokens: int | None = None
     current_event: object | None = None
+    # Assigned by the worker when a save is queued, not by the scheduler.
+    save_generation: int | None = None
 
     @staticmethod
     def from_tracker(
@@ -644,29 +646,56 @@ class KVCacheSendingThread(KVTransferThread):
         self._skip_store_requests: set[str] = set()
         self._saved_offset: dict[str, int] = {}
         self._compression_stopped_requests: set[str] = set()
+        self._save_generations: dict[str, int] = {}
+        self._next_save_generation = 0
+        self._active_save: tuple[str, int] | None = None
+        self._save_idle = threading.Condition(self.done_task_lock)
 
-    def add_stored_request(self, req_id: str) -> None:
+    def add_request(self, req_meta: "ReqMeta") -> None:
+        req_id = req_meta.req_id
         with self.done_task_lock:
+            if req_id not in self._save_generations:
+                self._next_save_generation += 1
+                self._save_generations[req_id] = self._next_save_generation
             self.stored_requests[req_id] = self.stored_requests.get(req_id, 0) + 1
+            # Copy the metadata so re-enqueueing it cannot change an old task's
+            # generation. Admission and pending-count updates are atomic.
+            self.request_queue.put(dataclasses.replace(
+                req_meta, save_generation=self._save_generations[req_id],
+            ))
 
-    def dec_stored_request(self, req_id: str) -> None:
-        with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
+    def _is_current_save(self, req_meta: "ReqMeta") -> bool:
+        # Caller holds done_task_lock (also used by _save_idle).
+        return (req_meta.save_generation is not None
+                and self._save_generations.get(req_meta.req_id)
+                == req_meta.save_generation)
 
     def delete_finished_stored_request(self, req_id: str) -> None:
-        with self.done_task_lock:
-            self.stored_requests.pop(req_id, None)
-            self._skip_store_requests.discard(req_id)
-            self._compression_stopped_requests.discard(req_id)
-            self._saved_offset.pop(req_id, None)
+        self.cancel_requests({req_id})
+
+    def cancel_requests(self, req_ids: set[str]) -> None:
+        with self._save_idle:
+            active = self._active_save
+            for req_id in req_ids:
+                self._save_generations.pop(req_id, None)
+                self.stored_requests.pop(req_id, None)
+                self._skip_store_requests.discard(req_id)
+                self._compression_stopped_requests.discard(req_id)
+                self._saved_offset.pop(req_id, None)
+            # Queued tasks are now invalid. An already-started transfer must
+            # finish while its old GPU blocks are still safe to read.
+            if active is not None and active[0] in req_ids:
+                self._save_idle.wait_for(lambda: self._active_save != active)
 
     def _should_skip_request(self, req_id: str) -> bool:
         with self.done_task_lock:
             return self._store_pressure_active and req_id in self._skip_store_requests
 
-    def _mark_request_skipped_for_pressure(self, req_id: str) -> bool:
+    def _mark_request_skipped_for_pressure(self, req_meta: "ReqMeta") -> bool:
+        req_id = req_meta.req_id
         with self.done_task_lock:
+            if not self._is_current_save(req_meta):
+                return False
             already_skipped = req_id in self._skip_store_requests
             self._store_pressure_active = True
             self._skip_store_requests.add(req_id)
@@ -680,10 +709,10 @@ class KVCacheSendingThread(KVTransferThread):
             self._skip_store_requests.clear()
         return True
 
-    def _record_saved(self, req_id: str, token_len: int) -> None:
+    def _record_saved(self, req_meta: "ReqMeta", token_len: int) -> None:
         with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self._saved_offset[req_id] = token_len
+            if self._is_current_save(req_meta):
+                self._saved_offset[req_meta.req_id] = token_len
 
     def _stored_event(self, entry, req_meta, prev_hash_per_group):
         group, chunk_idx, block_hash = entry
@@ -758,7 +787,7 @@ class KVCacheSendingThread(KVTransferThread):
                         "put_batch: %d/%d compressed keys failed for request %s",
                         len(failed), len(batch_keys), req_id,
                     )
-                    self._mark_request_skipped_for_pressure(req_id)
+                    self._mark_request_skipped_for_pressure(req_meta)
                     return
                 if self.enable_kv_event:
                     stored_events.extend(
@@ -768,13 +797,14 @@ class KVCacheSendingThread(KVTransferThread):
 
             if overflowed:
                 with self.done_task_lock:
-                    self._compression_stopped_requests.add(req_id)
+                    if self._is_current_save(req_meta):
+                        self._compression_stopped_requests.add(req_id)
                 if stored_events:
                     self.update_kv_event(stored_events)
                 return
             completed = end
 
-        self._record_saved(req_id, token_len)
+        self._record_saved(req_meta, token_len)
         if self._clear_store_pressure():
             logger.info("store pressure cleared after a full batch")
         if stored_events:
@@ -786,8 +816,10 @@ class KVCacheSendingThread(KVTransferThread):
         req_id = req_meta.req_id
 
         with self.done_task_lock:
-            live = req_id in self.stored_requests
+            live = self._is_current_save(req_meta)
             compression_stopped = req_id in self._compression_stopped_requests
+            if live:
+                self._active_save = (req_id, req_meta.save_generation)
         if not live:
             self.request_queue.task_done()
             return
@@ -827,14 +859,14 @@ class KVCacheSendingThread(KVTransferThread):
                         group.key_for(block_hash, self.namespaces[group.g_idx])
                     )
             if not keys:
-                self._record_saved(req_id, token_len)
+                self._record_saved(req_meta, token_len)
                 return
             exists_start = time.perf_counter()
             exists = self.client.batch_is_exist(keys)
             self._record_operation("save_exists", exists_start, len(keys))
             missing = [i for i, e in enumerate(exists) if e != 1]
             if not missing:
-                self._record_saved(req_id, token_len)
+                self._record_saved(req_meta, token_len)
                 return
             entries = [entries[i] for i in missing]
             keys = [keys[i] for i in missing]
@@ -884,19 +916,23 @@ class KVCacheSendingThread(KVTransferThread):
                     "put_batch: %d/%d keys failed for request %s",
                     len(failed), len(keys), req_id,
                 )
-                if not self._mark_request_skipped_for_pressure(req_id):
+                if not self._mark_request_skipped_for_pressure(req_meta):
                     logger.warning(
                         "store full; pausing store batches for request %s", req_id
                     )
             else:
-                self._record_saved(req_id, token_len)
+                self._record_saved(req_meta, token_len)
                 if self._clear_store_pressure():
                     logger.info("store pressure cleared after a full batch")
 
             if self.enable_kv_event and stored_events:
                 self.update_kv_event(stored_events)
         finally:
-            self.dec_stored_request(req_id)
+            with self._save_idle:
+                if self._is_current_save(req_meta):
+                    self.stored_requests[req_id] -= 1
+                self._active_save = None
+                self._save_idle.notify_all()
             self.request_queue.task_done()
 
 
@@ -1330,6 +1366,12 @@ class OpenLakeWorker:
             "started %d KV-load receive thread(s)", self.num_recv_threads
         )
 
+    def handle_preemptions(self, meta: OpenLakeConnectorMetadata) -> None:
+        # vLLM calls this before overwriting/reusing any preempted GPU blocks.
+        if self.kv_send_thread is not None and meta.preempted_req_ids:
+            self.kv_send_thread.cancel_requests(meta.preempted_req_ids)
+            self.finished_store_req.difference_update(meta.preempted_req_ids)
+
     def get_finished(self, finished_req_ids: set[str], meta):
         for request in meta.requests:
             if request.load is not None and request.load.can_load:
@@ -1347,7 +1389,6 @@ class OpenLakeWorker:
                 if not request.can_save:
                     continue
                 request.current_event = current_event
-                self.kv_send_thread.add_stored_request(request.req_id)
                 self.kv_send_thread.add_request(request)
 
         done_sending = (
@@ -1374,9 +1415,6 @@ class OpenLakeWorker:
     def _get_and_clear_finished_sending(self, finished_req_ids, meta):
         assert self.kv_send_thread is not None
         finished_sending: set[str] = set()
-
-        for req_id in meta.preempted_req_ids:
-            self.kv_send_thread.delete_finished_stored_request(req_id)
 
         for req_id in list(self.kv_send_thread.stored_requests):
             if (self.kv_send_thread.stored_requests.get(req_id) == 0
