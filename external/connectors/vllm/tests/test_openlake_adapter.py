@@ -17,6 +17,7 @@ import os
 import struct
 import subprocess
 import sys
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -141,6 +142,27 @@ def _install_import_stubs() -> None:
 
     registry.KVCacheSpecRegistry = KVCacheSpecRegistry
 
+    # Import the public connector as well, so its pre-forward hook is covered.
+    base.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {
+        "handle_preemptions": lambda self, metadata: None,
+    })
+    base.KVConnectorRole = type("KVConnectorRole", (), {})
+    base.SupportsHMA = type("SupportsHMA", (), {})
+    kv_events.KVCacheEvent = object
+    kv_events.KVConnectorKVEvents = object
+    kv_events.KVEventAggregator = object
+    interface.KVCacheConfig = object
+    for name, attribute in (
+        ("vllm.config", "VllmConfig"),
+        ("vllm.forward_context", "ForwardContext"),
+        ("vllm.v1.attention.backend", "AttentionMetadata"),
+        ("vllm.v1.core.kv_cache_manager", "KVCacheBlocks"),
+        ("vllm.v1.core.sched.output", "SchedulerOutput"),
+        ("vllm.v1.outputs", "KVConnectorOutput"),
+        ("vllm.v1.request", "Request"),
+    ):
+        setattr(_module(name), attribute, object)
+
 
 _install_import_stubs()
 MODULE_PATH = Path(__file__).parents[1] / "openlake_adapter.py"
@@ -151,6 +173,15 @@ assert SPEC is not None and SPEC.loader is not None
 ADAPTER = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = ADAPTER
 SPEC.loader.exec_module(ADAPTER)
+sys.modules[
+    "vllm.distributed.kv_transfer.kv_connector.v1.openlake_adapter"
+] = ADAPTER
+CONNECTOR_SPEC = importlib.util.spec_from_file_location(
+    "openlake_connector_under_test", MODULE_PATH.with_name("openlake_connector.py")
+)
+assert CONNECTOR_SPEC is not None and CONNECTOR_SPEC.loader is not None
+CONNECTOR = importlib.util.module_from_spec(CONNECTOR_SPEC)
+CONNECTOR_SPEC.loader.exec_module(CONNECTOR)
 
 
 def _parallel(**overrides):
@@ -237,6 +268,7 @@ class OpenLakeRankNamespaceTests(unittest.TestCase):
         )
         sender.done_task_lock = __import__("threading").Lock()
         sender.stored_requests = {"request": 1}
+        sender._save_generations = {"request": 1}
         sender._compression_stopped_requests = set()
         sender._saved_offset = {}
         sender._store_pressure_active = False
@@ -269,7 +301,9 @@ class OpenLakeRankNamespaceTests(unittest.TestCase):
             (group, index, bytes([index])) for index in range(4)
         ]
         keys = [bytes([index]) * ADAPTER.SLOT_HEADER_BYTES for index in range(4)]
-        req_meta = SimpleNamespace(block_ids=([4, 5, 6, 7],))
+        req_meta = SimpleNamespace(
+            req_id="request", block_ids=([4, 5, 6, 7],), save_generation=1,
+        )
 
         sender._put_compressed(entries, keys, req_meta, 64, "request")
 
@@ -774,6 +808,268 @@ class OpenLakeRankNamespaceTests(unittest.TestCase):
             scheduler._gather_exists([block_hash], 16),
             {(0, block_hash), (1, block_hash)},
         )
+
+
+class OpenLakeSavePreemptionTests(unittest.TestCase):
+    def setUp(self):
+        self.writes = []
+        self.memory = {1000: "old-prefix-bytes", 2000: "resumed-prefix-bytes"}
+        group = SimpleNamespace(
+            g_idx=0, block_size=16,
+            process_tokens=lambda token_len, hashes, **kwargs: [
+                (i * 16, (i + 1) * 16, block_hash)
+                for i, block_hash in enumerate(hashes)
+                if kwargs.get("mask_num", 0) < (i + 1) * 16 <= token_len
+            ],
+            key_for=lambda block_hash, _namespace: block_hash,
+        )
+
+        def put(keys, addresses, _sizes):
+            self.writes.extend(
+                (key, self.memory[scatter[0]])
+                for key, scatter in zip(keys, addresses)
+            )
+            return [0] * len(keys)
+
+        self.client = SimpleNamespace(
+            batch_is_exist=Mock(side_effect=lambda keys: [0] * len(keys)),
+            put_batch=Mock(side_effect=put),
+        )
+        self.sender = ADAPTER.KVCacheSendingThread(
+            self.client, [group], 16, 0, [(0, 0, 0, 0)],
+            SimpleNamespace(addrs_for=lambda block: [(1000 + block * 1000, 16)]),
+            SimpleNamespace(lcm_block_size=16, store_mask=lambda *a, **kw: [None]),
+            threading.Event(), [1],
+        )
+        self.worker = ADAPTER.OpenLakeWorker.__new__(ADAPTER.OpenLakeWorker)
+        self.worker.kv_send_thread = self.sender
+        self.worker.kv_recv_threads = []
+        self.worker.load_async = True
+        self.worker.finished_store_req = set()
+
+    def enqueue(self, block=0, *, req_id="request", hashes=None, preempted=()):
+        hashes = hashes or [b"prefix"]
+        request = ADAPTER.ReqMeta(
+            req_id, 16 * len(hashes), ([block] * len(hashes),), hashes,
+            can_save=True, num_prompt_tokens=16 * len(hashes),
+        )
+        meta = ADAPTER.OpenLakeConnectorMetadata({req_id}, set(preempted))
+        meta.add_request(request)
+        with patch.object(ADAPTER.torch.cuda, "Event", return_value=Mock()):
+            self.worker.get_finished(set(), meta)
+        return self.sender.request_queue.get_nowait()
+
+    def finish(self, req_id="request"):
+        meta = ADAPTER.OpenLakeConnectorMetadata(set(), set())
+        return self.worker._get_and_clear_finished_sending({req_id}, meta)
+
+    def test_stale_queued_save_cannot_write_or_decrement_resumed_request(self):
+        old = self.enqueue()
+        self.sender.delete_finished_stored_request("request")
+        self.memory[1000] = "bytes-reused-by-another-request"
+        resumed = self.enqueue(1)
+
+        self.sender._handle_request(old)
+        self.assertEqual(self.writes, [])
+        self.assertEqual(self.sender.stored_requests["request"], 1)
+        self.assertNotIn("request", self.sender._saved_offset)
+        self.sender._handle_request(resumed)
+
+        self.assertEqual(self.writes, [(b"prefix", "resumed-prefix-bytes")])
+        self.assertEqual(self.sender.stored_requests["request"], 0)
+        self.assertEqual(self.finish(), {"request"})
+        self.assertEqual(self.sender.request_queue.unfinished_tasks, 0)
+
+    def test_multiple_stale_chunks_do_not_change_new_generation_counters(self):
+        stale = [self.enqueue() for _ in range(3)]
+        self.sender.delete_finished_stored_request("request")
+        resumed = [self.enqueue(1), self.enqueue(1, hashes=[b"prefix", b"next"])]
+        for request in stale:
+            self.sender._handle_request(request)
+        self.assertEqual(self.sender.stored_requests["request"], 2)
+        self.assertEqual(self.writes, [])
+
+        self.assertEqual(self.finish(), set())
+        for request in resumed:
+            self.sender._handle_request(request)
+        self.assertEqual(self.writes, [
+            (b"prefix", "resumed-prefix-bytes"),
+            (b"next", "resumed-prefix-bytes"),
+        ])
+        self.assertEqual(self.finish(), {"request"})
+        self.assertEqual(self.sender.request_queue.unfinished_tasks, 0)
+
+    def cancel_while_active(self, request, entered, release, *,
+                            should_wait=True, expected_error=None):
+        cancelled = threading.Event()
+        started_cancel = threading.Event()
+        errors = []
+
+        def run_save():
+            try:
+                self.sender._handle_request(request)
+            except Exception as err:
+                errors.append(err)
+
+        def cancel():
+            started_cancel.set()
+            self.worker.handle_preemptions(
+                ADAPTER.OpenLakeConnectorMetadata(set(), {"request"})
+            )
+            cancelled.set()
+
+        transfer = threading.Thread(target=run_save)
+        cancellation = threading.Thread(target=cancel)
+        transfer.start()
+        try:
+            self.assertTrue(entered.wait(3))
+            cancellation.start()
+            self.assertTrue(started_cancel.wait(3))
+            if should_wait:
+                self.assertFalse(cancelled.wait(0.05))
+            else:
+                self.assertTrue(cancelled.wait(3))
+        finally:
+            release.set()
+            transfer.join(3)
+            if cancellation.ident is not None:
+                cancellation.join(3)
+        self.assertFalse(transfer.is_alive())
+        self.assertFalse(cancellation.is_alive())
+        if expected_error is None:
+            self.assertEqual(errors, [])
+        else:
+            self.assertEqual([str(err) for err in errors], [expected_error])
+        self.assertTrue(cancelled.is_set())
+
+    def test_preemption_waits_for_active_gpu_read_before_block_reuse(self):
+        entered = threading.Event()
+        release = threading.Event()
+        old = self.enqueue()
+
+        def synchronize():
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError("test event was not released")
+
+        old.current_event = SimpleNamespace(synchronize=synchronize)
+        self.cancel_while_active(old, entered, release)
+        self.assertEqual(self.writes, [(b"prefix", "old-prefix-bytes")])
+        self.assertNotIn("request", self.sender.stored_requests)
+        self.assertNotIn("request", self.sender._saved_offset)
+        self.memory[1000] = "reused-after-preemption-returned"
+        resumed = self.enqueue(1)
+        self.sender._handle_request(resumed)
+        self.assertEqual(self.writes[-1], (b"prefix", "resumed-prefix-bytes"))
+        self.assertEqual(self.sender.stored_requests["request"], 0)
+
+    def test_active_transfer_failures_release_preemption_waiter(self):
+        normal_put = self.client.put_batch.side_effect
+        for result in ("ok", "store_full", "put_error", "encode_error", "overflow"):
+            with self.subTest(result=result):
+                entered = threading.Event()
+                release = threading.Event()
+                old = self.enqueue()
+
+                def pause():
+                    entered.set()
+                    if not release.wait(3):
+                        raise TimeoutError("test transfer was not released")
+
+                def put(keys, addresses, sizes):
+                    pause()
+                    if result == "put_error":
+                        raise RuntimeError("injected put error")
+                    if result == "store_full":
+                        return [-1] * len(keys)
+                    return normal_put(keys, addresses, sizes)
+
+                def encode(scatters):
+                    pause()
+                    if result == "encode_error":
+                        raise RuntimeError("injected encode error")
+                    return ([s[0][0] for s in scatters], [False] * len(scatters))
+
+                if result in ("encode_error", "overflow"):
+                    self.sender.compression = SimpleNamespace(
+                        max_batch_blocks=1, record_bytes=16, encode=encode,
+                    )
+                    self.client.put_batch.side_effect = normal_put
+                else:
+                    self.sender.compression = None
+                    self.client.put_batch.side_effect = put
+                self.cancel_while_active(
+                    old, entered, release,
+                    expected_error=("injected encode error"
+                                    if result == "encode_error" else None),
+                )
+                self.assertNotIn("request", self.sender.stored_requests)
+                self.assertNotIn("request", self.sender._saved_offset)
+                self.assertNotIn("request", self.sender._skip_store_requests)
+                self.assertNotIn("request", self.sender._compression_stopped_requests)
+                self.sender.compression = None
+                self.client.put_batch.side_effect = normal_put
+                self.sender._handle_request(self.enqueue(1))
+                self.assertEqual(self.sender.stored_requests["request"], 0)
+                self.assertEqual(self.writes[-1], (b"prefix", "resumed-prefix-bytes"))
+                self.assertEqual(self.finish(), {"request"})
+                self.assertEqual(self.sender.request_queue.unfinished_tasks, 0)
+
+    def test_preemption_does_not_wait_for_an_unrelated_active_request(self):
+        entered = threading.Event()
+        release = threading.Event()
+        request = self.enqueue(req_id="other")
+
+        def synchronize():
+            entered.set()
+            if not release.wait(3):
+                raise TimeoutError("test event was not released")
+
+        request.current_event = SimpleNamespace(synchronize=synchronize)
+        self.cancel_while_active(request, entered, release, should_wait=False)
+        self.assertEqual(self.writes, [(b"prefix", "old-prefix-bytes")])
+        self.assertEqual(self.finish("other"), {"other"})
+
+    def test_connector_hook_cancels_before_same_step_resumed_saves_are_queued(self):
+        old = self.enqueue()
+        self.worker.finished_store_req.add("request")
+        connector = CONNECTOR.OpenLakeConnector.__new__(CONNECTOR.OpenLakeConnector)
+        connector._worker = self.worker
+        connector._scheduler = None
+        connector._get_connector_metadata = Mock(
+            side_effect=AssertionError("preemption must use the incoming metadata")
+        )
+        meta = ADAPTER.OpenLakeConnectorMetadata({"request"}, {"request"})
+        connector.handle_preemptions(meta)
+        self.assertNotIn("request", self.worker.finished_store_req)
+        resumed = self.enqueue(1, preempted={"request"})
+        self.sender._handle_request(old)
+        self.assertEqual(self.sender.stored_requests["request"], 1)
+        self.sender._handle_request(resumed)
+        self.assertEqual(self.writes, [(b"prefix", "resumed-prefix-bytes")])
+        self.assertEqual(self.finish(), {"request"})
+
+    def test_preemption_without_sender_is_a_noop(self):
+        self.worker.kv_send_thread = None
+        self.worker.handle_preemptions(
+            ADAPTER.OpenLakeConnectorMetadata(set(), {"request"})
+        )
+
+    def test_stale_compressed_task_never_reads_gpu_memory(self):
+        old = self.enqueue()
+        self.sender.compression = SimpleNamespace(encode=Mock())
+        self.worker.handle_preemptions(
+            ADAPTER.OpenLakeConnectorMetadata(set(), {"request"})
+        )
+        resumed = self.enqueue(1)
+        self.sender._handle_request(old)
+        self.sender.compression.encode.assert_not_called()
+        self.client.batch_is_exist.assert_not_called()
+        self.client.put_batch.assert_not_called()
+        self.assertEqual(self.sender.stored_requests["request"], 1)
+        self.sender.compression = None
+        self.sender._handle_request(resumed)
+        self.assertEqual(self.finish(), {"request"})
 
 
 class OpenLakeSchedulerLookupTests(unittest.TestCase):
