@@ -38,6 +38,8 @@ def _module(name: str) -> types.ModuleType:
 
 def _install_import_stubs() -> None:
     torch = _module("torch")
+    # The connector evaluates Tensor annotations at import time on Python < 3.14.
+    torch.Tensor = type("Tensor", (), {})
     torch.cuda = SimpleNamespace(Event=object)
     torch.bfloat16 = "bfloat16"
     torch.int64 = "int64"
