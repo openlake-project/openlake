@@ -555,6 +555,9 @@ def _group_tp_replication_factors(
     return tuple(factor_for(group.kv_cache_spec) for group in kv_cache_groups)
 
 
+_STOP_TRANSFER = object()
+
+
 class KVTransferThread(threading.Thread):
 
     def __init__(self, client, group_keys, block_size, tp_rank, namespaces, layout,
@@ -613,9 +616,11 @@ class KVTransferThread(threading.Thread):
     def run(self) -> None:
         self.ready_event.set()
         while True:
-            request_data = None
+            request_data = self.request_queue.get()
             try:
-                request_data = self.request_queue.get()
+                if request_data is _STOP_TRANSFER:
+                    self.request_queue.task_done()
+                    return
                 if request_data is None:
                     logger.warning("received a None request")
                     self.request_queue.task_done()
@@ -811,6 +816,12 @@ class KVCacheSendingThread(KVTransferThread):
             self.update_kv_event(stored_events)
 
     def _handle_request(self, req_meta: "ReqMeta"):
+        try:
+            return self._handle_request_inner(req_meta)
+        finally:
+            self.request_queue.task_done()
+
+    def _handle_request_inner(self, req_meta: "ReqMeta"):
         lcm = self.coord.lcm_block_size
         token_len = req_meta.token_len_chunk // lcm * lcm
         req_id = req_meta.req_id
@@ -821,7 +832,6 @@ class KVCacheSendingThread(KVTransferThread):
             if live:
                 self._active_save = (req_id, req_meta.save_generation)
         if not live:
-            self.request_queue.task_done()
             return
 
         try:
@@ -933,7 +943,6 @@ class KVCacheSendingThread(KVTransferThread):
                     self.stored_requests[req_id] -= 1
                 self._active_save = None
                 self._save_idle.notify_all()
-            self.request_queue.task_done()
 
 
 class KVCacheRecvingThread(KVTransferThread):
@@ -1026,6 +1035,12 @@ class KVCacheRecvingThread(KVTransferThread):
             completed = end
 
     def _handle_request(self, req_meta: "ReqMeta"):
+        try:
+            return self._handle_request_inner(req_meta)
+        finally:
+            self.request_queue.task_done()
+
+    def _handle_request_inner(self, req_meta: "ReqMeta"):
         load = req_meta.load
         assert load is not None
         req_id = req_meta.req_id
@@ -1048,7 +1063,6 @@ class KVCacheRecvingThread(KVTransferThread):
                                 )))
         if not entries:
             self.set_finished_request(req_id)
-            self.request_queue.task_done()
             return
         rotation = self.tp_rank % len(entries)
         entries = entries[rotation:] + entries[:rotation]
@@ -1056,7 +1070,6 @@ class KVCacheRecvingThread(KVTransferThread):
         if self.compression is not None:
             self._get_compressed(entries, req_id)
             self.set_finished_request(req_id)
-            self.request_queue.task_done()
             return
 
         key_list = [key for _, key in entries]
@@ -1104,7 +1117,6 @@ class KVCacheRecvingThread(KVTransferThread):
                                    num_failed_keys=len(current_batch_block_ids))
             logger.error("get_batch failed (req=%s): %s", req_id, err)
         self.set_finished_request(req_id)
-        self.request_queue.task_done()
 
 
 class OpenLakeWorker:
@@ -1131,6 +1143,13 @@ class OpenLakeWorker:
         return client_id
 
     def __init__(self, vllm_config, kv_cache_config):
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_started = False
+        self._shutdown_complete = threading.Event()
+        self._client = None
+        self.kv_send_thread: "KVCacheSendingThread | None" = None
+        self.kv_recv_threads: list[KVCacheRecvingThread] = []
+        self.recv_request_queue: queue.Queue = queue.Queue()
         _require_fixed_hash_seed()
         import openlake_client
         from vllm.distributed.parallel_state import (
@@ -1203,9 +1222,6 @@ class OpenLakeWorker:
         self.enable_kv_events = bool(extra.get("openlake_kv_events", False))
         self.layout = GroupLayout()
         self.compression = None
-        self.kv_send_thread: "KVCacheSendingThread | None" = None
-        self.kv_recv_threads: list[KVCacheRecvingThread] = []
-        self.recv_request_queue: queue.Queue = queue.Queue()
         self.finished_store_req: set[str] = set()
         from vllm.distributed.kv_transfer.kv_connector.v1.openlake_metrics import (
             OpenLakeConnectorStats,
@@ -1373,6 +1389,12 @@ class OpenLakeWorker:
             self.finished_store_req.difference_update(meta.preempted_req_ids)
 
     def get_finished(self, finished_req_ids: set[str], meta):
+        with self._shutdown_lock:
+            if self._shutdown_started:
+                return set(), set()
+            return self._get_finished_open(finished_req_ids, meta)
+
+    def _get_finished_open(self, finished_req_ids: set[str], meta):
         for request in meta.requests:
             if request.load is not None and request.load.can_load:
                 self.recv_request_queue.put(request)
@@ -1403,14 +1425,35 @@ class OpenLakeWorker:
         return done_sending, done_recving
 
     def close(self) -> None:
-        client = getattr(self, "_client", None)
-        if client is None:
+        with self._shutdown_lock:
+            if self._shutdown_started:
+                already_started = True
+            else:
+                self._shutdown_started = True
+                already_started = False
+                client = getattr(self, "_client", None)
+                threads = ([self.kv_send_thread] if self.kv_send_thread is not None
+                           else []) + list(self.kv_recv_threads)
+                for thread in threads:
+                    if thread.is_alive():
+                        thread.request_queue.put(_STOP_TRANSFER)
+        if already_started:
+            self._shutdown_complete.wait()
             return
-        self._client = None
+
+        for thread in threads:
+            if thread.is_alive():
+                thread.join()
         try:
-            client.close()
+            if client is not None:
+                client.close()
         except Exception as e:
             logger.warning("openlake: error closing store client: %s", e)
+        finally:
+            self._client = None
+            self.kv_send_thread = None
+            self.kv_recv_threads = []
+            self._shutdown_complete.set()
 
     def _get_and_clear_finished_sending(self, finished_req_ids, meta):
         assert self.kv_send_thread is not None

@@ -14,6 +14,7 @@ import importlib.util
 import logging
 import math
 import os
+import queue
 import struct
 import subprocess
 import sys
@@ -844,6 +845,10 @@ class OpenLakeSavePreemptionTests(unittest.TestCase):
             threading.Event(), [1],
         )
         self.worker = ADAPTER.OpenLakeWorker.__new__(ADAPTER.OpenLakeWorker)
+        self.worker._shutdown_lock = threading.Lock()
+        self.worker._shutdown_started = False
+        self.worker._shutdown_complete = threading.Event()
+        self.worker._client = SimpleNamespace(close=Mock())
         self.worker.kv_send_thread = self.sender
         self.worker.kv_recv_threads = []
         self.worker.load_async = True
@@ -1184,6 +1189,145 @@ class OpenLakeSchedulerLookupTests(unittest.TestCase):
         )
         self.assertEqual(scheduler._loads[request.request_id],
                          ADAPTER.PendingLoad(992, 1008))
+
+
+class OpenLakeWorkerShutdownTests(unittest.TestCase):
+    def _worker(self, *, receivers=1, before_transfer=None):
+        calls = []
+        state_lock = threading.Lock()
+        closed = False
+
+        def transfer(request):
+            nonlocal closed
+            if before_transfer is not None:
+                before_transfer(request)
+            with state_lock:
+                if closed:
+                    raise AssertionError("transfer used the closed client")
+                calls.append(request)
+
+        def close_client():
+            nonlocal closed
+            with state_lock:
+                closed = True
+
+        client = SimpleNamespace(
+            transfer=transfer,
+            close=Mock(side_effect=close_client),
+        )
+
+        class TransferThread(ADAPTER.KVTransferThread):
+            def __init__(self, name, request_queue=None):
+                super().__init__(
+                    client, [], 1, 0, [], None, None, threading.Event(), name,
+                    request_queue=request_queue,
+                )
+
+            def _handle_request(self, request):
+                try:
+                    self.client.transfer(request)
+                finally:
+                    self.request_queue.task_done()
+
+        send_thread = TransferThread("test-save")
+        recv_queue = queue.Queue()
+        recv_threads = [
+            TransferThread(f"test-load-{i}", recv_queue)
+            for i in range(receivers)
+        ]
+        worker = ADAPTER.OpenLakeWorker.__new__(ADAPTER.OpenLakeWorker)
+        worker._client = client
+        worker._shutdown_lock = threading.Lock()
+        worker._shutdown_started = False
+        worker._shutdown_complete = threading.Event()
+        worker.kv_send_thread = send_thread
+        worker.kv_recv_threads = recv_threads
+        worker.recv_request_queue = recv_queue
+        for thread in [send_thread, *recv_threads]:
+            thread.start()
+            self.assertTrue(thread.ready_event.wait(1))
+        return worker, send_thread, recv_threads, client, calls
+
+    def test_idle_and_repeated_shutdown_joins_every_thread(self):
+        worker, sender, receivers, client, _ = self._worker(receivers=3)
+
+        worker.close()
+        worker.close()
+
+        self.assertFalse(sender.is_alive())
+        self.assertTrue(all(not thread.is_alive() for thread in receivers))
+        self.assertEqual(sender.request_queue.unfinished_tasks, 0)
+        self.assertEqual(worker.recv_request_queue.unfinished_tasks, 0)
+        client.close.assert_called_once_with()
+
+    def test_pending_saves_and_loads_finish_before_client_closes(self):
+        save_started = threading.Event()
+        allow_save = threading.Event()
+
+        def before_transfer(request):
+            if request == "save":
+                save_started.set()
+                if not allow_save.wait(2):
+                    raise AssertionError("timed out waiting to finish save")
+
+        worker, sender, receivers, client, calls = self._worker(
+            receivers=3, before_transfer=before_transfer,
+        )
+        sender.add_request("save")
+        self.assertTrue(save_started.wait(1))
+        for i in range(5):
+            worker.recv_request_queue.put(f"load-{i}")
+
+        closing = threading.Thread(target=worker.close, daemon=True)
+        closing.start()
+        repeated_close = threading.Thread(target=worker.close, daemon=True)
+        try:
+            for _ in range(1000):
+                if worker._shutdown_started:
+                    break
+                closing.join(0.001)
+            self.assertTrue(worker._shutdown_started)
+            self.assertEqual(
+                worker.get_finished(set(), SimpleNamespace(requests=[object()])),
+                (set(), set()),
+            )
+            repeated_close.start()
+            closing.join(0.05)
+            self.assertTrue(closing.is_alive())
+            self.assertTrue(repeated_close.is_alive())
+            client.close.assert_not_called()
+        finally:
+            allow_save.set()
+            closing.join(2)
+            if repeated_close.ident is not None:
+                repeated_close.join(2)
+
+        self.assertFalse(closing.is_alive())
+        self.assertFalse(repeated_close.is_alive())
+        self.assertFalse(sender.is_alive())
+        self.assertTrue(all(not thread.is_alive() for thread in receivers))
+        self.assertCountEqual(calls, ["save", *(f"load-{i}" for i in range(5))])
+        self.assertEqual(sender.request_queue.unfinished_tasks, 0)
+        self.assertEqual(worker.recv_request_queue.unfinished_tasks, 0)
+        client.close.assert_called_once_with()
+
+    def test_handler_failure_still_allows_shutdown(self):
+        def before_transfer(request):
+            if request == "bad":
+                raise ValueError("injected transfer failure")
+
+        worker, sender, _, client, calls = self._worker(
+            before_transfer=before_transfer,
+        )
+        with patch.object(ADAPTER.logger, "exception") as log_error:
+            sender.add_request("bad")
+            sender.add_request("good")
+            worker.close()
+
+        self.assertEqual(calls, ["good"])
+        self.assertEqual(sender.request_queue.unfinished_tasks, 0)
+        log_error.assert_called_once()
+        client.close.assert_called_once_with()
 
 
 if __name__ == "__main__":
