@@ -373,7 +373,6 @@ def _prefill_tokens(request) -> list[int]:
     assert request.prompt_token_ids is not None
     return request.prompt_token_ids
 
-
 @dataclass
 class RequestTracker:
     req_id: str
